@@ -5,7 +5,7 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "esp_log.h"
+#include "platform/log.h"
 
 static const char *TAG = "context";
 
@@ -25,7 +25,7 @@ static size_t append_file(char *buf, size_t size, size_t offset, const char *pat
     return offset;
 }
 
-esp_err_t context_build_system_prompt(char *buf, size_t size)
+mimi_err_t context_build_system_prompt(char *buf, size_t size)
 {
     size_t off = 0;
 
@@ -71,13 +71,13 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
 
     /* Long-term memory */
     char mem_buf[4096];
-    if (memory_read_long_term(mem_buf, sizeof(mem_buf)) == ESP_OK && mem_buf[0]) {
+    if (memory_read_long_term(mem_buf, sizeof(mem_buf)) == MIMI_OK && mem_buf[0]) {
         off += snprintf(buf + off, size - off, "\n## Long-term Memory\n\n%s\n", mem_buf);
     }
 
     /* Recent daily notes (last 3 days) */
     char recent_buf[4096];
-    if (memory_read_recent(recent_buf, sizeof(recent_buf), 3) == ESP_OK && recent_buf[0]) {
+    if (memory_read_recent(recent_buf, sizeof(recent_buf), 3) == MIMI_OK && recent_buf[0]) {
         off += snprintf(buf + off, size - off, "\n## Recent Notes\n\n%s\n", recent_buf);
     }
 
@@ -91,6 +91,6 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
             skills_buf);
     }
 
-    ESP_LOGI(TAG, "System prompt built: %d bytes", (int)off);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "System prompt built: %d bytes", (int)off);
+    return MIMI_OK;
 }

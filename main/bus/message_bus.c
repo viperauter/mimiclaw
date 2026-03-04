@@ -1,59 +1,54 @@
 #include "message_bus.h"
 #include "mimi_config.h"
-#include "esp_log.h"
+#include "platform/log.h"
+#include "platform/queue.h"
 #include <string.h>
 
 static const char *TAG = "bus";
 
-static QueueHandle_t s_inbound_queue;
-static QueueHandle_t s_outbound_queue;
+static mimi_queue_t *s_inbound_queue;
+static mimi_queue_t *s_outbound_queue;
 
-esp_err_t message_bus_init(void)
+mimi_err_t message_bus_init(void)
 {
-    s_inbound_queue = xQueueCreate(MIMI_BUS_QUEUE_LEN, sizeof(mimi_msg_t));
-    s_outbound_queue = xQueueCreate(MIMI_BUS_QUEUE_LEN, sizeof(mimi_msg_t));
-
-    if (!s_inbound_queue || !s_outbound_queue) {
-        ESP_LOGE(TAG, "Failed to create message queues");
-        return ESP_ERR_NO_MEM;
+    if (mimi_queue_create(&s_inbound_queue, sizeof(mimi_msg_t), MIMI_BUS_QUEUE_LEN) != MIMI_OK ||
+        mimi_queue_create(&s_outbound_queue, sizeof(mimi_msg_t), MIMI_BUS_QUEUE_LEN) != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to create message queues");
+        return MIMI_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Message bus initialized (queue depth %d)", MIMI_BUS_QUEUE_LEN);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "Message bus initialized (queue depth %d)", MIMI_BUS_QUEUE_LEN);
+    return MIMI_OK;
 }
 
-esp_err_t message_bus_push_inbound(const mimi_msg_t *msg)
+mimi_err_t message_bus_push_inbound(const mimi_msg_t *msg)
 {
-    if (xQueueSend(s_inbound_queue, msg, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(TAG, "Inbound queue full, dropping message");
-        return ESP_ERR_NO_MEM;
+    mimi_err_t e = mimi_queue_send(s_inbound_queue, msg, 1000);
+    if (e != MIMI_OK) {
+        MIMI_LOGW(TAG, "Inbound queue full/blocked, dropping message");
+        return e;
     }
-    return ESP_OK;
+    return MIMI_OK;
 }
 
-esp_err_t message_bus_pop_inbound(mimi_msg_t *msg, uint32_t timeout_ms)
+mimi_err_t message_bus_pop_inbound(mimi_msg_t *msg, uint32_t timeout_ms)
 {
-    TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    if (xQueueReceive(s_inbound_queue, msg, ticks) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    return ESP_OK;
+    mimi_err_t e = mimi_queue_recv(s_inbound_queue, msg, timeout_ms);
+    return e;
 }
 
-esp_err_t message_bus_push_outbound(const mimi_msg_t *msg)
+mimi_err_t message_bus_push_outbound(const mimi_msg_t *msg)
 {
-    if (xQueueSend(s_outbound_queue, msg, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(TAG, "Outbound queue full, dropping message");
-        return ESP_ERR_NO_MEM;
+    mimi_err_t e = mimi_queue_send(s_outbound_queue, msg, 1000);
+    if (e != MIMI_OK) {
+        MIMI_LOGW(TAG, "Outbound queue full/blocked, dropping message");
+        return e;
     }
-    return ESP_OK;
+    return MIMI_OK;
 }
 
-esp_err_t message_bus_pop_outbound(mimi_msg_t *msg, uint32_t timeout_ms)
+mimi_err_t message_bus_pop_outbound(mimi_msg_t *msg, uint32_t timeout_ms)
 {
-    TickType_t ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    if (xQueueReceive(s_outbound_queue, msg, ticks) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    return ESP_OK;
+    mimi_err_t e = mimi_queue_recv(s_outbound_queue, msg, timeout_ms);
+    return e;
 }

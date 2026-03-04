@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-static const char *TAG = "llm_posix";
+static const char *TAG = "llm";
 
 #define LLM_API_KEY_MAX_LEN 320
 #define LLM_MODEL_MAX_LEN   64
@@ -93,7 +93,7 @@ static const char *llm_api_url(void)
     return MIMI_LLM_API_URL;
 }
 
-/* ── Init & setters (POSIX: in-memory only) ───────────────────── */
+/* ── Init & setters (HTTP-based, no NVS) ──────────────────────── */
 
 mimi_err_t llm_proxy_init(void)
 {
@@ -118,7 +118,7 @@ mimi_err_t llm_proxy_init(void)
 mimi_err_t llm_set_api_key(const char *api_key)
 {
     safe_copy(s_api_key, sizeof(s_api_key), api_key);
-    MIMI_LOGI(TAG, "API key updated (POSIX, not persisted)");
+    MIMI_LOGI(TAG, "API key updated (not persisted)");
     return MIMI_OK;
 }
 
@@ -136,7 +136,7 @@ mimi_err_t llm_set_provider(const char *provider)
     return MIMI_OK;
 }
 
-/* ── Public: chat with tools (non-streaming) ──────────────────── */
+/* ── Response lifecycle ───────────────────────────────────────── */
 
 void llm_response_free(llm_response_t *resp)
 {
@@ -153,7 +153,7 @@ void llm_response_free(llm_response_t *resp)
     resp->tool_use = false;
 }
 
-/* Helpers copied from ESP implementation, trimmed for POSIX HTTP */
+/* Helpers copied from ESP implementation, trimmed for HTTP */
 static cJSON *convert_tools_openai(const char *tools_json);
 static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages);
 
@@ -208,7 +208,6 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
 
     llm_log_payload("LLM tools request", post_data);
 
-    /* Build HTTP request */
     char headers[LLM_API_KEY_MAX_LEN + 256];
     if (provider_is_openai() || provider_is_openrouter()) {
         char auth[LLM_API_KEY_MAX_LEN + 16];
@@ -259,7 +258,6 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
         return MIMI_ERR_FAIL;
     }
 
-    /* Parsing logic largely mirrors original ESP implementation */
     if (provider_is_openai() || provider_is_openrouter()) {
         cJSON *choices = cJSON_GetObjectItem(root, "choices");
         cJSON *choice0 = choices && cJSON_IsArray(choices) ? cJSON_GetArrayItem(choices, 0) : NULL;
@@ -278,17 +276,6 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
                     if (resp->text) {
                         memcpy(resp->text, content->valuestring, tlen);
                         resp->text_len = tlen;
-                    }
-                } else {
-                    /* OpenRouter (and some providers) may put text in non-standard fields like \"reasoning\". */
-                    cJSON *reasoning = cJSON_GetObjectItem(message, "reasoning");
-                    if (reasoning && cJSON_IsString(reasoning)) {
-                        size_t tlen = strlen(reasoning->valuestring);
-                        resp->text = calloc(1, tlen + 1);
-                        if (resp->text) {
-                            memcpy(resp->text, reasoning->valuestring, tlen);
-                            resp->text_len = tlen;
-                        }
                     }
                 }
 

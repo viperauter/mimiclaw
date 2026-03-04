@@ -4,19 +4,20 @@
 
 #include <string.h>
 #include <time.h>
-#include "esp_log.h"
+#include <stdio.h>
+#include "platform/log.h"
 #include "cJSON.h"
 
 static const char *TAG = "tool_cron";
 
 /* ── cron_add ─────────────────────────────────────────────────── */
 
-esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_cron_add_execute(const char *input_json, char *output, size_t output_size)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(root, "name"));
@@ -26,13 +27,13 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
     if (!name || !schedule_type || !message) {
         snprintf(output, output_size, "Error: missing required fields (name, schedule_type, message)");
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     if (strlen(message) == 0) {
         snprintf(output, output_size, "Error: message must not be empty");
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     cron_job_t job;
@@ -51,7 +52,7 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
         snprintf(output, output_size,
                  "Error: cron_add with channel='telegram' requires a valid chat_id");
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     if (strcmp(schedule_type, "every") == 0) {
@@ -60,7 +61,7 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
         if (!interval || !cJSON_IsNumber(interval) || interval->valuedouble <= 0) {
             snprintf(output, output_size, "Error: 'every' schedule requires positive 'interval_s'");
             cJSON_Delete(root);
-            return ESP_ERR_INVALID_ARG;
+            return MIMI_ERR_INVALID_ARG;
         }
         job.interval_s = (uint32_t)interval->valuedouble;
         job.delete_after_run = false;
@@ -70,7 +71,7 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
         if (!at_epoch || !cJSON_IsNumber(at_epoch)) {
             snprintf(output, output_size, "Error: 'at' schedule requires 'at_epoch' (unix timestamp)");
             cJSON_Delete(root);
-            return ESP_ERR_INVALID_ARG;
+            return MIMI_ERR_INVALID_ARG;
         }
         job.at_epoch = (int64_t)at_epoch->valuedouble;
 
@@ -80,7 +81,7 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
             snprintf(output, output_size, "Error: at_epoch %lld is in the past (now=%lld)",
                      (long long)job.at_epoch, (long long)now);
             cJSON_Delete(root);
-            return ESP_ERR_INVALID_ARG;
+            return MIMI_ERR_INVALID_ARG;
         }
 
         /* Default: delete one-shot jobs after run */
@@ -89,14 +90,14 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
     } else {
         snprintf(output, output_size, "Error: schedule_type must be 'every' or 'at'");
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     cJSON_Delete(root);
 
-    esp_err_t err = cron_add_job(&job);
-    if (err != ESP_OK) {
-        snprintf(output, output_size, "Error: failed to add job (%s)", esp_err_to_name(err));
+    mimi_err_t err = cron_add_job(&job);
+    if (err != MIMI_OK) {
+        snprintf(output, output_size, "Error: failed to add job (%s)", mimi_err_to_name(err));
         return err;
     }
 
@@ -112,13 +113,13 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
                  job.delete_after_run ? " Will be deleted after firing." : "");
     }
 
-    ESP_LOGI(TAG, "cron_add: %s", output);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "cron_add: %s", output);
+    return MIMI_OK;
 }
 
 /* ── cron_list ────────────────────────────────────────────────── */
 
-esp_err_t tool_cron_list_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_cron_list_execute(const char *input_json, char *output, size_t output_size)
 {
     (void)input_json;
 
@@ -128,7 +129,7 @@ esp_err_t tool_cron_list_execute(const char *input_json, char *output, size_t ou
 
     if (count == 0) {
         snprintf(output, output_size, "No cron jobs scheduled.");
-        return ESP_OK;
+        return MIMI_OK;
     }
 
     size_t off = 0;
@@ -158,41 +159,41 @@ esp_err_t tool_cron_list_execute(const char *input_json, char *output, size_t ou
         }
     }
 
-    ESP_LOGI(TAG, "cron_list: %d jobs", count);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "cron_list: %d jobs", count);
+    return MIMI_OK;
 }
 
 /* ── cron_remove ──────────────────────────────────────────────── */
 
-esp_err_t tool_cron_remove_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_cron_remove_execute(const char *input_json, char *output, size_t output_size)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     const char *job_id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "job_id"));
     if (!job_id || strlen(job_id) == 0) {
         snprintf(output, output_size, "Error: missing 'job_id' field");
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     char job_id_copy[16] = {0};
     strncpy(job_id_copy, job_id, sizeof(job_id_copy) - 1);
 
-    esp_err_t err = cron_remove_job(job_id_copy);
+    mimi_err_t err = cron_remove_job(job_id_copy);
     cJSON_Delete(root);
 
-    if (err == ESP_OK) {
+    if (err == MIMI_OK) {
         snprintf(output, output_size, "OK: Removed cron job %s", job_id_copy);
-    } else if (err == ESP_ERR_NOT_FOUND) {
+    } else if (err == MIMI_ERR_NOT_FOUND) {
         snprintf(output, output_size, "Error: job '%s' not found", job_id_copy);
     } else {
-        snprintf(output, output_size, "Error: failed to remove job (%s)", esp_err_to_name(err));
+        snprintf(output, output_size, "Error: failed to remove job (%s)", mimi_err_to_name(err));
     }
 
-    ESP_LOGI(TAG, "cron_remove: %s -> %s", job_id_copy, esp_err_to_name(err));
+    MIMI_LOGI(TAG, "cron_remove: %s -> %s", job_id_copy, mimi_err_to_name(err));
     return err;
 }

@@ -6,10 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_random.h"
+#include "platform/log.h"
+#include "platform/random.h"
+#include "mongoose.h"
 #include "cJSON.h"
 
 static const char *TAG = "cron";
@@ -18,9 +17,10 @@ static const char *TAG = "cron";
 
 static cron_job_t s_jobs[MAX_CRON_JOBS];
 static int s_job_count = 0;
-static TaskHandle_t s_cron_task = NULL;
+static struct mg_mgr *s_mgr = NULL;
+static struct mg_timer *s_timer = NULL;
 
-static esp_err_t cron_save_jobs(void);
+static mimi_err_t cron_save_jobs(void);
 
 static bool cron_sanitize_destination(cron_job_t *job)
 {
@@ -36,7 +36,7 @@ static bool cron_sanitize_destination(cron_job_t *job)
 
     if (strcmp(job->channel, MIMI_CHAN_TELEGRAM) == 0) {
         if (job->chat_id[0] == '\0' || strcmp(job->chat_id, "cron") == 0) {
-            ESP_LOGW(TAG, "Cron job %s has invalid telegram chat_id, fallback to system:cron",
+            MIMI_LOGW(TAG, "Cron job %s has invalid telegram chat_id, fallback to system:cron",
                      job->id[0] ? job->id : "<new>");
             strncpy(job->channel, MIMI_CHAN_SYSTEM, sizeof(job->channel) - 1);
             strncpy(job->chat_id, "cron", sizeof(job->chat_id) - 1);
@@ -54,17 +54,17 @@ static bool cron_sanitize_destination(cron_job_t *job)
 
 static void cron_generate_id(char *id_buf)
 {
-    uint32_t r = esp_random();
+    uint32_t r = mimi_random_u32();
     snprintf(id_buf, 9, "%08x", (unsigned int)r);
 }
 
-static esp_err_t cron_load_jobs(void)
+static mimi_err_t cron_load_jobs(void)
 {
     FILE *f = fopen(MIMI_CRON_FILE, "r");
     if (!f) {
-        ESP_LOGI(TAG, "No cron file found, starting fresh");
+        MIMI_LOGI(TAG, "No cron file found, starting fresh");
         s_job_count = 0;
-        return ESP_OK;
+        return MIMI_OK;
     }
 
     /* Read entire file */
@@ -73,16 +73,16 @@ static esp_err_t cron_load_jobs(void)
     fseek(f, 0, SEEK_SET);
 
     if (fsize <= 0 || fsize > 8192) {
-        ESP_LOGW(TAG, "Cron file invalid size: %ld", fsize);
+        MIMI_LOGW(TAG, "Cron file invalid size: %ld", fsize);
         fclose(f);
         s_job_count = 0;
-        return ESP_OK;
+        return MIMI_OK;
     }
 
     char *buf = malloc(fsize + 1);
     if (!buf) {
         fclose(f);
-        return ESP_ERR_NO_MEM;
+        return MIMI_ERR_NO_MEM;
     }
 
     size_t n = fread(buf, 1, fsize, f);
@@ -94,16 +94,16 @@ static esp_err_t cron_load_jobs(void)
     free(buf);
 
     if (!root) {
-        ESP_LOGW(TAG, "Failed to parse cron JSON");
+        MIMI_LOGW(TAG, "Failed to parse cron JSON");
         s_job_count = 0;
-        return ESP_OK;
+        return MIMI_OK;
     }
 
     cJSON *jobs_arr = cJSON_GetObjectItem(root, "jobs");
     if (!jobs_arr || !cJSON_IsArray(jobs_arr)) {
         cJSON_Delete(root);
         s_job_count = 0;
-        return ESP_OK;
+        return MIMI_OK;
     }
 
     s_job_count = 0;
@@ -170,11 +170,11 @@ static esp_err_t cron_load_jobs(void)
     if (repaired) {
         cron_save_jobs();
     }
-    ESP_LOGI(TAG, "Loaded %d cron jobs", s_job_count);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "Loaded %d cron jobs", s_job_count);
+    return MIMI_OK;
 }
 
-static esp_err_t cron_save_jobs(void)
+static mimi_err_t cron_save_jobs(void)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON *jobs_arr = cJSON_CreateArray();
@@ -211,15 +211,15 @@ static esp_err_t cron_save_jobs(void)
     cJSON_Delete(root);
 
     if (!json_str) {
-        ESP_LOGE(TAG, "Failed to serialize cron jobs");
-        return ESP_ERR_NO_MEM;
+        MIMI_LOGE(TAG, "Failed to serialize cron jobs");
+        return MIMI_ERR_NO_MEM;
     }
 
     FILE *f = fopen(MIMI_CRON_FILE, "w");
     if (!f) {
-        ESP_LOGE(TAG, "Failed to open %s for writing", MIMI_CRON_FILE);
+        MIMI_LOGE(TAG, "Failed to open %s for writing", MIMI_CRON_FILE);
         free(json_str);
-        return ESP_FAIL;
+        return MIMI_ERR_IO;
     }
 
     size_t len = strlen(json_str);
@@ -228,12 +228,12 @@ static esp_err_t cron_save_jobs(void)
     free(json_str);
 
     if (written != len) {
-        ESP_LOGE(TAG, "Cron save incomplete: %d/%d bytes", (int)written, (int)len);
-        return ESP_FAIL;
+        MIMI_LOGE(TAG, "Cron save incomplete: %d/%d bytes", (int)written, (int)len);
+        return MIMI_ERR_IO;
     }
 
-    ESP_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, MIMI_CRON_FILE);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, MIMI_CRON_FILE);
+    return MIMI_OK;
 }
 
 /* ── Due-job processing ───────────────────────────────────────── */
@@ -251,7 +251,7 @@ static void cron_process_due_jobs(void)
         if (job->next_run > now) continue;
 
         /* Job is due — fire it */
-        ESP_LOGI(TAG, "Cron job firing: %s (%s)", job->name, job->id);
+        MIMI_LOGI(TAG, "Cron job firing: %s (%s)", job->name, job->id);
 
         /* Push message to inbound queue */
         mimi_msg_t msg;
@@ -261,9 +261,9 @@ static void cron_process_due_jobs(void)
         msg.content = strdup(job->message);
 
         if (msg.content) {
-            esp_err_t err = message_bus_push_inbound(&msg);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to push cron message: %s", esp_err_to_name(err));
+            mimi_err_t err = message_bus_push_inbound(&msg);
+            if (err != MIMI_OK) {
+                MIMI_LOGW(TAG, "Failed to push cron message: %s", mimi_err_to_name(err));
                 free(msg.content);
             }
         }
@@ -275,7 +275,7 @@ static void cron_process_due_jobs(void)
             /* One-shot: disable or delete */
             if (job->delete_after_run) {
                 /* Remove by shifting array */
-                ESP_LOGI(TAG, "Deleting one-shot job: %s", job->name);
+                MIMI_LOGI(TAG, "Deleting one-shot job: %s", job->name);
                 for (int j = i; j < s_job_count - 1; j++) {
                     s_jobs[j] = s_jobs[j + 1];
                 }
@@ -301,11 +301,7 @@ static void cron_process_due_jobs(void)
 static void cron_task_main(void *arg)
 {
     (void)arg;
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(MIMI_CRON_CHECK_INTERVAL_MS));
-        cron_process_due_jobs();
-    }
+    cron_process_due_jobs();
 }
 
 /* ── Compute initial next_run for a new job ───────────────────── */
@@ -329,16 +325,20 @@ static void compute_initial_next_run(cron_job_t *job)
 
 /* ── Public API ───────────────────────────────────────────────── */
 
-esp_err_t cron_service_init(void)
+mimi_err_t cron_service_init(void)
 {
     return cron_load_jobs();
 }
 
-esp_err_t cron_service_start(void)
+mimi_err_t cron_service_start(void)
 {
-    if (s_cron_task) {
-        ESP_LOGW(TAG, "Cron task already running");
-        return ESP_OK;
+    if (!s_mgr) {
+        MIMI_LOGW(TAG, "Cron start requires mg_mgr (call cron_service_set_mgr first)");
+        return MIMI_ERR_INVALID_STATE;
+    }
+    if (s_timer) {
+        MIMI_LOGW(TAG, "Cron timer already running");
+        return MIMI_OK;
     }
 
     /* Recompute next_run for all enabled jobs that don't have one */
@@ -354,38 +354,28 @@ esp_err_t cron_service_start(void)
         }
     }
 
-    BaseType_t ok = xTaskCreate(
-        cron_task_main,
-        "cron",
-        4096,
-        NULL,
-        4,
-        &s_cron_task
-    );
-    if (ok != pdPASS || !s_cron_task) {
-        ESP_LOGE(TAG, "Failed to create cron task");
-        return ESP_FAIL;
-    }
+    s_timer = mg_timer_add(s_mgr, MIMI_CRON_CHECK_INTERVAL_MS, MG_TIMER_REPEAT, cron_task_main, NULL);
+    if (!s_timer) return MIMI_ERR_NO_MEM;
 
-    ESP_LOGI(TAG, "Cron service started (%d jobs, check every %ds)",
+    MIMI_LOGI(TAG, "Cron service started (%d jobs, check every %ds)",
              s_job_count, MIMI_CRON_CHECK_INTERVAL_MS / 1000);
-    return ESP_OK;
+    return MIMI_OK;
 }
 
 void cron_service_stop(void)
 {
-    if (s_cron_task) {
-        vTaskDelete(s_cron_task);
-        s_cron_task = NULL;
-        ESP_LOGI(TAG, "Cron service stopped");
+    if (s_mgr && s_timer) {
+        mg_timer_free(&s_mgr->timers, s_timer);
+        s_timer = NULL;
+        MIMI_LOGI(TAG, "Cron service stopped");
     }
 }
 
-esp_err_t cron_add_job(cron_job_t *job)
+mimi_err_t cron_add_job(cron_job_t *job)
 {
     if (s_job_count >= MAX_CRON_JOBS) {
-        ESP_LOGW(TAG, "Max cron jobs reached (%d)", MAX_CRON_JOBS);
-        return ESP_ERR_NO_MEM;
+        MIMI_LOGW(TAG, "Max cron jobs reached (%d)", MAX_CRON_JOBS);
+        return MIMI_ERR_NO_MEM;
     }
 
     /* Generate ID */
@@ -405,18 +395,18 @@ esp_err_t cron_add_job(cron_job_t *job)
 
     cron_save_jobs();
 
-    ESP_LOGI(TAG, "Added cron job: %s (%s) kind=%s next_run=%lld",
+    MIMI_LOGI(TAG, "Added cron job: %s (%s) kind=%s next_run=%lld",
              job->name, job->id,
              job->kind == CRON_KIND_EVERY ? "every" : "at",
              (long long)job->next_run);
-    return ESP_OK;
+    return MIMI_OK;
 }
 
-esp_err_t cron_remove_job(const char *job_id)
+mimi_err_t cron_remove_job(const char *job_id)
 {
     for (int i = 0; i < s_job_count; i++) {
         if (strcmp(s_jobs[i].id, job_id) == 0) {
-            ESP_LOGI(TAG, "Removing cron job: %s (%s)", s_jobs[i].name, job_id);
+            MIMI_LOGI(TAG, "Removing cron job: %s (%s)", s_jobs[i].name, job_id);
 
             /* Shift remaining jobs down */
             for (int j = i; j < s_job_count - 1; j++) {
@@ -425,16 +415,21 @@ esp_err_t cron_remove_job(const char *job_id)
             s_job_count--;
 
             cron_save_jobs();
-            return ESP_OK;
+            return MIMI_OK;
         }
     }
 
-    ESP_LOGW(TAG, "Cron job not found: %s", job_id);
-    return ESP_ERR_NOT_FOUND;
+    MIMI_LOGW(TAG, "Cron job not found: %s", job_id);
+    return MIMI_ERR_NOT_FOUND;
 }
 
 void cron_list_jobs(const cron_job_t **jobs, int *count)
 {
     *jobs = s_jobs;
     *count = s_job_count;
+}
+
+void cron_service_set_mgr(struct mg_mgr *mgr)
+{
+    s_mgr = mgr;
 }

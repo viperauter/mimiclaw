@@ -4,7 +4,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
-#include "esp_log.h"
+#include "platform/log.h"
+#include "platform/fs.h"
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#endif
 
 static const char *TAG = "skills";
 
@@ -105,39 +112,58 @@ static const builtin_skill_t s_builtins[] = {
 
 static void install_builtin(const builtin_skill_t *skill)
 {
-    char path[64];
-    snprintf(path, sizeof(path), "%s%s.md", MIMI_SKILLS_PREFIX, skill->filename);
+    char virt[128];
+    snprintf(virt, sizeof(virt), "%s%s.md", MIMI_SKILLS_PREFIX, skill->filename);
+    char path[256];
+    mimi_fs_resolve_path(virt, path, sizeof(path));
 
     /* Check if already exists */
     FILE *f = fopen(path, "r");
     if (f) {
         fclose(f);
-        ESP_LOGD(TAG, "Skill exists: %s", path);
+        MIMI_LOGD(TAG, "Skill exists: %s", path);
         return;
     }
+
+#if defined(__unix__) || defined(__APPLE__)
+    /* Ensure parent directories exist on POSIX (e.g. ./spiffs/skills/). */
+    {
+        char tmp[256];
+        snprintf(tmp, sizeof(tmp), "%s", path);
+        for (char *p = tmp + 1; *p; p++) {
+            if (*p != '/') continue;
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+                /* best-effort; will fail later on fopen if truly fatal */
+                MIMI_LOGD(TAG, "mkdir failed: %s", tmp);
+            }
+            *p = '/';
+        }
+    }
+#endif
 
     /* Write built-in skill */
     f = fopen(path, "w");
     if (!f) {
-        ESP_LOGE(TAG, "Cannot write skill: %s", path);
+        MIMI_LOGE(TAG, "Cannot write skill: %s", path);
         return;
     }
 
     fputs(skill->content, f);
     fclose(f);
-    ESP_LOGI(TAG, "Installed built-in skill: %s", path);
+    MIMI_LOGI(TAG, "Installed built-in skill: %s", path);
 }
 
-esp_err_t skill_loader_init(void)
+mimi_err_t skill_loader_init(void)
 {
-    ESP_LOGI(TAG, "Initializing skills system");
+    MIMI_LOGI(TAG, "Initializing skills system");
 
     for (size_t i = 0; i < NUM_BUILTINS; i++) {
         install_builtin(&s_builtins[i]);
     }
 
-    ESP_LOGI(TAG, "Skills system ready (%d built-in)", (int)NUM_BUILTINS);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "Skills system ready (%d built-in)", (int)NUM_BUILTINS);
+    return MIMI_OK;
 }
 
 /* ── Build skills summary for system prompt ──────────────────── */
@@ -202,9 +228,11 @@ static void extract_description(FILE *f, char *out, size_t out_size)
 
 size_t skill_loader_build_summary(char *buf, size_t size)
 {
-    DIR *dir = opendir(MIMI_SPIFFS_BASE);
+    char base_path[256];
+    mimi_fs_resolve_path(MIMI_SPIFFS_BASE, base_path, sizeof(base_path));
+    DIR *dir = opendir(base_path);
     if (!dir) {
-        ESP_LOGW(TAG, "Cannot open SPIFFS for skill enumeration");
+        MIMI_LOGW(TAG, "Cannot open skills base for enumeration");
         buf[0] = '\0';
         return 0;
     }
@@ -227,8 +255,10 @@ size_t skill_loader_build_summary(char *buf, size_t size)
         if (strcmp(name + name_len - 3, ".md") != 0) continue;
 
         /* Build full path */
+        char virt[296];
+        snprintf(virt, sizeof(virt), "%s/%s", MIMI_SPIFFS_BASE, name);
         char full_path[296];
-        snprintf(full_path, sizeof(full_path), "%s/%s", MIMI_SPIFFS_BASE, name);
+        mimi_fs_resolve_path(virt, full_path, sizeof(full_path));
 
         FILE *f = fopen(full_path, "r");
         if (!f) continue;
@@ -257,6 +287,6 @@ size_t skill_loader_build_summary(char *buf, size_t size)
     closedir(dir);
 
     buf[off] = '\0';
-    ESP_LOGI(TAG, "Skills summary: %d bytes", (int)off);
+    MIMI_LOGI(TAG, "Skills summary: %d bytes", (int)off);
     return off;
 }

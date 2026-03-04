@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
+#include "platform/mimi_err.h"
 #include "cJSON.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -10,22 +10,22 @@
 /**
  * Initialize the LLM proxy. Reads API key and model from build-time secrets, then NVS.
  */
-esp_err_t llm_proxy_init(void);
+mimi_err_t llm_proxy_init(void);
 
 /**
  * Save the LLM API key to NVS.
  */
-esp_err_t llm_set_api_key(const char *api_key);
+mimi_err_t llm_set_api_key(const char *api_key);
 
 /**
  * Save the LLM provider to NVS. (e.g. "anthropic", "openai")
  */
-esp_err_t llm_set_provider(const char *provider);
+mimi_err_t llm_set_provider(const char *provider);
 
 /**
  * Save the model identifier to NVS.
  */
-esp_err_t llm_set_model(const char *model);
+mimi_err_t llm_set_model(const char *model);
 
 /* ── Tool Use Support ──────────────────────────────────────────── */
 
@@ -55,7 +55,7 @@ void llm_response_free(llm_response_t *resp);
  * @param resp           Output: structured response with text and tool calls
  * @return ESP_OK on success
  */
-esp_err_t llm_chat_tools(const char *system_prompt,
-                         cJSON *messages,
-                         const char *tools_json,
-                         llm_response_t *resp);
+mimi_err_t llm_chat_tools(const char *system_prompt,
+                          cJSON *messages,
+                          const char *tools_json,
+                          llm_response_t *resp);

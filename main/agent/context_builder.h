@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
+#include "platform/mimi_err.h"
 #include <stddef.h>
 
 /**
@@ -10,5 +10,5 @@
  * @param buf   Output buffer (caller allocates, recommend MIMI_CONTEXT_BUF_SIZE)
  * @param size  Buffer size
  */
-esp_err_t context_build_system_prompt(char *buf, size_t size);
+mimi_err_t context_build_system_prompt(char *buf, size_t size);
 

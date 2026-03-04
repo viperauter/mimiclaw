@@ -1,184 +1,163 @@
-#include "ws_server.h"
+#include "gateway/ws_server.h"
 #include "mimi_config.h"
 #include "bus/message_bus.h"
+#include "platform/log.h"
+
+#include "mongoose.h"
+#include "cJSON.h"
 
 #include <string.h>
 #include <stdlib.h>
-#include "esp_log.h"
-#include "esp_http_server.h"
-#include "cJSON.h"
 
-static const char *TAG = "ws";
+static const char *TAG = "ws_posix";
 
-static httpd_handle_t s_server = NULL;
-
-/* Simple client tracking */
-typedef struct {
-    int fd;
+typedef struct ws_client {
+    struct mg_connection *c;
     char chat_id[32];
-    bool active;
+    struct ws_client *next;
 } ws_client_t;
 
-static ws_client_t s_clients[MIMI_WS_MAX_CLIENTS];
+static struct mg_mgr *s_mgr = NULL;
+static ws_client_t *s_clients = NULL;
 
-static ws_client_t *find_client_by_fd(int fd)
+void ws_server_set_mgr(struct mg_mgr *mgr)
 {
-    for (int i = 0; i < MIMI_WS_MAX_CLIENTS; i++) {
-        if (s_clients[i].active && s_clients[i].fd == fd) {
-            return &s_clients[i];
-        }
-    }
-    return NULL;
+    s_mgr = mgr;
 }
 
 static ws_client_t *find_client_by_chat_id(const char *chat_id)
 {
-    for (int i = 0; i < MIMI_WS_MAX_CLIENTS; i++) {
-        if (s_clients[i].active && strcmp(s_clients[i].chat_id, chat_id) == 0) {
-            return &s_clients[i];
-        }
+    for (ws_client_t *p = s_clients; p; p = p->next) {
+        if (strcmp(p->chat_id, chat_id) == 0) return p;
     }
     return NULL;
 }
 
-static ws_client_t *add_client(int fd)
+static ws_client_t *add_client(struct mg_connection *c)
 {
-    for (int i = 0; i < MIMI_WS_MAX_CLIENTS; i++) {
-        if (!s_clients[i].active) {
-            s_clients[i].fd = fd;
-            snprintf(s_clients[i].chat_id, sizeof(s_clients[i].chat_id), "ws_%d", fd);
-            s_clients[i].active = true;
-            ESP_LOGI(TAG, "Client connected: %s (fd=%d)", s_clients[i].chat_id, fd);
-            return &s_clients[i];
-        }
-    }
-    ESP_LOGW(TAG, "Max clients reached, rejecting fd=%d", fd);
-    return NULL;
+    ws_client_t *cl = (ws_client_t *)calloc(1, sizeof(ws_client_t));
+    if (!cl) return NULL;
+    cl->c = c;
+    snprintf(cl->chat_id, sizeof(cl->chat_id), "ws_%p", (void *)c);
+    cl->next = s_clients;
+    s_clients = cl;
+    MIMI_LOGI(TAG, "Client connected: %s", cl->chat_id);
+    return cl;
 }
 
-static void remove_client(int fd)
+static void remove_client(struct mg_connection *c)
 {
-    for (int i = 0; i < MIMI_WS_MAX_CLIENTS; i++) {
-        if (s_clients[i].active && s_clients[i].fd == fd) {
-            ESP_LOGI(TAG, "Client disconnected: %s", s_clients[i].chat_id);
-            s_clients[i].active = false;
+    ws_client_t **pp = &s_clients;
+    while (*pp) {
+        if ((*pp)->c == c) {
+            ws_client_t *tmp = *pp;
+            *pp = (*pp)->next;
+            MIMI_LOGI(TAG, "Client disconnected: %s", tmp->chat_id);
+            free(tmp);
             return;
         }
+        pp = &(*pp)->next;
     }
 }
 
-static esp_err_t ws_handler(httpd_req_t *req)
+static void ws_ev(struct mg_connection *c, int ev, void *ev_data)
 {
-    if (req->method == HTTP_GET) {
-        /* WebSocket handshake — register client */
-        int fd = httpd_req_to_sockfd(req);
-        add_client(fd);
-        return ESP_OK;
-    }
+    if (ev == MG_EV_HTTP_MSG) {
+        struct mg_http_message *hm = (struct mg_http_message *)ev_data;
+        /* Upgrade HTTP connection to WebSocket when path is "/" */
+        struct mg_str root = mg_str("/");
+        if (mg_strcmp(hm->uri, root) == 0) {
+            mg_ws_upgrade(c, hm, NULL);
+            add_client(c);
+        }
+    } else if (ev == MG_EV_WS_MSG) {
+        struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
 
-    /* Receive WebSocket frame */
-    httpd_ws_frame_t ws_pkt = {0};
-    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+        char *payload = (char *)malloc((size_t)wm->data.len + 1);
+        if (!payload) return;
+        memcpy(payload, wm->data.buf, (size_t)wm->data.len);
+        payload[wm->data.len] = '\0';
 
-    /* Get frame length */
-    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
-    if (ret != ESP_OK) return ret;
-
-    if (ws_pkt.len == 0) return ESP_OK;
-
-    ws_pkt.payload = calloc(1, ws_pkt.len + 1);
-    if (!ws_pkt.payload) return ESP_ERR_NO_MEM;
-
-    ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
-    if (ret != ESP_OK) {
-        free(ws_pkt.payload);
-        return ret;
-    }
-
-    int fd = httpd_req_to_sockfd(req);
-    ws_client_t *client = find_client_by_fd(fd);
-
-    /* Parse JSON message */
-    cJSON *root = cJSON_Parse((char *)ws_pkt.payload);
-    free(ws_pkt.payload);
-
-    if (!root) {
-        ESP_LOGW(TAG, "Invalid JSON from fd=%d", fd);
-        return ESP_OK;
-    }
-
-    cJSON *type = cJSON_GetObjectItem(root, "type");
-    cJSON *content = cJSON_GetObjectItem(root, "content");
-
-    if (type && cJSON_IsString(type) && strcmp(type->valuestring, "message") == 0
-        && content && cJSON_IsString(content)) {
-
-        /* Determine chat_id */
-        const char *chat_id = client ? client->chat_id : "ws_unknown";
-        cJSON *cid = cJSON_GetObjectItem(root, "chat_id");
-        if (cid && cJSON_IsString(cid)) {
-            chat_id = cid->valuestring;
-            /* Update client's chat_id if provided */
-            if (client) {
-                strncpy(client->chat_id, chat_id, sizeof(client->chat_id) - 1);
+        ws_client_t *client = NULL;
+        for (ws_client_t *p = s_clients; p; p = p->next) {
+            if (p->c == c) {
+                client = p;
+                break;
             }
         }
 
-        ESP_LOGI(TAG, "WS message from %s: %.40s...", chat_id, content->valuestring);
+        cJSON *root = cJSON_Parse(payload);
+        free(payload);
+        if (!root) {
+            MIMI_LOGW(TAG, "Invalid JSON from WS client");
+            return;
+        }
 
-        /* Push to inbound bus */
-        mimi_msg_t msg = {0};
-        strncpy(msg.channel, MIMI_CHAN_WEBSOCKET, sizeof(msg.channel) - 1);
-        strncpy(msg.chat_id, chat_id, sizeof(msg.chat_id) - 1);
-        msg.content = strdup(content->valuestring);
-        if (msg.content) {
-            message_bus_push_inbound(&msg);
+        cJSON *type = cJSON_GetObjectItem(root, "type");
+        cJSON *content = cJSON_GetObjectItem(root, "content");
+
+        if (type && cJSON_IsString(type) && strcmp(type->valuestring, "message") == 0 &&
+            content && cJSON_IsString(content)) {
+
+            const char *chat_id = client ? client->chat_id : "ws_unknown";
+            cJSON *cid = cJSON_GetObjectItem(root, "chat_id");
+            if (cid && cJSON_IsString(cid)) {
+                chat_id = cid->valuestring;
+                if (client) {
+                    strncpy(client->chat_id, chat_id, sizeof(client->chat_id) - 1);
+                }
+            }
+
+            MIMI_LOGI(TAG, "WS message from %s: %.40s...", chat_id, content->valuestring);
+
+            mimi_msg_t msg = {0};
+            strncpy(msg.channel, MIMI_CHAN_WEBSOCKET, sizeof(msg.channel) - 1);
+            strncpy(msg.chat_id, chat_id, sizeof(msg.chat_id) - 1);
+            msg.content = strdup(content->valuestring);
+            if (msg.content) {
+                if (message_bus_push_inbound(&msg) != MIMI_OK) {
+                    free(msg.content);
+                }
+            }
+        }
+
+        cJSON_Delete(root);
+    } else if (ev == MG_EV_CLOSE) {
+        if (c->is_websocket) {
+            remove_client(c);
         }
     }
-
-    cJSON_Delete(root);
-    return ESP_OK;
 }
 
-esp_err_t ws_server_start(void)
+mimi_err_t ws_server_start(void)
 {
-    memset(s_clients, 0, sizeof(s_clients));
-
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = MIMI_WS_PORT;
-    config.ctrl_port = MIMI_WS_PORT + 1;
-    config.max_open_sockets = MIMI_WS_MAX_CLIENTS;
-
-    esp_err_t ret = httpd_start(&s_server, &config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start WebSocket server: %s", esp_err_to_name(ret));
-        return ret;
+    if (!s_mgr) {
+        MIMI_LOGE(TAG, "ws_server_start: mg_mgr not set");
+        return MIMI_ERR_INVALID_STATE;
     }
 
-    /* Register WebSocket URI */
-    httpd_uri_t ws_uri = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = ws_handler,
-        .is_websocket = true,
-    };
-    httpd_register_uri_handler(s_server, &ws_uri);
+    char url[64];
+    snprintf(url, sizeof(url), "http://0.0.0.0:%d", MIMI_WS_PORT);
+    if (!mg_http_listen(s_mgr, url, ws_ev, NULL)) {
+        MIMI_LOGE(TAG, "Failed to start WebSocket server on %s", url);
+        return MIMI_ERR_IO;
+    }
 
-    ESP_LOGI(TAG, "WebSocket server started on port %d", MIMI_WS_PORT);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "WebSocket server started on %s", url);
+    return MIMI_OK;
 }
 
-esp_err_t ws_server_send(const char *chat_id, const char *text)
+mimi_err_t ws_server_send(const char *chat_id, const char *text)
 {
-    if (!s_server) return ESP_ERR_INVALID_STATE;
+    if (!s_mgr) return MIMI_ERR_INVALID_STATE;
+    if (!chat_id || !text) return MIMI_ERR_INVALID_ARG;
 
     ws_client_t *client = find_client_by_chat_id(chat_id);
-    if (!client) {
-        ESP_LOGW(TAG, "No WS client with chat_id=%s", chat_id);
-        return ESP_ERR_NOT_FOUND;
+    if (!client || !client->c) {
+        MIMI_LOGW(TAG, "No WS client with chat_id=%s", chat_id);
+        return MIMI_ERR_NOT_FOUND;
     }
 
-    /* Build response JSON */
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "type", "response");
     cJSON_AddStringToObject(resp, "content", text);
@@ -186,32 +165,23 @@ esp_err_t ws_server_send(const char *chat_id, const char *text)
 
     char *json_str = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
+    if (!json_str) return MIMI_ERR_NO_MEM;
 
-    if (!json_str) return ESP_ERR_NO_MEM;
-
-    httpd_ws_frame_t ws_pkt = {
-        .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)json_str,
-        .len = strlen(json_str),
-    };
-
-    esp_err_t ret = httpd_ws_send_frame_async(s_server, client->fd, &ws_pkt);
+    mg_ws_send(client->c, json_str, strlen(json_str), WEBSOCKET_OP_TEXT);
     free(json_str);
-
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to send to %s: %s", chat_id, esp_err_to_name(ret));
-        remove_client(client->fd);
-    }
-
-    return ret;
+    return MIMI_OK;
 }
 
-esp_err_t ws_server_stop(void)
+mimi_err_t ws_server_stop(void)
 {
-    if (s_server) {
-        httpd_stop(s_server);
-        s_server = NULL;
-        ESP_LOGI(TAG, "WebSocket server stopped");
+    /* Connections will be closed when mg_mgr is freed in main_posix. */
+    ws_client_t *p = s_clients;
+    while (p) {
+        ws_client_t *next = p->next;
+        free(p);
+        p = next;
     }
-    return ESP_OK;
+    s_clients = NULL;
+    return MIMI_OK;
 }
+

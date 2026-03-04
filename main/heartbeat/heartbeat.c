@@ -7,9 +7,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <ctype.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
-#include "esp_log.h"
+#include "platform/log.h"
+#include "mongoose.h"
 
 static const char *TAG = "heartbeat";
 
@@ -17,7 +16,8 @@ static const char *TAG = "heartbeat";
     "Read " MIMI_HEARTBEAT_FILE " and follow any instructions or tasks listed there. " \
     "If nothing needs attention, reply with just: HEARTBEAT_OK"
 
-static TimerHandle_t s_heartbeat_timer = NULL;
+static struct mg_mgr *s_mgr = NULL;
+static struct mg_timer *s_timer = NULL;
 
 /* ── Content check ────────────────────────────────────────────── */
 
@@ -77,7 +77,7 @@ static bool heartbeat_has_tasks(void)
 static bool heartbeat_send(void)
 {
     if (!heartbeat_has_tasks()) {
-        ESP_LOGD(TAG, "No actionable tasks in HEARTBEAT.md");
+        MIMI_LOGD(TAG, "No actionable tasks in HEARTBEAT.md");
         return false;
     }
 
@@ -88,78 +88,68 @@ static bool heartbeat_send(void)
     msg.content = strdup(HEARTBEAT_PROMPT);
 
     if (!msg.content) {
-        ESP_LOGE(TAG, "Failed to allocate heartbeat prompt");
+        MIMI_LOGE(TAG, "Failed to allocate heartbeat prompt");
         return false;
     }
 
-    esp_err_t err = message_bus_push_inbound(&msg);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to push heartbeat message: %s", esp_err_to_name(err));
+    mimi_err_t err = message_bus_push_inbound(&msg);
+    if (err != MIMI_OK) {
+        MIMI_LOGW(TAG, "Failed to push heartbeat message: %s", mimi_err_to_name(err));
         free(msg.content);
         return false;
     }
 
-    ESP_LOGI(TAG, "Triggered agent check");
+    MIMI_LOGI(TAG, "Triggered agent check");
     return true;
 }
 
-/* ── Timer callback ───────────────────────────────────────────── */
-
-static void heartbeat_timer_callback(TimerHandle_t xTimer)
+static void heartbeat_timer_cb(void *arg)
 {
-    (void)xTimer;
+    (void)arg;
     heartbeat_send();
 }
 
 /* ── Public API ───────────────────────────────────────────────── */
 
-esp_err_t heartbeat_init(void)
+mimi_err_t heartbeat_init(void)
 {
-    ESP_LOGI(TAG, "Heartbeat service initialized (file: %s, interval: %ds)",
+    MIMI_LOGI(TAG, "Heartbeat service initialized (file: %s, interval: %ds)",
              MIMI_HEARTBEAT_FILE, MIMI_HEARTBEAT_INTERVAL_MS / 1000);
-    return ESP_OK;
+    return MIMI_OK;
 }
 
-esp_err_t heartbeat_start(void)
+mimi_err_t heartbeat_start(void)
 {
-    if (s_heartbeat_timer) {
-        ESP_LOGW(TAG, "Heartbeat timer already running");
-        return ESP_OK;
+    if (!s_mgr) {
+        MIMI_LOGW(TAG, "Heartbeat start requires mg_mgr (call heartbeat_set_mgr first)");
+        return MIMI_ERR_INVALID_STATE;
+    }
+    if (s_timer) {
+        MIMI_LOGW(TAG, "Heartbeat timer already running");
+        return MIMI_OK;
     }
 
-    s_heartbeat_timer = xTimerCreate(
-        "heartbeat",
-        pdMS_TO_TICKS(MIMI_HEARTBEAT_INTERVAL_MS),
-        pdTRUE,    /* auto-reload */
-        NULL,
-        heartbeat_timer_callback
-    );
-
-    if (!s_heartbeat_timer) {
-        ESP_LOGE(TAG, "Failed to create heartbeat timer");
-        return ESP_FAIL;
-    }
-
-    if (xTimerStart(s_heartbeat_timer, pdMS_TO_TICKS(1000)) != pdPASS) {
-        ESP_LOGE(TAG, "Failed to start heartbeat timer");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Heartbeat started (every %d min)", MIMI_HEARTBEAT_INTERVAL_MS / 60000);
-    return ESP_OK;
+    s_timer = mg_timer_add(s_mgr, MIMI_HEARTBEAT_INTERVAL_MS, MG_TIMER_REPEAT, heartbeat_timer_cb, NULL);
+    if (!s_timer) return MIMI_ERR_NO_MEM;
+    MIMI_LOGI(TAG, "Heartbeat started (every %d min)", MIMI_HEARTBEAT_INTERVAL_MS / 60000);
+    return MIMI_OK;
 }
 
 void heartbeat_stop(void)
 {
-    if (s_heartbeat_timer) {
-        xTimerStop(s_heartbeat_timer, pdMS_TO_TICKS(1000));
-        xTimerDelete(s_heartbeat_timer, pdMS_TO_TICKS(1000));
-        s_heartbeat_timer = NULL;
-        ESP_LOGI(TAG, "Heartbeat stopped");
+    if (s_mgr && s_timer) {
+        mg_timer_free(&s_mgr->timers, s_timer);
+        s_timer = NULL;
+        MIMI_LOGI(TAG, "Heartbeat stopped");
     }
 }
 
 bool heartbeat_trigger(void)
 {
     return heartbeat_send();
+}
+
+void heartbeat_set_mgr(struct mg_mgr *mgr)
+{
+    s_mgr = mgr;
 }

@@ -6,7 +6,8 @@
 #include <stdlib.h>
 #include <dirent.h>
 #include <time.h>
-#include "esp_log.h"
+#include "platform/log.h"
+#include "platform/fs.h"
 #include "cJSON.h"
 
 static const char *TAG = "session";
@@ -16,21 +17,23 @@ static void session_path(const char *chat_id, char *buf, size_t size)
     snprintf(buf, size, "%s/tg_%s.jsonl", MIMI_SPIFFS_SESSION_DIR, chat_id);
 }
 
-esp_err_t session_mgr_init(void)
+mimi_err_t session_mgr_init(void)
 {
-    ESP_LOGI(TAG, "Session manager initialized at %s", MIMI_SPIFFS_SESSION_DIR);
-    return ESP_OK;
+    MIMI_LOGI(TAG, "Session manager initialized at %s", MIMI_SPIFFS_SESSION_DIR);
+    return MIMI_OK;
 }
 
-esp_err_t session_append(const char *chat_id, const char *role, const char *content)
+mimi_err_t session_append(const char *chat_id, const char *role, const char *content)
 {
-    char path[64];
-    session_path(chat_id, path, sizeof(path));
+    char virt[128];
+    session_path(chat_id, virt, sizeof(virt));
+    char path[256];
+    mimi_fs_resolve_path(virt, path, sizeof(path));
 
     FILE *f = fopen(path, "a");
     if (!f) {
-        ESP_LOGE(TAG, "Cannot open session file %s", path);
-        return ESP_FAIL;
+        MIMI_LOGE(TAG, "Cannot open session file %s", path);
+        return MIMI_ERR_IO;
     }
 
     cJSON *obj = cJSON_CreateObject();
@@ -47,19 +50,21 @@ esp_err_t session_append(const char *chat_id, const char *role, const char *cont
     }
 
     fclose(f);
-    return ESP_OK;
+    return MIMI_OK;
 }
 
-esp_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, int max_msgs)
+mimi_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, int max_msgs)
 {
-    char path[64];
-    session_path(chat_id, path, sizeof(path));
+    char virt[128];
+    session_path(chat_id, virt, sizeof(virt));
+    char path[256];
+    mimi_fs_resolve_path(virt, path, sizeof(path));
 
     FILE *f = fopen(path, "r");
     if (!f) {
         /* No history yet */
         snprintf(buf, size, "[]");
-        return ESP_OK;
+        return MIMI_OK;
     }
 
     /* Read all lines into a ring buffer of cJSON objects */
@@ -122,29 +127,34 @@ esp_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, 
         snprintf(buf, size, "[]");
     }
 
-    return ESP_OK;
+    return MIMI_OK;
 }
 
-esp_err_t session_clear(const char *chat_id)
+mimi_err_t session_clear(const char *chat_id)
 {
-    char path[64];
-    session_path(chat_id, path, sizeof(path));
+    char virt[128];
+    session_path(chat_id, virt, sizeof(virt));
+    char path[256];
+    mimi_fs_resolve_path(virt, path, sizeof(path));
 
     if (remove(path) == 0) {
-        ESP_LOGI(TAG, "Session %s cleared", chat_id);
-        return ESP_OK;
+        MIMI_LOGI(TAG, "Session %s cleared", chat_id);
+        return MIMI_OK;
     }
-    return ESP_ERR_NOT_FOUND;
+    return MIMI_ERR_NOT_FOUND;
 }
 
 void session_list(void)
 {
-    DIR *dir = opendir(MIMI_SPIFFS_SESSION_DIR);
+    char dir_path[256];
+    mimi_fs_resolve_path(MIMI_SPIFFS_SESSION_DIR, dir_path, sizeof(dir_path));
+    DIR *dir = opendir(dir_path);
     if (!dir) {
         /* SPIFFS is flat, so list all files matching pattern */
-        dir = opendir(MIMI_SPIFFS_BASE);
+        mimi_fs_resolve_path(MIMI_SPIFFS_BASE, dir_path, sizeof(dir_path));
+        dir = opendir(dir_path);
         if (!dir) {
-            ESP_LOGW(TAG, "Cannot open SPIFFS directory");
+            MIMI_LOGW(TAG, "Cannot open sessions directory");
             return;
         }
     }
@@ -153,13 +163,13 @@ void session_list(void)
     int count = 0;
     while ((entry = readdir(dir)) != NULL) {
         if (strstr(entry->d_name, "tg_") && strstr(entry->d_name, ".jsonl")) {
-            ESP_LOGI(TAG, "  Session: %s", entry->d_name);
+            MIMI_LOGI(TAG, "  Session: %s", entry->d_name);
             count++;
         }
     }
     closedir(dir);
 
     if (count == 0) {
-        ESP_LOGI(TAG, "  No sessions found");
+        MIMI_LOGI(TAG, "  No sessions found");
     }
 }

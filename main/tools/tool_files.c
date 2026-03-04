@@ -7,7 +7,8 @@
 #include <stdbool.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include "esp_log.h"
+#include "platform/log.h"
+#include "platform/fs.h"
 #include "cJSON.h"
 
 static const char *TAG = "tool_files";
@@ -32,26 +33,28 @@ static bool validate_path(const char *path)
 
 /* ── read_file ─────────────────────────────────────────────── */
 
-esp_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
     if (!validate_path(path)) {
         snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
-    FILE *f = fopen(path, "r");
+    char resolved[256];
+    mimi_fs_resolve_path(path, resolved, sizeof(resolved));
+    FILE *f = fopen(resolved, "r");
     if (!f) {
         snprintf(output, output_size, "Error: file not found: %s", path);
         cJSON_Delete(root);
-        return ESP_ERR_NOT_FOUND;
+        return MIMI_ERR_NOT_FOUND;
     }
 
     size_t max_read = output_size - 1;
@@ -61,19 +64,19 @@ esp_err_t tool_read_file_execute(const char *input_json, char *output, size_t ou
     output[n] = '\0';
     fclose(f);
 
-    ESP_LOGI(TAG, "read_file: %s (%d bytes)", path, (int)n);
+    MIMI_LOGI(TAG, "read_file: %s (%d bytes)", path, (int)n);
     cJSON_Delete(root);
-    return ESP_OK;
+    return MIMI_OK;
 }
 
 /* ── write_file ────────────────────────────────────────────── */
 
-esp_err_t tool_write_file_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t output_size)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
@@ -82,19 +85,21 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output, size_t o
     if (!validate_path(path)) {
         snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
     if (!content) {
         snprintf(output, output_size, "Error: missing 'content' field");
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
-    FILE *f = fopen(path, "w");
+    char resolved[256];
+    mimi_fs_resolve_path(path, resolved, sizeof(resolved));
+    FILE *f = fopen(resolved, "w");
     if (!f) {
         snprintf(output, output_size, "Error: cannot open file for writing: %s", path);
         cJSON_Delete(root);
-        return ESP_FAIL;
+        return MIMI_ERR_IO;
     }
 
     size_t len = strlen(content);
@@ -104,23 +109,23 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output, size_t o
     if (written != len) {
         snprintf(output, output_size, "Error: wrote %d of %d bytes to %s", (int)written, (int)len, path);
         cJSON_Delete(root);
-        return ESP_FAIL;
+        return MIMI_ERR_IO;
     }
 
     snprintf(output, output_size, "OK: wrote %d bytes to %s", (int)written, path);
-    ESP_LOGI(TAG, "write_file: %s (%d bytes)", path, (int)written);
+    MIMI_LOGI(TAG, "write_file: %s (%d bytes)", path, (int)written);
     cJSON_Delete(root);
-    return ESP_OK;
+    return MIMI_OK;
 }
 
 /* ── edit_file ─────────────────────────────────────────────── */
 
-esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t output_size)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
@@ -130,20 +135,22 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
     if (!validate_path(path)) {
         snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
     if (!old_str || !new_str) {
         snprintf(output, output_size, "Error: missing 'old_string' or 'new_string' field");
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return MIMI_ERR_INVALID_ARG;
     }
 
     /* Read existing file */
-    FILE *f = fopen(path, "r");
+    char resolved[256];
+    mimi_fs_resolve_path(path, resolved, sizeof(resolved));
+    FILE *f = fopen(resolved, "r");
     if (!f) {
         snprintf(output, output_size, "Error: file not found: %s", path);
         cJSON_Delete(root);
-        return ESP_ERR_NOT_FOUND;
+        return MIMI_ERR_NOT_FOUND;
     }
 
     fseek(f, 0, SEEK_END);
@@ -154,7 +161,7 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
         snprintf(output, output_size, "Error: file too large or empty (%ld bytes)", file_size);
         fclose(f);
         cJSON_Delete(root);
-        return ESP_ERR_INVALID_SIZE;
+        return MIMI_ERR_FAIL;
     }
 
     /* Allocate buffer for the result (old content + possible expansion) */
@@ -169,7 +176,7 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
         fclose(f);
         snprintf(output, output_size, "Error: out of memory");
         cJSON_Delete(root);
-        return ESP_ERR_NO_MEM;
+        return MIMI_ERR_NO_MEM;
     }
 
     size_t n = fread(buf, 1, file_size, f);
@@ -183,7 +190,7 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
         free(buf);
         free(result);
         cJSON_Delete(root);
-        return ESP_ERR_NOT_FOUND;
+        return MIMI_ERR_NOT_FOUND;
     }
 
     size_t prefix_len = pos - buf;
@@ -198,12 +205,12 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
     free(buf);
 
     /* Write back */
-    f = fopen(path, "w");
+    f = fopen(resolved, "w");
     if (!f) {
         snprintf(output, output_size, "Error: cannot open file for writing: %s", path);
         free(result);
         cJSON_Delete(root);
-        return ESP_FAIL;
+        return MIMI_ERR_IO;
     }
 
     fwrite(result, 1, total, f);
@@ -211,14 +218,14 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
     free(result);
 
     snprintf(output, output_size, "OK: edited %s (replaced %d bytes with %d bytes)", path, (int)old_len, (int)new_len);
-    ESP_LOGI(TAG, "edit_file: %s", path);
+    MIMI_LOGI(TAG, "edit_file: %s", path);
     cJSON_Delete(root);
-    return ESP_OK;
+    return MIMI_OK;
 }
 
 /* ── list_dir ──────────────────────────────────────────────── */
 
-esp_err_t tool_list_dir_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_list_dir_execute(const char *input_json, char *output, size_t output_size)
 {
     cJSON *root = cJSON_Parse(input_json);
     const char *prefix = NULL;
@@ -229,11 +236,13 @@ esp_err_t tool_list_dir_execute(const char *input_json, char *output, size_t out
         }
     }
 
-    DIR *dir = opendir(MIMI_SPIFFS_BASE);
+    char dir_path[256];
+    mimi_fs_resolve_path(MIMI_SPIFFS_BASE, dir_path, sizeof(dir_path));
+    DIR *dir = opendir(dir_path);
     if (!dir) {
         snprintf(output, output_size, "Error: cannot open %s directory", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
-        return ESP_FAIL;
+        return MIMI_ERR_IO;
     }
 
     size_t off = 0;
@@ -259,7 +268,7 @@ esp_err_t tool_list_dir_execute(const char *input_json, char *output, size_t out
         snprintf(output, output_size, "(no files found)");
     }
 
-    ESP_LOGI(TAG, "list_dir: %d files (prefix=%s)", count, prefix ? prefix : "(none)");
+    MIMI_LOGI(TAG, "list_dir: %d files (prefix=%s)", count, prefix ? prefix : "(none)");
     cJSON_Delete(root);
-    return ESP_OK;
+    return MIMI_OK;
 }

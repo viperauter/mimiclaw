@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
+#include "platform/mimi_err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -29,12 +29,12 @@ typedef struct {
 /**
  * Initialize the cron service. Loads jobs from SPIFFS.
  */
-esp_err_t cron_service_init(void);
+mimi_err_t cron_service_init(void);
 
 /**
  * Start the cron timer. Call after WiFi is connected and time is synced.
  */
-esp_err_t cron_service_start(void);
+mimi_err_t cron_service_start(void);
 
 /**
  * Stop the cron timer.
@@ -46,14 +46,14 @@ void cron_service_stop(void);
  * @param job  Pointer to job struct (id will be generated)
  * @return ESP_OK on success, ESP_ERR_NO_MEM if max jobs reached
  */
-esp_err_t cron_add_job(cron_job_t *job);
+mimi_err_t cron_add_job(cron_job_t *job);
 
 /**
  * Remove a cron job by ID.
  * @param job_id  8-char job ID
  * @return ESP_OK on success, ESP_ERR_NOT_FOUND if not found
  */
-esp_err_t cron_remove_job(const char *job_id);
+mimi_err_t cron_remove_job(const char *job_id);
 
 /**
  * List all cron jobs.
@@ -61,3 +61,7 @@ esp_err_t cron_remove_job(const char *job_id);
  * @param count     Output: number of jobs
  */
 void cron_list_jobs(const cron_job_t **jobs, int *count);
+
+/* POSIX: provide mg_mgr so cron can schedule a timer. */
+struct mg_mgr;
+void cron_service_set_mgr(struct mg_mgr *mgr);
