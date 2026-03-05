@@ -1,13 +1,22 @@
 #pragma once
 
-#include "esp_err.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <stdbool.h>
+
+#include "mimi_err.h"
+
+typedef struct {
+    char     host[64];
+    uint16_t port;
+    char     type[8];   /* "http" or "socks5" */
+} http_proxy_config_t;
 
 /**
  * Initialize proxy module.
+ * Loads runtime defaults from config.json if present.
  */
-esp_err_t http_proxy_init(void);
+mimi_err_t http_proxy_init(void);
 
 /**
  * Returns true if a proxy host:port is configured.
@@ -15,14 +24,21 @@ esp_err_t http_proxy_init(void);
 bool http_proxy_is_enabled(void);
 
 /**
- * Save proxy host, port, and type to NVS.
+ * Save proxy host, port, and type to in-memory config.
+ * Current generic implementation does NOT persist this to NVS/FS.
  */
-esp_err_t http_proxy_set(const char *host, uint16_t port, const char *type);
+mimi_err_t http_proxy_set(const char *host, uint16_t port, const char *type);
 
 /**
- * Remove proxy config from NVS.
+ * Clear proxy configuration (reset to "no proxy").
  */
-esp_err_t http_proxy_clear(void);
+mimi_err_t http_proxy_clear(void);
+
+/**
+ * Get current proxy configuration.
+ * Returns MIMI_ERR_INVALID_STATE if no proxy is configured.
+ */
+mimi_err_t http_proxy_get_config(http_proxy_config_t *out);
 
 /* ── Proxied HTTPS connection ─────────────────────────────────── */
 
@@ -31,10 +47,13 @@ typedef struct proxy_conn proxy_conn_t;
 /**
  * Open an HTTPS connection through the configured proxy.
  * 1) TCP connect to proxy
- * 2) Send HTTP CONNECT to target host:port
+ * 2) Proxy handshake (HTTP CONNECT / SOCKS5)
  * 3) TLS handshake over the tunnel
  *
  * Returns NULL on failure.
+ *
+ * NOTE: On non-ESP platforms this may be unimplemented initially and will
+ * return NULL with an error log.
  */
 proxy_conn_t *proxy_conn_open(const char *host, int port, int timeout_ms);
 

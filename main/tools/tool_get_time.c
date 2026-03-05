@@ -1,14 +1,15 @@
-#include "tools/tool_get_time.h"
-#include "mimi_config.h"
-
-#include "platform/http.h"
-#include "platform/log.h"
-
-#include <string.h>
-#include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
+#include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
+
+#include "tools/tool_get_time.h"
+#include "config.h"
+
+#include "http/http.h"
+#include "log.h"
+
 #include "cJSON.h"
 
 static const char *TAG = "tool_time_posix";
@@ -22,7 +23,8 @@ static bool set_clock_from_epoch(long long epoch, char *out, size_t out_size)
     struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
     settimeofday(&tv, NULL);
 
-    setenv("TZ", MIMI_TIMEZONE, 1);
+    const mimi_config_t *cfg = mimi_config_get();
+    setenv("TZ", (cfg->timezone[0] ? cfg->timezone : "UTC"), 1);
     tzset();
 
     struct tm local;
@@ -31,9 +33,11 @@ static bool set_clock_from_epoch(long long epoch, char *out, size_t out_size)
     return true;
 }
 
-mimi_err_t tool_get_time_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_get_time_execute(const char *input_json, char *output, size_t output_size,
+                                 const mimi_session_ctx_t *session_ctx)
 {
-    (void) input_json;
+    (void)input_json;
+    (void)session_ctx;
     MIMI_LOGI(TAG, "Fetching current time via worldtimeapi.org...");
 
     mimi_http_request_t req = {

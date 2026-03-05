@@ -1,7 +1,7 @@
 #include "message_bus.h"
-#include "mimi_config.h"
-#include "platform/log.h"
-#include "platform/queue.h"
+#include "config.h"
+#include "log.h"
+#include "queue.h"
 #include <string.h>
 
 static const char *TAG = "bus";
@@ -11,13 +11,16 @@ static mimi_queue_t *s_outbound_queue;
 
 mimi_err_t message_bus_init(void)
 {
-    if (mimi_queue_create(&s_inbound_queue, sizeof(mimi_msg_t), MIMI_BUS_QUEUE_LEN) != MIMI_OK ||
-        mimi_queue_create(&s_outbound_queue, sizeof(mimi_msg_t), MIMI_BUS_QUEUE_LEN) != MIMI_OK) {
+    const mimi_config_t *cfg = mimi_config_get();
+    int qlen = (cfg->bus_queue_len > 0) ? cfg->bus_queue_len : 16;
+
+    if (mimi_queue_create(&s_inbound_queue, sizeof(mimi_msg_t), (size_t)qlen) != MIMI_OK ||
+        mimi_queue_create(&s_outbound_queue, sizeof(mimi_msg_t), (size_t)qlen) != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to create message queues");
         return MIMI_ERR_NO_MEM;
     }
 
-    MIMI_LOGI(TAG, "Message bus initialized (queue depth %d)", MIMI_BUS_QUEUE_LEN);
+    MIMI_LOGI(TAG, "Message bus initialized (queue depth %d)", qlen);
     return MIMI_OK;
 }
 

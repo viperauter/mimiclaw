@@ -1,6 +1,6 @@
 #pragma once
 
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 #include <stdbool.h>
 
 /**
@@ -24,7 +24,3 @@ void heartbeat_stop(void);
  * Returns true if the agent was prompted, false if no tasks found.
  */
 bool heartbeat_trigger(void);
-
-/* POSIX: provide mg_mgr so heartbeat can schedule a timer. */
-struct mg_mgr;
-void heartbeat_set_mgr(struct mg_mgr *mgr);

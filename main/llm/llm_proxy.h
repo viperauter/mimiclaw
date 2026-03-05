@@ -1,11 +1,11 @@
 #pragma once
 
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 #include "cJSON.h"
 #include <stddef.h>
 #include <stdbool.h>
 
-#include "mimi_config.h"
+#define LLM_MAX_TOOL_CALLS 4
 
 /**
  * Initialize the LLM proxy. Reads API key and model from build-time secrets, then NVS.
@@ -39,7 +39,7 @@ typedef struct {
 typedef struct {
     char *text;                                  /* accumulated text blocks */
     size_t text_len;
-    llm_tool_call_t calls[MIMI_MAX_TOOL_CALLS];
+    llm_tool_call_t calls[LLM_MAX_TOOL_CALLS];
     int call_count;
     bool tool_use;                               /* stop_reason == "tool_use" */
 } llm_response_t;

@@ -1,5 +1,5 @@
-#include "platform/queue.h"
-#include "platform/os.h"
+#include "queue.h"
+#include "os/os.h"
 #include <stdlib.h>
 #include <string.h>
 

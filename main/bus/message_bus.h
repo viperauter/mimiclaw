@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdint.h>
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 
 /* Channel identifiers */
 #define MIMI_CHAN_TELEGRAM   "telegram"

@@ -1,4 +1,4 @@
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 
 const char *mimi_err_to_name(mimi_err_t err)
 {
@@ -12,6 +12,8 @@ const char *mimi_err_to_name(mimi_err_t err)
         case MIMI_ERR_INVALID_STATE: return "MIMI_ERR_INVALID_STATE";
         case MIMI_ERR_IO: return "MIMI_ERR_IO";
         case MIMI_ERR_NOT_SUPPORTED: return "MIMI_ERR_NOT_SUPPORTED";
+        case MIMI_ERR_PERMISSION_DENIED: return "MIMI_ERR_PERMISSION_DENIED";
+        case MIMI_ERR_EXIT: return "MIMI_ERR_EXIT";
         default: return "MIMI_ERR_UNKNOWN";
     }
 }

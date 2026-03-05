@@ -1,79 +1,107 @@
 #include "session_mgr.h"
-#include "mimi_config.h"
+#include "config.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <dirent.h>
-#include <time.h>
-#include "platform/log.h"
-#include "platform/fs.h"
+#include "log.h"
+#include "mimi_time.h"
 #include "cJSON.h"
+#include "fs/fs.h"
 
 static const char *TAG = "session";
 
-static void session_path(const char *chat_id, char *buf, size_t size)
+static void session_path(const char *channel, const char *chat_id, char *buf, size_t size)
 {
-    snprintf(buf, size, "%s/tg_%s.jsonl", MIMI_SPIFFS_SESSION_DIR, chat_id);
+    const mimi_config_t *cfg = mimi_config_get();
+    const char *dir = cfg->session_dir[0] ? cfg->session_dir : "sessions";
+    const char *chan = (channel && channel[0]) ? channel : "unknown";
+    const char *id = (chat_id && chat_id[0]) ? chat_id : "unknown";
+    snprintf(buf, size, "%s/%s_%s.jsonl", dir, chan, id);
+}
+
+void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!msg) return;
+    strncpy(out->channel, msg->channel, sizeof(out->channel) - 1);
+    strncpy(out->chat_id, msg->chat_id, sizeof(out->chat_id) - 1);
+    if (msg->channel[0] && msg->chat_id[0]) {
+        snprintf(out->workspace_root, sizeof(out->workspace_root),
+                 "workspaces/%s_%s", msg->channel, msg->chat_id);
+    }
 }
 
 mimi_err_t session_mgr_init(void)
 {
-    MIMI_LOGI(TAG, "Session manager initialized at %s", MIMI_SPIFFS_SESSION_DIR);
+    const mimi_config_t *cfg = mimi_config_get();
+    MIMI_LOGI(TAG, "Session manager initialized at %s", cfg->session_dir);
     return MIMI_OK;
 }
 
-mimi_err_t session_append(const char *chat_id, const char *role, const char *content)
+mimi_err_t session_append(const char *channel, const char *chat_id, const char *role, const char *content)
 {
-    char virt[128];
-    session_path(chat_id, virt, sizeof(virt));
     char path[256];
-    mimi_fs_resolve_path(virt, path, sizeof(path));
+    session_path(channel, chat_id, path, sizeof(path));
 
-    FILE *f = fopen(path, "a");
-    if (!f) {
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(path, "a", &f);
+    if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Cannot open session file %s", path);
-        return MIMI_ERR_IO;
+        return err;
     }
 
     cJSON *obj = cJSON_CreateObject();
     cJSON_AddStringToObject(obj, "role", role);
     cJSON_AddStringToObject(obj, "content", content);
-    cJSON_AddNumberToObject(obj, "ts", (double)time(NULL));
+    cJSON_AddNumberToObject(obj, "ts", (double)(mimi_time_ms() / 1000ULL));
 
     char *line = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
 
     if (line) {
-        fprintf(f, "%s\n", line);
+        size_t written = 0;
+        (void)mimi_fs_write(f, line, strlen(line), &written);
+        const char nl = '\n';
+        (void)mimi_fs_write(f, &nl, 1, &written);
         free(line);
     }
 
-    fclose(f);
+    mimi_fs_close(f);
     return MIMI_OK;
 }
 
-mimi_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, int max_msgs)
+mimi_err_t session_get_history_json(const char *channel, const char *chat_id, char *buf, size_t size, int max_msgs)
 {
-    char virt[128];
-    session_path(chat_id, virt, sizeof(virt));
+    if (max_msgs <= 0) max_msgs = 100;
     char path[256];
-    mimi_fs_resolve_path(virt, path, sizeof(path));
+    session_path(channel, chat_id, path, sizeof(path));
 
-    FILE *f = fopen(path, "r");
-    if (!f) {
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(path, "r", &f);
+    if (err != MIMI_OK) {
         /* No history yet */
         snprintf(buf, size, "[]");
         return MIMI_OK;
     }
 
     /* Read all lines into a ring buffer of cJSON objects */
-    cJSON *messages[MIMI_SESSION_MAX_MSGS];
+    cJSON **messages = (cJSON **)calloc((size_t)max_msgs, sizeof(cJSON *));
+    if (!messages) {
+        mimi_fs_close(f);
+        snprintf(buf, size, "[]");
+        return MIMI_ERR_NO_MEM;
+    }
     int count = 0;
     int write_idx = 0;
 
     char line[2048];
-    while (fgets(line, sizeof(line), f)) {
+    for (;;) {
+        bool eof = false;
+        err = mimi_fs_read_line(f, line, sizeof(line), &eof);
+        if (err != MIMI_OK) break;
+        if (eof) break;
         /* Strip newline */
         size_t len = strlen(line);
         if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
@@ -90,7 +118,7 @@ mimi_err_t session_get_history_json(const char *chat_id, char *buf, size_t size,
         write_idx = (write_idx + 1) % max_msgs;
         if (count < max_msgs) count++;
     }
-    fclose(f);
+    mimi_fs_close(f);
 
     /* Build JSON array with only role + content */
     cJSON *arr = cJSON_CreateArray();
@@ -115,6 +143,7 @@ mimi_err_t session_get_history_json(const char *chat_id, char *buf, size_t size,
         int idx = (cleanup_start + i) % max_msgs;
         cJSON_Delete(messages[idx]);
     }
+    free(messages);
 
     char *json_str = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
@@ -130,14 +159,12 @@ mimi_err_t session_get_history_json(const char *chat_id, char *buf, size_t size,
     return MIMI_OK;
 }
 
-mimi_err_t session_clear(const char *chat_id)
+mimi_err_t session_clear(const char *channel, const char *chat_id)
 {
-    char virt[128];
-    session_path(chat_id, virt, sizeof(virt));
     char path[256];
-    mimi_fs_resolve_path(virt, path, sizeof(path));
+    session_path(channel, chat_id, path, sizeof(path));
 
-    if (remove(path) == 0) {
+    if (mimi_fs_remove(path) == MIMI_OK) {
         MIMI_LOGI(TAG, "Session %s cleared", chat_id);
         return MIMI_OK;
     }
@@ -146,28 +173,30 @@ mimi_err_t session_clear(const char *chat_id)
 
 void session_list(void)
 {
-    char dir_path[256];
-    mimi_fs_resolve_path(MIMI_SPIFFS_SESSION_DIR, dir_path, sizeof(dir_path));
-    DIR *dir = opendir(dir_path);
-    if (!dir) {
-        /* SPIFFS is flat, so list all files matching pattern */
-        mimi_fs_resolve_path(MIMI_SPIFFS_BASE, dir_path, sizeof(dir_path));
-        dir = opendir(dir_path);
-        if (!dir) {
-            MIMI_LOGW(TAG, "Cannot open sessions directory");
-            return;
-        }
+    const mimi_config_t *cfg = mimi_config_get();
+    const char *base_dir = cfg->session_dir[0] ? cfg->session_dir : "sessions";
+    mimi_dir_t *dir = NULL;
+    mimi_err_t err = mimi_fs_opendir(base_dir, &dir);
+    if (err != MIMI_OK) {
+        MIMI_LOGW(TAG, "Cannot open sessions directory: %s", base_dir);
+        return;
     }
 
-    struct dirent *entry;
     int count = 0;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, "tg_") && strstr(entry->d_name, ".jsonl")) {
-            MIMI_LOGI(TAG, "  Session: %s", entry->d_name);
+    for (;;) {
+        bool has = false;
+        char name[256];
+        err = mimi_fs_readdir(dir, name, sizeof(name), &has);
+        if (err != MIMI_OK) break;
+        if (!has) break;
+        /* List all JSONL session files: "<channel>_<chat_id>.jsonl" */
+        const size_t n = strlen(name);
+        if (n >= 6 && strcmp(name + n - 6, ".jsonl") == 0) {
+            MIMI_LOGI(TAG, "  Session: %s", name);
             count++;
         }
     }
-    closedir(dir);
+    mimi_fs_closedir(dir);
 
     if (count == 0) {
         MIMI_LOGI(TAG, "  No sessions found");

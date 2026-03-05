@@ -1,8 +1,8 @@
 #include "tools/tool_web_search.h"
-#include "mimi_config.h"
+#include "config.h"
 
-#include "platform/http.h"
-#include "platform/log.h"
+#include "http/http.h"
+#include "log.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -73,22 +73,26 @@ static void format_results(cJSON *root, char *output, size_t output_size)
 
 mimi_err_t tool_web_search_init(void)
 {
-    if (MIMI_SECRET_SEARCH_KEY[0] != '\0') {
-        strncpy(s_search_key, MIMI_SECRET_SEARCH_KEY, sizeof(s_search_key) - 1);
+    const mimi_config_t *cfg = mimi_config_get();
+    if (cfg->search_api_key[0] != '\0') {
+        strncpy(s_search_key, cfg->search_api_key, sizeof(s_search_key) - 1);
+        s_search_key[sizeof(s_search_key) - 1] = '\0';
     }
 
     if (s_search_key[0]) {
         MIMI_LOGI(TAG, "Web search initialized (key configured)");
     } else {
-        MIMI_LOGW(TAG, "No search API key. Set MIMI_SECRET_SEARCH_KEY in mimi_secrets.h");
+        MIMI_LOGW(TAG, "No search API key. Set in config.json (tools.search.apiKey)");
     }
     return MIMI_OK;
 }
 
-mimi_err_t tool_web_search_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_web_search_execute(const char *input_json, char *output, size_t output_size,
+                                   const mimi_session_ctx_t *session_ctx)
 {
+    (void)session_ctx;
     if (s_search_key[0] == '\0') {
-        snprintf(output, output_size, "Error: No search API key configured. Set MIMI_SECRET_SEARCH_KEY in mimi_secrets.h");
+        snprintf(output, output_size, "Error: No search API key configured. Set config.json tools.search.apiKey or mimi_secrets.h");
         return MIMI_ERR_INVALID_STATE;
     }
 

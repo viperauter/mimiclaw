@@ -1,5 +1,5 @@
 #include "tool_registry.h"
-#include "mimi_config.h"
+#include "config.h"
 #include "tools/tool_web_search.h"
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include "platform/log.h"
+#include "log.h"
 #include "cJSON.h"
 
 static const char *TAG = "tools";
@@ -85,10 +85,10 @@ mimi_err_t tool_registry_init(void)
     /* Register read_file */
     mimi_tool_t rf = {
         .name = "read_file",
-        .description = "Read a file from SPIFFS storage. Path must start with " MIMI_SPIFFS_BASE "/.",
+        .description = "Read a file from storage. Path must not contain '..'.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_SPIFFS_BASE "/\"}},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no \"\"..\"\" segments)\"}},"
             "\"required\":[\"path\"]}",
         .execute = tool_read_file_execute,
     };
@@ -97,10 +97,10 @@ mimi_err_t tool_registry_init(void)
     /* Register write_file */
     mimi_tool_t wf = {
         .name = "write_file",
-        .description = "Write or overwrite a file on SPIFFS storage. Path must start with " MIMI_SPIFFS_BASE "/.",
+        .description = "Write or overwrite a file on storage. Path must not contain '..'.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_SPIFFS_BASE "/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no \"\"..\"\" segments)\"},"
             "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}},"
             "\"required\":[\"path\",\"content\"]}",
         .execute = tool_write_file_execute,
@@ -113,7 +113,7 @@ mimi_err_t tool_registry_init(void)
         .description = "Find and replace text in a file on SPIFFS. Replaces first occurrence of old_string with new_string.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_SPIFFS_BASE "/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no \"\"..\"\" segments)\"},"
             "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"},"
             "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}},"
             "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
@@ -124,10 +124,10 @@ mimi_err_t tool_registry_init(void)
     /* Register list_dir */
     mimi_tool_t ld = {
         .name = "list_dir",
-        .description = "List files on SPIFFS storage, optionally filtered by path prefix.",
+        .description = "List files on storage, optionally filtered by path prefix.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter, e.g. " MIMI_SPIFFS_BASE "/memory/\"}},"
+            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter (e.g. memory/)\"}},"
             "\"required\":[]}",
         .execute = tool_list_dir_execute,
     };
@@ -189,12 +189,13 @@ const char *tool_registry_get_tools_json(void)
 }
 
 mimi_err_t tool_registry_execute(const char *name, const char *input_json,
-                                 char *output, size_t output_size)
+                                 char *output, size_t output_size,
+                                 const mimi_session_ctx_t *session_ctx)
 {
     for (int i = 0; i < s_tool_count; i++) {
         if (strcmp(s_tools[i].name, name) == 0) {
             MIMI_LOGI(TAG, "Executing tool: %s", name);
-            return s_tools[i].execute(input_json, output, output_size);
+            return s_tools[i].execute(input_json, output, output_size, session_ctx);
         }
     }
 

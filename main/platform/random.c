@@ -1,5 +1,5 @@
-#include "platform/random.h"
-#include "platform/mimi_err.h"
+#include "random.h"
+#include "mimi_err.h"
 
 #include <fcntl.h>
 #include <unistd.h>

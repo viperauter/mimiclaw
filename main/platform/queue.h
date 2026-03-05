@@ -2,7 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 
 #ifdef __cplusplus
 extern "C" {

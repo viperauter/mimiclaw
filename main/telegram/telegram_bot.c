@@ -1,10 +1,10 @@
 #include "telegram/telegram_bot.h"
-#include "mimi_config.h"
+#include "config.h"
 #include "bus/message_bus.h"
 
-#include "platform/http.h"
-#include "platform/log.h"
-#include "platform/os.h"
+#include "http/http.h"
+#include "log.h"
+#include "os/os.h"
 
 #include "cJSON.h"
 
@@ -13,9 +13,11 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-static const char *TAG = "telegram_posix";
+static const char *TAG = "telegram";
 
-static char s_bot_token[128] = MIMI_SECRET_TG_TOKEN;
+static const int TG_POLL_TIMEOUT_S = 30;
+
+static char s_bot_token[128] = {0};
 static volatile bool s_running = false;
 static long long s_update_offset = 0;
 
@@ -37,7 +39,7 @@ static mimi_err_t tg_http_call(const char *method, const char *json_body,
         .headers = headers,
         .body = (const uint8_t *) json_body,
         .body_len = json_body ? strlen(json_body) : 0,
-        .timeout_ms = (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000,
+        .timeout_ms = (TG_POLL_TIMEOUT_S + 5) * 1000,
     };
 
     return mimi_http_exec(&req, out);
@@ -89,11 +91,11 @@ static void telegram_poll_task(void *arg)
         if (s_update_offset > 0) {
             snprintf(method, sizeof(method),
                      "getUpdates?timeout=%d&offset=%lld",
-                     MIMI_TG_POLL_TIMEOUT_S, s_update_offset);
+                     TG_POLL_TIMEOUT_S, s_update_offset);
         } else {
             snprintf(method, sizeof(method),
                      "getUpdates?timeout=%d",
-                     MIMI_TG_POLL_TIMEOUT_S);
+                     TG_POLL_TIMEOUT_S);
         }
 
         mimi_http_response_t resp;
@@ -134,8 +136,13 @@ static void telegram_poll_task(void *arg)
 
 mimi_err_t telegram_bot_init(void)
 {
+    const mimi_config_t *cfg = mimi_config_get();
+    if (cfg->telegram_token[0] != '\0') {
+        strncpy(s_bot_token, cfg->telegram_token, sizeof(s_bot_token) - 1);
+        s_bot_token[sizeof(s_bot_token) - 1] = '\0';
+    }
     if (!s_bot_token[0]) {
-        MIMI_LOGW(TAG, "Telegram bot token not configured (MIMI_SECRET_TG_TOKEN empty)");
+        MIMI_LOGW(TAG, "Telegram bot token not configured (config.json channels.telegram.token)");
     } else {
         MIMI_LOGI(TAG, "Telegram bot initialized with token prefix %.6s***", s_bot_token);
     }

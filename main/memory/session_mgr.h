@@ -1,7 +1,25 @@
 #pragma once
 
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 #include <stddef.h>
+
+#include "bus/message_bus.h"
+
+/**
+ * Session context for tool execution. Identifies the current conversation turn
+ * and provides per-session workspace root for file operations.
+ */
+typedef struct mimi_session_ctx {
+    char channel[16];
+    char chat_id[32];
+    char workspace_root[256];  /* e.g. "workspaces/cli_test" - empty if no session */
+} mimi_session_ctx_t;
+
+/**
+ * Build session context from an inbound message. Caller provides storage.
+ * workspace_root is set to "workspaces/{channel}_{chat_id}" when channel/chat_id present.
+ */
+void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out);
 
 /**
  * Initialize session manager.
@@ -10,11 +28,12 @@ mimi_err_t session_mgr_init(void);
 
 /**
  * Append a message to a session file (JSONL format).
- * @param chat_id   Session identifier (e.g., "12345")
+ * @param channel   Channel name (e.g., "telegram", "cli", "websocket")
+ * @param chat_id   Chat identifier within the channel
  * @param role      "user" or "assistant"
  * @param content   Message text
  */
-mimi_err_t session_append(const char *chat_id, const char *role, const char *content);
+mimi_err_t session_append(const char *channel, const char *chat_id, const char *role, const char *content);
 
 /**
  * Load session history as a JSON array string suitable for LLM messages.
@@ -26,12 +45,12 @@ mimi_err_t session_append(const char *chat_id, const char *role, const char *con
  * @param size      Buffer size
  * @param max_msgs  Maximum number of messages to return
  */
-mimi_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, int max_msgs);
+mimi_err_t session_get_history_json(const char *channel, const char *chat_id, char *buf, size_t size, int max_msgs);
 
 /**
  * Clear a session (delete the file).
  */
-mimi_err_t session_clear(const char *chat_id);
+mimi_err_t session_clear(const char *channel, const char *chat_id);
 
 /**
  * List all session files (prints to log).

@@ -1,5 +1,5 @@
 #include "tools/tool_files.h"
-#include "mimi_config.h"
+#include "config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,33 +7,49 @@
 #include <stdbool.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include "platform/log.h"
-#include "platform/fs.h"
+#include "log.h"
 #include "cJSON.h"
+#include "fs/fs.h"
 
 static const char *TAG = "tool_files";
 
 #define MAX_FILE_SIZE (32 * 1024)
+#define MAX_RESOLVED_PATH 512
 
 /**
- * Validate that a path starts with MIMI_SPIFFS_BASE and contains no ".." traversal.
+ * Validate that a path is safe: must not contain "..".
  */
 static bool validate_path(const char *path)
 {
     if (!path) return false;
-    size_t base_len = strlen(MIMI_SPIFFS_BASE);
-    if (strncmp(path, MIMI_SPIFFS_BASE, base_len) != 0) return false;
-    /* Require a path separator after the base (unless base ends with '/') */
-    if (base_len > 0 && MIMI_SPIFFS_BASE[base_len - 1] != '/') {
-        if (path[base_len] != '/') return false;
-    }
     if (strstr(path, "..") != NULL) return false;
     return true;
 }
 
+/**
+ * Resolve path to per-session workspace when session_ctx has workspace_root.
+ * Relative paths -> {workspace_root}/{path}
+ * Paths starting with '/' -> unchanged (global/mount)
+ */
+static void resolve_session_path(const char *path, const mimi_session_ctx_t *session_ctx,
+                                 char *out, size_t out_size)
+{
+    if (!path || !out || out_size == 0) {
+        if (out && out_size > 0) out[0] = '\0';
+        return;
+    }
+    if (!session_ctx || !session_ctx->workspace_root[0] || path[0] == '/') {
+        strncpy(out, path, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+    snprintf(out, out_size, "%s/%s", session_ctx->workspace_root, path);
+}
+
 /* ── read_file ─────────────────────────────────────────────── */
 
-mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size,
+                                  const mimi_session_ctx_t *session_ctx)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
@@ -43,15 +59,17 @@ mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t o
 
     const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
     if (!validate_path(path)) {
-        snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
+        snprintf(output, output_size, "Error: path must not contain '..'");
         cJSON_Delete(root);
         return MIMI_ERR_INVALID_ARG;
     }
 
-    char resolved[256];
-    mimi_fs_resolve_path(path, resolved, sizeof(resolved));
-    FILE *f = fopen(resolved, "r");
-    if (!f) {
+    char resolved[MAX_RESOLVED_PATH];
+    resolve_session_path(path, session_ctx, resolved, sizeof(resolved));
+
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(resolved, "r", &f);
+    if (err != MIMI_OK) {
         snprintf(output, output_size, "Error: file not found: %s", path);
         cJSON_Delete(root);
         return MIMI_ERR_NOT_FOUND;
@@ -60,18 +78,20 @@ mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t o
     size_t max_read = output_size - 1;
     if (max_read > MAX_FILE_SIZE) max_read = MAX_FILE_SIZE;
 
-    size_t n = fread(output, 1, max_read, f);
+    size_t n = 0;
+    err = mimi_fs_read(f, output, max_read, &n);
     output[n] = '\0';
-    fclose(f);
+    mimi_fs_close(f);
 
     MIMI_LOGI(TAG, "read_file: %s (%d bytes)", path, (int)n);
     cJSON_Delete(root);
-    return MIMI_OK;
+    return err;
 }
 
 /* ── write_file ────────────────────────────────────────────── */
 
-mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t output_size,
+                                   const mimi_session_ctx_t *session_ctx)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
@@ -83,7 +103,7 @@ mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t 
     const char *content = cJSON_GetStringValue(cJSON_GetObjectItem(root, "content"));
 
     if (!validate_path(path)) {
-        snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
+        snprintf(output, output_size, "Error: path must not contain '..'");
         cJSON_Delete(root);
         return MIMI_ERR_INVALID_ARG;
     }
@@ -93,20 +113,23 @@ mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t 
         return MIMI_ERR_INVALID_ARG;
     }
 
-    char resolved[256];
-    mimi_fs_resolve_path(path, resolved, sizeof(resolved));
-    FILE *f = fopen(resolved, "w");
-    if (!f) {
+    char resolved[MAX_RESOLVED_PATH];
+    resolve_session_path(path, session_ctx, resolved, sizeof(resolved));
+
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(resolved, "w", &f);
+    if (err != MIMI_OK) {
         snprintf(output, output_size, "Error: cannot open file for writing: %s", path);
         cJSON_Delete(root);
         return MIMI_ERR_IO;
     }
 
     size_t len = strlen(content);
-    size_t written = fwrite(content, 1, len, f);
-    fclose(f);
+    size_t written = 0;
+    err = mimi_fs_write(f, content, len, &written);
+    mimi_fs_close(f);
 
-    if (written != len) {
+    if (err != MIMI_OK || written != len) {
         snprintf(output, output_size, "Error: wrote %d of %d bytes to %s", (int)written, (int)len, path);
         cJSON_Delete(root);
         return MIMI_ERR_IO;
@@ -120,7 +143,8 @@ mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t 
 
 /* ── edit_file ─────────────────────────────────────────────── */
 
-mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t output_size,
+                                  const mimi_session_ctx_t *session_ctx)
 {
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
@@ -133,7 +157,7 @@ mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t o
     const char *new_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "new_string"));
 
     if (!validate_path(path)) {
-        snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
+        snprintf(output, output_size, "Error: path must not contain '..'");
         cJSON_Delete(root);
         return MIMI_ERR_INVALID_ARG;
     }
@@ -143,23 +167,26 @@ mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t o
         return MIMI_ERR_INVALID_ARG;
     }
 
+    char resolved[MAX_RESOLVED_PATH];
+    resolve_session_path(path, session_ctx, resolved, sizeof(resolved));
+
     /* Read existing file */
-    char resolved[256];
-    mimi_fs_resolve_path(path, resolved, sizeof(resolved));
-    FILE *f = fopen(resolved, "r");
-    if (!f) {
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(resolved, "r", &f);
+    if (err != MIMI_OK) {
         snprintf(output, output_size, "Error: file not found: %s", path);
         cJSON_Delete(root);
         return MIMI_ERR_NOT_FOUND;
     }
 
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    (void)mimi_fs_seek(f, 0, SEEK_END);
+    long file_size = 0;
+    (void)mimi_fs_tell(f, &file_size);
+    (void)mimi_fs_seek(f, 0, SEEK_SET);
 
     if (file_size <= 0 || file_size > MAX_FILE_SIZE) {
         snprintf(output, output_size, "Error: file too large or empty (%ld bytes)", file_size);
-        fclose(f);
+        mimi_fs_close(f);
         cJSON_Delete(root);
         return MIMI_ERR_FAIL;
     }
@@ -173,15 +200,23 @@ mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t o
     if (!buf || !result) {
         free(buf);
         free(result);
-        fclose(f);
+        mimi_fs_close(f);
         snprintf(output, output_size, "Error: out of memory");
         cJSON_Delete(root);
         return MIMI_ERR_NO_MEM;
     }
 
-    size_t n = fread(buf, 1, file_size, f);
+    size_t n = 0;
+    err = mimi_fs_read(f, buf, (size_t)file_size, &n);
     buf[n] = '\0';
-    fclose(f);
+    mimi_fs_close(f);
+    if (err != MIMI_OK) {
+        free(buf);
+        free(result);
+        snprintf(output, output_size, "Error: read failed for %s", path);
+        cJSON_Delete(root);
+        return err;
+    }
 
     /* Find and replace first occurrence */
     char *pos = strstr(buf, old_str);
@@ -205,17 +240,23 @@ mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t o
     free(buf);
 
     /* Write back */
-    f = fopen(resolved, "w");
-    if (!f) {
+    err = mimi_fs_open(resolved, "w", &f);
+    if (err != MIMI_OK) {
         snprintf(output, output_size, "Error: cannot open file for writing: %s", path);
         free(result);
         cJSON_Delete(root);
         return MIMI_ERR_IO;
     }
 
-    fwrite(result, 1, total, f);
-    fclose(f);
+    size_t w = 0;
+    err = mimi_fs_write(f, result, total, &w);
+    mimi_fs_close(f);
     free(result);
+    if (err != MIMI_OK || w != total) {
+        snprintf(output, output_size, "Error: failed to write updated content to %s", path);
+        cJSON_Delete(root);
+        return MIMI_ERR_IO;
+    }
 
     snprintf(output, output_size, "OK: edited %s (replaced %d bytes with %d bytes)", path, (int)old_len, (int)new_len);
     MIMI_LOGI(TAG, "edit_file: %s", path);
@@ -225,7 +266,8 @@ mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t o
 
 /* ── list_dir ──────────────────────────────────────────────── */
 
-mimi_err_t tool_list_dir_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_list_dir_execute(const char *input_json, char *output, size_t output_size,
+                                 const mimi_session_ctx_t *session_ctx)
 {
     cJSON *root = cJSON_Parse(input_json);
     const char *prefix = NULL;
@@ -236,33 +278,38 @@ mimi_err_t tool_list_dir_execute(const char *input_json, char *output, size_t ou
         }
     }
 
-    char dir_path[256];
-    mimi_fs_resolve_path(MIMI_SPIFFS_BASE, dir_path, sizeof(dir_path));
-    DIR *dir = opendir(dir_path);
-    if (!dir) {
-        snprintf(output, output_size, "Error: cannot open %s directory", MIMI_SPIFFS_BASE);
+    const char *list_path = ".";
+    if (session_ctx && session_ctx->workspace_root[0]) {
+        list_path = session_ctx->workspace_root;
+    }
+
+    mimi_dir_t *dir = NULL;
+    mimi_err_t err = mimi_fs_opendir(list_path, &dir);
+    if (err != MIMI_OK) {
+        snprintf(output, output_size, "Error: cannot open current directory");
         cJSON_Delete(root);
         return MIMI_ERR_IO;
     }
 
     size_t off = 0;
-    struct dirent *ent;
     int count = 0;
 
-    while ((ent = readdir(dir)) != NULL && off < output_size - 1) {
-        /* Build full path: SPIFFS entries are just filenames with embedded slashes */
-        char full_path[512];
-        snprintf(full_path, sizeof(full_path), "%s/%s", MIMI_SPIFFS_BASE, ent->d_name);
+    for (;;) {
+        bool has = false;
+        char name[256];
+        err = mimi_fs_readdir(dir, name, sizeof(name), &has);
+        if (err != MIMI_OK) break;
+        if (!has) break;
 
-        if (prefix && strncmp(full_path, prefix, strlen(prefix)) != 0) {
+        if (prefix && strncmp(name, prefix, strlen(prefix)) != 0) {
             continue;
         }
 
-        off += snprintf(output + off, output_size - off, "%s\n", full_path);
+        off += snprintf(output + off, output_size - off, "%s\n", name);
         count++;
     }
 
-    closedir(dir);
+    mimi_fs_closedir(dir);
 
     if (count == 0) {
         snprintf(output, output_size, "(no files found)");
@@ -270,5 +317,5 @@ mimi_err_t tool_list_dir_execute(const char *input_json, char *output, size_t ou
 
     MIMI_LOGI(TAG, "list_dir: %d files (prefix=%s)", count, prefix ? prefix : "(none)");
     cJSON_Delete(root);
-    return MIMI_OK;
+    return (err == MIMI_OK) ? MIMI_OK : err;
 }

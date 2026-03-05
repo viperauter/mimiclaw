@@ -1,9 +1,9 @@
 #include "llm/llm_proxy.h"
-#include "mimi_config.h"
+#include "config.h"
 
-#include "platform/http.h"
-#include "platform/log.h"
-
+#include "http/http.h"
+#include "log.h"
+#include "mimi_err.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -15,9 +15,18 @@ static const char *TAG = "llm_posix";
 #define LLM_DUMP_MAX_BYTES   (16 * 1024)
 #define LLM_DUMP_CHUNK_BYTES 320
 
+#define LLM_LOG_VERBOSE_PAYLOAD 0
+#define LLM_LOG_PREVIEW_BYTES 160
+
+static const char *ANTHROPIC_API_URL  = "https://api.anthropic.com/v1/messages";
+static const char *OPENAI_API_URL     = "https://api.openai.com/v1/chat/completions";
+static const char *OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
+static const char *ANTHROPIC_VERSION  = "2023-06-01";
+
 static char s_api_key[LLM_API_KEY_MAX_LEN] = {0};
-static char s_model[LLM_MODEL_MAX_LEN] = MIMI_LLM_DEFAULT_MODEL;
-static char s_provider[16] = MIMI_LLM_PROVIDER_DEFAULT;
+static char s_model[LLM_MODEL_MAX_LEN] = {0};
+static char s_provider[16] = {0};
+static char s_api_override[256] = {0}; /* cfg.apiUrl or cfg.api_base */
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -39,7 +48,7 @@ static void llm_log_payload(const char *label, const char *payload)
     }
 
     size_t total = strlen(payload);
-#if MIMI_LLM_LOG_VERBOSE_PAYLOAD
+#if LLM_LOG_VERBOSE_PAYLOAD
     size_t shown = total > LLM_DUMP_MAX_BYTES ? LLM_DUMP_MAX_BYTES : total;
     MIMI_LOGI(TAG, "%s (%u bytes)%s",
               label,
@@ -55,9 +64,9 @@ static void llm_log_payload(const char *label, const char *payload)
         MIMI_LOGI(TAG, "%s[%u]: %s", label, (unsigned) off, chunk);
     }
 #else
-    if (MIMI_LLM_LOG_PREVIEW_BYTES > 0) {
-        size_t shown = total > MIMI_LLM_LOG_PREVIEW_BYTES ? MIMI_LLM_LOG_PREVIEW_BYTES : total;
-        char preview[MIMI_LLM_LOG_PREVIEW_BYTES + 1];
+    if (LLM_LOG_PREVIEW_BYTES > 0) {
+        size_t shown = total > (size_t)LLM_LOG_PREVIEW_BYTES ? (size_t)LLM_LOG_PREVIEW_BYTES : total;
+        char preview[LLM_LOG_PREVIEW_BYTES + 1];
         memcpy(preview, payload, shown);
         preview[shown] = '\0';
         for (size_t i = 0; i < shown; i++) {
@@ -88,29 +97,36 @@ static bool provider_is_openrouter(void)
 
 static const char *llm_api_url(void)
 {
-    if (provider_is_openrouter()) return MIMI_OPENROUTER_API_URL;
-    if (provider_is_openai()) return MIMI_OPENAI_API_URL;
-    return MIMI_LLM_API_URL;
+    if (s_api_override[0] != '\0') return s_api_override;
+    if (provider_is_openrouter()) return OPENROUTER_API_URL;
+    if (provider_is_openai()) return OPENAI_API_URL;
+    return ANTHROPIC_API_URL;
 }
 
 /* ── Init & setters (POSIX: in-memory only) ───────────────────── */
 
 mimi_err_t llm_proxy_init(void)
 {
-    if (MIMI_SECRET_API_KEY[0] != '\0') {
-        safe_copy(s_api_key, sizeof(s_api_key), MIMI_SECRET_API_KEY);
+    const mimi_config_t *cfg = mimi_config_get();
+    if (cfg->api_key[0] != '\0') {
+        safe_copy(s_api_key, sizeof(s_api_key), cfg->api_key);
     }
-    if (MIMI_SECRET_MODEL[0] != '\0') {
-        safe_copy(s_model, sizeof(s_model), MIMI_SECRET_MODEL);
+    if (cfg->model[0] != '\0') {
+        safe_copy(s_model, sizeof(s_model), cfg->model);
     }
-    if (MIMI_SECRET_MODEL_PROVIDER[0] != '\0') {
-        safe_copy(s_provider, sizeof(s_provider), MIMI_SECRET_MODEL_PROVIDER);
+    if (cfg->provider[0] != '\0') {
+        safe_copy(s_provider, sizeof(s_provider), cfg->provider);
+    }
+    if (cfg->api_url[0] != '\0') {
+        safe_copy(s_api_override, sizeof(s_api_override), cfg->api_url);
+    } else if (cfg->api_base[0] != '\0') {
+        safe_copy(s_api_override, sizeof(s_api_override), cfg->api_base);
     }
 
     if (s_api_key[0]) {
         MIMI_LOGI(TAG, "LLM proxy initialized (provider=%s, model=%s)", s_provider, s_model);
     } else {
-        MIMI_LOGW(TAG, "No API key configured. Set MIMI_SECRET_API_KEY in mimi_secrets.h");
+        MIMI_LOGW(TAG, "No API key configured. Set in config.json (providers.*.apiKey)");
     }
     return MIMI_OK;
 }
@@ -167,14 +183,20 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
 
     if (s_api_key[0] == '\0') return MIMI_ERR_INVALID_STATE;
 
+    const mimi_config_t *cfg = mimi_config_get();
+    int max_tokens = (cfg->max_tokens > 0) ? cfg->max_tokens : 8192;
+    double temperature = cfg->temperature;
+
     cJSON *body = cJSON_CreateObject();
     if (!body) return MIMI_ERR_NO_MEM;
 
     cJSON_AddStringToObject(body, "model", s_model);
     if (provider_is_openai() || provider_is_openrouter()) {
-        cJSON_AddNumberToObject(body, "max_completion_tokens", MIMI_LLM_MAX_TOKENS);
+        cJSON_AddNumberToObject(body, "max_completion_tokens", max_tokens);
+        cJSON_AddNumberToObject(body, "temperature", temperature);
     } else {
-        cJSON_AddNumberToObject(body, "max_tokens", MIMI_LLM_MAX_TOKENS);
+        cJSON_AddNumberToObject(body, "max_tokens", max_tokens);
+        cJSON_AddNumberToObject(body, "temperature", temperature);
     }
 
     if (provider_is_openai() || provider_is_openrouter()) {
@@ -222,7 +244,7 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
                  "Content-Type: application/json\r\n"
                  "x-api-key: %s\r\n"
                  "anthropic-version: %s\r\n",
-                 s_api_key, MIMI_LLM_API_VERSION);
+                 s_api_key, ANTHROPIC_VERSION);
     }
 
     mimi_http_request_t req = {
@@ -296,7 +318,7 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
                 if (tool_calls && cJSON_IsArray(tool_calls)) {
                     cJSON *tc;
                     cJSON_ArrayForEach(tc, tool_calls) {
-                        if (resp->call_count >= MIMI_MAX_TOOL_CALLS) break;
+                        if (resp->call_count >= LLM_MAX_TOOL_CALLS) break;
                         llm_tool_call_t *call = &resp->calls[resp->call_count];
                         cJSON *id = cJSON_GetObjectItem(tc, "id");
                         cJSON *func = cJSON_GetObjectItem(tc, "function");
@@ -360,7 +382,7 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
             cJSON_ArrayForEach(block, content) {
                 cJSON *btype = cJSON_GetObjectItem(block, "type");
                 if (!btype || strcmp(btype->valuestring, "tool_use") != 0) continue;
-                if (resp->call_count >= MIMI_MAX_TOOL_CALLS) break;
+                if (resp->call_count >= LLM_MAX_TOOL_CALLS) break;
 
                 llm_tool_call_t *call = &resp->calls[resp->call_count];
 

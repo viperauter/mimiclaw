@@ -1,6 +1,7 @@
-#include "platform/kv.h"
-#include "platform/log.h"
-#include "platform/os.h"
+#include "kv.h"
+#include "log.h"
+#include "os/os.h"
+#include "fs/fs.h"
 
 #include "cJSON.h"
 
@@ -31,31 +32,34 @@ static cJSON *get_ns_obj(const char *ns, bool create)
 
 static mimi_err_t load_file(void)
 {
-    FILE *f = fopen(s_path, "rb");
-    if (!f) {
-        if (errno == ENOENT) {
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(s_path, "rb", &f);
+    if (err != MIMI_OK) {
+        if (err == MIMI_ERR_NOT_FOUND) {
             s_root = cJSON_CreateObject();
             return s_root ? MIMI_OK : MIMI_ERR_NO_MEM;
         }
         return MIMI_ERR_IO;
     }
 
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    (void)mimi_fs_seek(f, 0, SEEK_END);
+    long n = 0;
+    (void)mimi_fs_tell(f, &n);
+    (void)mimi_fs_seek(f, 0, SEEK_SET);
     if (n < 0 || n > (10 * 1024 * 1024)) {  // sanity
-        fclose(f);
+        mimi_fs_close(f);
         return MIMI_ERR_IO;
     }
 
     char *buf = (char *)calloc(1, (size_t)n + 1);
     if (!buf) {
-        fclose(f);
+        mimi_fs_close(f);
         return MIMI_ERR_NO_MEM;
     }
 
-    size_t r = fread(buf, 1, (size_t)n, f);
-    fclose(f);
+    size_t r = 0;
+    (void)mimi_fs_read(f, buf, (size_t)n, &r);
+    mimi_fs_close(f);
     buf[r] = '\0';
 
     cJSON *parsed = cJSON_Parse(buf);
@@ -81,21 +85,23 @@ static mimi_err_t save_file_locked(void)
     char tmp[300];
     snprintf(tmp, sizeof(tmp), "%s.tmp", s_path);
 
-    FILE *f = fopen(tmp, "wb");
-    if (!f) {
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(tmp, "wb", &f);
+    if (err != MIMI_OK) {
         free(json);
         return MIMI_ERR_IO;
     }
     size_t len = strlen(json);
-    if (fwrite(json, 1, len, f) != len) {
-        fclose(f);
+    size_t written = 0;
+    err = mimi_fs_write(f, json, len, &written);
+    mimi_fs_close(f);
+    if (err != MIMI_OK || written != len) {
         free(json);
         return MIMI_ERR_IO;
     }
-    fclose(f);
     free(json);
 
-    if (rename(tmp, s_path) != 0) {
+    if (mimi_fs_rename(tmp, s_path) != MIMI_OK) {
         return MIMI_ERR_IO;
     }
     return MIMI_OK;

@@ -1,7 +1,8 @@
 #include "gateway/ws_server.h"
-#include "mimi_config.h"
+#include "config.h"
 #include "bus/message_bus.h"
-#include "platform/log.h"
+#include "log.h"
+#include "runtime.h"
 
 #include "mongoose.h"
 #include "cJSON.h"
@@ -9,7 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-static const char *TAG = "ws_posix";
+static const char *TAG = "ws";
 
 typedef struct ws_client {
     struct mg_connection *c;
@@ -17,13 +18,7 @@ typedef struct ws_client {
     struct ws_client *next;
 } ws_client_t;
 
-static struct mg_mgr *s_mgr = NULL;
 static ws_client_t *s_clients = NULL;
-
-void ws_server_set_mgr(struct mg_mgr *mgr)
-{
-    s_mgr = mgr;
-}
 
 static ws_client_t *find_client_by_chat_id(const char *chat_id)
 {
@@ -131,14 +126,18 @@ static void ws_ev(struct mg_connection *c, int ev, void *ev_data)
 
 mimi_err_t ws_server_start(void)
 {
-    if (!s_mgr) {
-        MIMI_LOGE(TAG, "ws_server_start: mg_mgr not set");
+    struct mg_mgr *mgr = (struct mg_mgr *)mimi_runtime_get_event_loop();
+    if (!mgr) {
+        MIMI_LOGE(TAG, "ws_server_start: event loop not initialized");
         return MIMI_ERR_INVALID_STATE;
     }
 
+    const mimi_config_t *cfg = mimi_config_get();
+    int port = (cfg->ws_port > 0) ? cfg->ws_port : 18789;
+
     char url[64];
-    snprintf(url, sizeof(url), "http://0.0.0.0:%d", MIMI_WS_PORT);
-    if (!mg_http_listen(s_mgr, url, ws_ev, NULL)) {
+    snprintf(url, sizeof(url), "http://0.0.0.0:%d", port);
+    if (!mg_http_listen(mgr, url, ws_ev, NULL)) {
         MIMI_LOGE(TAG, "Failed to start WebSocket server on %s", url);
         return MIMI_ERR_IO;
     }
@@ -149,7 +148,7 @@ mimi_err_t ws_server_start(void)
 
 mimi_err_t ws_server_send(const char *chat_id, const char *text)
 {
-    if (!s_mgr) return MIMI_ERR_INVALID_STATE;
+    /* Event loop is used only indirectly via stored connections. */
     if (!chat_id || !text) return MIMI_ERR_INVALID_ARG;
 
     ws_client_t *client = find_client_by_chat_id(chat_id);

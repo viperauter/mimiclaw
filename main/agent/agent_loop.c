@@ -1,6 +1,6 @@
 #include "agent_loop.h"
 #include "agent/context_builder.h"
-#include "mimi_config.h"
+#include "config.h"
 #include "bus/message_bus.h"
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
@@ -9,13 +9,16 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include "platform/log.h"
-#include "platform/os.h"
+#include "log.h"
+#include "os/os.h"
 #include "cJSON.h"
+#include "fs/fs.h"
 
 static const char *TAG = "agent";
 
-#define TOOL_OUTPUT_SIZE  (8 * 1024)
+#define CONTEXT_BUF_SIZE     (16 * 1024)
+#define LLM_STREAM_BUF_SIZE  (32 * 1024)
+#define TOOL_OUTPUT_SIZE     (8 * 1024)
 
 /* Build the assistant content array from llm_response_t for the messages history.
  * Returns a cJSON array with text and tool_use blocks. */
@@ -153,9 +156,11 @@ static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *m
             tool_input = patched_input;
         }
 
-        /* Execute tool */
+        /* Execute tool with session context */
         tool_output[0] = '\0';
-        tool_registry_execute(call->name, tool_input, tool_output, tool_output_size);
+        mimi_session_ctx_t session_ctx;
+        session_ctx_from_msg(msg, &session_ctx);
+        tool_registry_execute(call->name, tool_input, tool_output, tool_output_size, &session_ctx);
         free(patched_input);
 
         MIMI_LOGI(TAG, "Tool %s result: %d bytes", call->name, (int)strlen(tool_output));
@@ -176,8 +181,12 @@ static void agent_loop_task(void *arg)
     (void)arg;
     MIMI_LOGI(TAG, "Agent loop started");
 
-    char *system_prompt = (char *)calloc(1, MIMI_CONTEXT_BUF_SIZE);
-    char *history_json = (char *)calloc(1, MIMI_LLM_STREAM_BUF_SIZE);
+    const mimi_config_t *cfg = mimi_config_get();
+    int memory_window = (cfg->memory_window > 0) ? cfg->memory_window : 100;
+    int max_iters = (cfg->max_tool_iterations > 0) ? cfg->max_tool_iterations : 40;
+
+    char *system_prompt = (char *)calloc(1, CONTEXT_BUF_SIZE);
+    char *history_json = (char *)calloc(1, LLM_STREAM_BUF_SIZE);
     char *tool_output = (char *)calloc(1, TOOL_OUTPUT_SIZE);
 
     if (!system_prompt || !history_json || !tool_output) {
@@ -197,14 +206,23 @@ static void agent_loop_task(void *arg)
 
         MIMI_LOGI(TAG, "Processing message from %s:%s", msg.channel, msg.chat_id);
 
+        /* Ensure per-session workspace directory exists:
+         *   workspaces/<channel>_<chat_id>/
+         * (This is a filesystem layout convention; tool routing can use it later.) */
+        if (msg.channel[0] && msg.chat_id[0]) {
+            char ws_dir[512];
+            snprintf(ws_dir, sizeof(ws_dir), "workspaces/%s_%s", msg.channel, msg.chat_id);
+            (void)mimi_fs_mkdir_p(ws_dir);
+        }
+
         /* 1. Build system prompt */
-        context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
-        append_turn_context_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE, &msg);
+        context_build_system_prompt(system_prompt, CONTEXT_BUF_SIZE);
+        append_turn_context_prompt(system_prompt, CONTEXT_BUF_SIZE, &msg);
         MIMI_LOGI(TAG, "LLM turn context: channel=%s chat_id=%s", msg.channel, msg.chat_id);
 
         /* 2. Load session history into cJSON array */
-        session_get_history_json(msg.chat_id, history_json,
-                                 MIMI_LLM_STREAM_BUF_SIZE, MIMI_AGENT_MAX_HISTORY);
+        session_get_history_json(msg.channel, msg.chat_id, history_json,
+                                 LLM_STREAM_BUF_SIZE, memory_window);
 
         cJSON *messages = cJSON_Parse(history_json);
         if (!messages) messages = cJSON_CreateArray();
@@ -220,10 +238,9 @@ static void agent_loop_task(void *arg)
         int iteration = 0;
         bool sent_working_status = false;
 
-        while (iteration < MIMI_AGENT_MAX_TOOL_ITER) {
+        while (iteration < max_iters) {
             /* Send "working" indicator before each API call */
-#if MIMI_AGENT_SEND_WORKING_STATUS
-            if (!sent_working_status && strcmp(msg.channel, MIMI_CHAN_SYSTEM) != 0) {
+            if (cfg->send_working_status && !sent_working_status && strcmp(msg.channel, MIMI_CHAN_SYSTEM) != 0) {
                 mimi_msg_t status = {0};
                 strncpy(status.channel, msg.channel, sizeof(status.channel) - 1);
                 strncpy(status.chat_id, msg.chat_id, sizeof(status.chat_id) - 1);
@@ -237,7 +254,6 @@ static void agent_loop_task(void *arg)
                     }
                 }
             }
-#endif
 
             llm_response_t resp;
             err = llm_chat_tools(system_prompt, messages, tools_json, &resp);
@@ -280,8 +296,8 @@ static void agent_loop_task(void *arg)
         /* 5. Send response */
         if (final_text && final_text[0]) {
             /* Save to session (only user text + final assistant text) */
-            mimi_err_t save_user = session_append(msg.chat_id, "user", msg.content);
-            mimi_err_t save_asst = session_append(msg.chat_id, "assistant", final_text);
+            mimi_err_t save_user = session_append(msg.channel, msg.chat_id, "user", msg.content);
+            mimi_err_t save_asst = session_append(msg.channel, msg.chat_id, "assistant", final_text);
             if (save_user != MIMI_OK || save_asst != MIMI_OK) {
                 MIMI_LOGW(TAG, "Session save failed for chat %s (user=%s, assistant=%s)",
                          msg.chat_id,

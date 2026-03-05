@@ -1,6 +1,6 @@
 #pragma once
 
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -61,7 +61,3 @@ mimi_err_t cron_remove_job(const char *job_id);
  * @param count     Output: number of jobs
  */
 void cron_list_jobs(const cron_job_t **jobs, int *count);
-
-/* POSIX: provide mg_mgr so cron can schedule a timer. */
-struct mg_mgr;
-void cron_service_set_mgr(struct mg_mgr *mgr);

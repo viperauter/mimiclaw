@@ -1,5 +1,5 @@
 #include "heartbeat/heartbeat.h"
-#include "mimi_config.h"
+#include "config.h"
 #include "bus/message_bus.h"
 
 #include <stdio.h>
@@ -7,17 +7,13 @@
 #include <string.h>
 #include <stdbool.h>
 #include <ctype.h>
-#include "platform/log.h"
-#include "mongoose.h"
+#include "log.h"
+#include "os/os.h"
+#include "fs/fs.h"
 
 static const char *TAG = "heartbeat";
 
-#define HEARTBEAT_PROMPT \
-    "Read " MIMI_HEARTBEAT_FILE " and follow any instructions or tasks listed there. " \
-    "If nothing needs attention, reply with just: HEARTBEAT_OK"
-
-static struct mg_mgr *s_mgr = NULL;
-static struct mg_timer *s_timer = NULL;
+static mimi_timer_handle_t s_timer_handle = NULL;
 
 /* ── Content check ────────────────────────────────────────────── */
 
@@ -30,15 +26,21 @@ static struct mg_timer *s_timer = NULL;
  */
 static bool heartbeat_has_tasks(void)
 {
-    FILE *f = fopen(MIMI_HEARTBEAT_FILE, "r");
-    if (!f) {
+    const mimi_config_t *cfg = mimi_config_get();
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(cfg->heartbeat_file, "r", &f);
+    if (err != MIMI_OK) {
         return false;
     }
 
     char line[256];
     bool found_task = false;
 
-    while (fgets(line, sizeof(line), f)) {
+    for (;;) {
+        bool eof = false;
+        err = mimi_fs_read_line(f, line, sizeof(line), &eof);
+        if (err != MIMI_OK) break;
+        if (eof) break;
         /* Skip leading whitespace */
         const char *p = line;
         while (*p && isspace((unsigned char)*p)) {
@@ -68,7 +70,7 @@ static bool heartbeat_has_tasks(void)
         break;
     }
 
-    fclose(f);
+    mimi_fs_close(f);
     return found_task;
 }
 
@@ -81,11 +83,18 @@ static bool heartbeat_send(void)
         return false;
     }
 
+    const mimi_config_t *cfg = mimi_config_get();
+    char prompt[512];
+    snprintf(prompt, sizeof(prompt),
+             "Read %s and follow any instructions or tasks listed there. "
+             "If nothing needs attention, reply with just: HEARTBEAT_OK",
+             cfg->heartbeat_file);
+
     mimi_msg_t msg;
     memset(&msg, 0, sizeof(msg));
     strncpy(msg.channel, MIMI_CHAN_SYSTEM, sizeof(msg.channel) - 1);
     strncpy(msg.chat_id, "heartbeat", sizeof(msg.chat_id) - 1);
-    msg.content = strdup(HEARTBEAT_PROMPT);
+    msg.content = strdup(prompt);
 
     if (!msg.content) {
         MIMI_LOGE(TAG, "Failed to allocate heartbeat prompt");
@@ -113,33 +122,35 @@ static void heartbeat_timer_cb(void *arg)
 
 mimi_err_t heartbeat_init(void)
 {
+    const mimi_config_t *cfg = mimi_config_get();
     MIMI_LOGI(TAG, "Heartbeat service initialized (file: %s, interval: %ds)",
-             MIMI_HEARTBEAT_FILE, MIMI_HEARTBEAT_INTERVAL_MS / 1000);
+             cfg->heartbeat_file,
+             ((cfg->heartbeat_interval_ms > 0) ? cfg->heartbeat_interval_ms : (30 * 60 * 1000)) / 1000);
     return MIMI_OK;
 }
 
 mimi_err_t heartbeat_start(void)
 {
-    if (!s_mgr) {
-        MIMI_LOGW(TAG, "Heartbeat start requires mg_mgr (call heartbeat_set_mgr first)");
-        return MIMI_ERR_INVALID_STATE;
-    }
-    if (s_timer) {
+    if (s_timer_handle != NULL) {
         MIMI_LOGW(TAG, "Heartbeat timer already running");
         return MIMI_OK;
     }
 
-    s_timer = mg_timer_add(s_mgr, MIMI_HEARTBEAT_INTERVAL_MS, MG_TIMER_REPEAT, heartbeat_timer_cb, NULL);
-    if (!s_timer) return MIMI_ERR_NO_MEM;
-    MIMI_LOGI(TAG, "Heartbeat started (every %d min)", MIMI_HEARTBEAT_INTERVAL_MS / 60000);
+    const mimi_config_t *cfg = mimi_config_get();
+    int interval_ms = (cfg->heartbeat_interval_ms > 0) ? cfg->heartbeat_interval_ms : (30 * 60 * 1000);
+
+    mimi_err_t err = mimi_timer_start(interval_ms, true,
+                                       heartbeat_timer_cb, NULL,
+                                       &s_timer_handle);
+    if (err != MIMI_OK) return err;
+    MIMI_LOGI(TAG, "Heartbeat started (every %d min)", interval_ms / 60000);
     return MIMI_OK;
 }
 
 void heartbeat_stop(void)
 {
-    if (s_mgr && s_timer) {
-        mg_timer_free(&s_mgr->timers, s_timer);
-        s_timer = NULL;
+    if (s_timer_handle != NULL) {
+        mimi_timer_stop(&s_timer_handle);
         MIMI_LOGI(TAG, "Heartbeat stopped");
     }
 }
@@ -147,9 +158,4 @@ void heartbeat_stop(void)
 bool heartbeat_trigger(void)
 {
     return heartbeat_send();
-}
-
-void heartbeat_set_mgr(struct mg_mgr *mgr)
-{
-    s_mgr = mgr;
 }

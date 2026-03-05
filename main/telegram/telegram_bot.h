@@ -1,6 +1,6 @@
 #pragma once
 
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 
 /**
  * Initialize the Telegram bot.

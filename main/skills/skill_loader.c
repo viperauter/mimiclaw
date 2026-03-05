@@ -1,17 +1,10 @@
 #include "skills/skill_loader.h"
-#include "mimi_config.h"
+#include "config.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <dirent.h>
-#include "platform/log.h"
-#include "platform/fs.h"
-
-#if defined(__unix__) || defined(__APPLE__)
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <errno.h>
-#endif
+#include "log.h"
+#include "fs/fs.h"
 
 static const char *TAG = "skills";
 
@@ -48,7 +41,7 @@ static const char *TAG = "skills";
     "\n" \
     "## How to use\n" \
     "1. Use get_current_time for today's date\n" \
-    "2. Read " MIMI_SPIFFS_MEMORY_DIR "/MEMORY.md for user preferences and context\n" \
+    "2. Read MEMORY.md for user preferences and context\n" \
     "3. Read today's daily note if it exists\n" \
     "4. Use web_search for relevant news based on user interests\n" \
     "5. Compile a concise briefing covering:\n" \
@@ -77,7 +70,7 @@ static const char *TAG = "skills";
     "   - `## When to use` — trigger conditions\n" \
     "   - `## How to use` — step-by-step instructions\n" \
     "   - `## Example` — concrete example (optional but helpful)\n" \
-    "3. Save to `" MIMI_SKILLS_PREFIX "<name>.md` using write_file\n" \
+    "3. Save to `skills/<name>.md` using write_file\n" \
     "4. The skill will be automatically available after the next conversation\n" \
     "\n" \
     "## Best practices\n" \
@@ -88,7 +81,7 @@ static const char *TAG = "skills";
     "\n" \
     "## Example\n" \
     "To create a \"translate\" skill:\n" \
-    "write_file path=\"" MIMI_SKILLS_PREFIX "translate.md\" content=\"# Translate\\n\\nTranslate text between languages.\\n\\n" \
+    "write_file path=\"skills/translate.md\" content=\"# Translate\\n\\nTranslate text between languages.\\n\\n" \
     "## When to use\\nWhen the user asks to translate text.\\n\\n" \
     "## How to use\\n1. Identify source and target languages\\n" \
     "2. Translate directly using your language knowledge\\n" \
@@ -112,45 +105,31 @@ static const builtin_skill_t s_builtins[] = {
 
 static void install_builtin(const builtin_skill_t *skill)
 {
-    char virt[128];
-    snprintf(virt, sizeof(virt), "%s%s.md", MIMI_SKILLS_PREFIX, skill->filename);
+    const mimi_config_t *cfg = mimi_config_get();
+    const char *prefix = cfg->skills_prefix[0] ? cfg->skills_prefix : "skills/";
     char path[256];
-    mimi_fs_resolve_path(virt, path, sizeof(path));
+    snprintf(path, sizeof(path), "%s%s.md", prefix, skill->filename);
 
     /* Check if already exists */
-    FILE *f = fopen(path, "r");
-    if (f) {
-        fclose(f);
+    bool exists = false;
+    if (mimi_fs_exists(path, &exists) == MIMI_OK && exists) {
         MIMI_LOGD(TAG, "Skill exists: %s", path);
         return;
     }
 
-#if defined(__unix__) || defined(__APPLE__)
-    /* Ensure parent directories exist on POSIX (e.g. ./spiffs/skills/). */
-    {
-        char tmp[256];
-        snprintf(tmp, sizeof(tmp), "%s", path);
-        for (char *p = tmp + 1; *p; p++) {
-            if (*p != '/') continue;
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-                /* best-effort; will fail later on fopen if truly fatal */
-                MIMI_LOGD(TAG, "mkdir failed: %s", tmp);
-            }
-            *p = '/';
-        }
-    }
-#endif
+    /* Ensure parent directories exist (best-effort). */
+    (void)mimi_fs_mkdir_p(prefix);
 
     /* Write built-in skill */
-    f = fopen(path, "w");
-    if (!f) {
+    mimi_file_t *f = NULL;
+    if (mimi_fs_open(path, "w", &f) != MIMI_OK) {
         MIMI_LOGE(TAG, "Cannot write skill: %s", path);
         return;
     }
 
-    fputs(skill->content, f);
-    fclose(f);
+    size_t written = 0;
+    (void)mimi_fs_write(f, skill->content, strlen(skill->content), &written);
+    mimi_fs_close(f);
     MIMI_LOGI(TAG, "Installed built-in skill: %s", path);
 }
 
@@ -194,12 +173,15 @@ static const char *extract_title(const char *line, size_t len, char *out, size_t
 /**
  * Extract description: text between the first line and the first blank line.
  */
-static void extract_description(FILE *f, char *out, size_t out_size)
+static void extract_description_fs(mimi_file_t *f, char *out, size_t out_size)
 {
     size_t off = 0;
     char line[256];
 
-    while (fgets(line, sizeof(line), f) && off < out_size - 1) {
+    while (off < out_size - 1) {
+        bool eof = false;
+        if (mimi_fs_read_line(f, line, sizeof(line), &eof) != MIMI_OK) break;
+        if (eof) break;
         size_t len = strlen(line);
 
         /* Stop at blank line or section header */
@@ -228,45 +210,37 @@ static void extract_description(FILE *f, char *out, size_t out_size)
 
 size_t skill_loader_build_summary(char *buf, size_t size)
 {
-    char base_path[256];
-    mimi_fs_resolve_path(MIMI_SPIFFS_BASE, base_path, sizeof(base_path));
-    DIR *dir = opendir(base_path);
-    if (!dir) {
+    const mimi_config_t *cfg = mimi_config_get();
+    const char *skills_dir = cfg->skills_prefix[0] ? cfg->skills_prefix : "skills/";
+    mimi_dir_t *dir = NULL;
+    if (mimi_fs_opendir(skills_dir, &dir) != MIMI_OK) {
         MIMI_LOGW(TAG, "Cannot open skills base for enumeration");
         buf[0] = '\0';
         return 0;
     }
 
     size_t off = 0;
-    struct dirent *ent;
-    /* SPIFFS readdir returns filenames relative to the mount point (e.g. "skills/weather.md").
-       We match entries that start with "skills/" and end with ".md". */
-    const char *skills_subdir = "skills/";
-    const size_t subdir_len = strlen(skills_subdir);
-
-    while ((ent = readdir(dir)) != NULL && off < size - 1) {
-        const char *name = ent->d_name;
-
-        /* Match files under skills/ with .md extension */
-        if (strncmp(name, skills_subdir, subdir_len) != 0) continue;
-
+    while (off < size - 1) {
+        bool has = false;
+        char name[256];
+        if (mimi_fs_readdir(dir, name, sizeof(name), &has) != MIMI_OK) break;
+        if (!has) break;
         size_t name_len = strlen(name);
-        if (name_len < subdir_len + 4) continue;  /* at least "skills/x.md" */
+        if (name_len < 4) continue;  /* at least "x.md" */
         if (strcmp(name + name_len - 3, ".md") != 0) continue;
 
         /* Build full path */
-        char virt[296];
-        snprintf(virt, sizeof(virt), "%s/%s", MIMI_SPIFFS_BASE, name);
-        char full_path[296];
-        mimi_fs_resolve_path(virt, full_path, sizeof(full_path));
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", skills_dir, name);
 
-        FILE *f = fopen(full_path, "r");
-        if (!f) continue;
+        mimi_file_t *f = NULL;
+        if (mimi_fs_open(full_path, "r", &f) != MIMI_OK) continue;
 
         /* Read first line for title */
         char first_line[128];
-        if (!fgets(first_line, sizeof(first_line), f)) {
-            fclose(f);
+        bool eof = false;
+        if (mimi_fs_read_line(f, first_line, sizeof(first_line), &eof) != MIMI_OK || eof) {
+            mimi_fs_close(f);
             continue;
         }
 
@@ -275,8 +249,8 @@ size_t skill_loader_build_summary(char *buf, size_t size)
 
         /* Read description (until blank line) */
         char desc[256];
-        extract_description(f, desc, sizeof(desc));
-        fclose(f);
+        extract_description_fs(f, desc, sizeof(desc));
+        mimi_fs_close(f);
 
         /* Append to summary */
         off += snprintf(buf + off, size - off,
@@ -284,7 +258,7 @@ size_t skill_loader_build_summary(char *buf, size_t size)
             title, desc, full_path);
     }
 
-    closedir(dir);
+    mimi_fs_closedir(dir);
 
     buf[off] = '\0';
     MIMI_LOGI(TAG, "Skills summary: %d bytes", (int)off);

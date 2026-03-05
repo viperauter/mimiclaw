@@ -1,6 +1,6 @@
 #pragma once
 
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 
 /**
  * Initialize and start the WebSocket server on MIMI_WS_PORT.
@@ -23,7 +23,3 @@ mimi_err_t ws_server_send(const char *chat_id, const char *text);
  * Stop the WebSocket server.
  */
 mimi_err_t ws_server_stop(void);
-
-/* POSIX: provide mg_mgr so WS server can attach listeners and timers. */
-struct mg_mgr;
-void ws_server_set_mgr(struct mg_mgr *mgr);

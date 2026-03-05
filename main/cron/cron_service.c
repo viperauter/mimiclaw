@@ -1,24 +1,25 @@
 #include "cron/cron_service.h"
-#include "mimi_config.h"
+#include "config.h"
 #include "bus/message_bus.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "platform/log.h"
-#include "platform/random.h"
-#include "mongoose.h"
+#include <sys/time.h>
+#include "log.h"
+#include "os/os.h"
+#include "fs/fs.h"
+#include "random.h"
 #include "cJSON.h"
 
 static const char *TAG = "cron";
 
-#define MAX_CRON_JOBS  MIMI_CRON_MAX_JOBS
+#define MAX_CRON_JOBS  16
 
 static cron_job_t s_jobs[MAX_CRON_JOBS];
 static int s_job_count = 0;
-static struct mg_mgr *s_mgr = NULL;
-static struct mg_timer *s_timer = NULL;
+static mimi_timer_handle_t s_timer_handle = NULL;
 
 static mimi_err_t cron_save_jobs(void);
 
@@ -60,34 +61,43 @@ static void cron_generate_id(char *id_buf)
 
 static mimi_err_t cron_load_jobs(void)
 {
-    FILE *f = fopen(MIMI_CRON_FILE, "r");
-    if (!f) {
+    const mimi_config_t *cfg = mimi_config_get();
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(cfg->cron_file, "r", &f);
+    if (err != MIMI_OK) {
         MIMI_LOGI(TAG, "No cron file found, starting fresh");
         s_job_count = 0;
         return MIMI_OK;
     }
 
     /* Read entire file */
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    (void)mimi_fs_seek(f, 0, SEEK_END);
+    long fsize = 0;
+    (void)mimi_fs_tell(f, &fsize);
+    (void)mimi_fs_seek(f, 0, SEEK_SET);
 
     if (fsize <= 0 || fsize > 8192) {
         MIMI_LOGW(TAG, "Cron file invalid size: %ld", fsize);
-        fclose(f);
+        mimi_fs_close(f);
         s_job_count = 0;
         return MIMI_OK;
     }
 
     char *buf = malloc(fsize + 1);
     if (!buf) {
-        fclose(f);
+        mimi_fs_close(f);
         return MIMI_ERR_NO_MEM;
     }
 
-    size_t n = fread(buf, 1, fsize, f);
+    size_t n = 0;
+    err = mimi_fs_read(f, buf, (size_t)fsize, &n);
     buf[n] = '\0';
-    fclose(f);
+    mimi_fs_close(f);
+    if (err != MIMI_OK) {
+        free(buf);
+        s_job_count = 0;
+        return MIMI_OK;
+    }
 
     /* Parse JSON */
     cJSON *root = cJSON_Parse(buf);
@@ -215,24 +225,27 @@ static mimi_err_t cron_save_jobs(void)
         return MIMI_ERR_NO_MEM;
     }
 
-    FILE *f = fopen(MIMI_CRON_FILE, "w");
-    if (!f) {
-        MIMI_LOGE(TAG, "Failed to open %s for writing", MIMI_CRON_FILE);
+    const mimi_config_t *cfg = mimi_config_get();
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(cfg->cron_file, "w", &f);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to open %s for writing", cfg->cron_file);
         free(json_str);
         return MIMI_ERR_IO;
     }
 
     size_t len = strlen(json_str);
-    size_t written = fwrite(json_str, 1, len, f);
-    fclose(f);
+    size_t written = 0;
+    err = mimi_fs_write(f, json_str, len, &written);
+    mimi_fs_close(f);
     free(json_str);
 
-    if (written != len) {
+    if (err != MIMI_OK || written != len) {
         MIMI_LOGE(TAG, "Cron save incomplete: %d/%d bytes", (int)written, (int)len);
         return MIMI_ERR_IO;
     }
 
-    MIMI_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, MIMI_CRON_FILE);
+    MIMI_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, cfg->cron_file);
     return MIMI_OK;
 }
 
@@ -332,11 +345,7 @@ mimi_err_t cron_service_init(void)
 
 mimi_err_t cron_service_start(void)
 {
-    if (!s_mgr) {
-        MIMI_LOGW(TAG, "Cron start requires mg_mgr (call cron_service_set_mgr first)");
-        return MIMI_ERR_INVALID_STATE;
-    }
-    if (s_timer) {
+    if (s_timer_handle != NULL) {
         MIMI_LOGW(TAG, "Cron timer already running");
         return MIMI_OK;
     }
@@ -354,19 +363,23 @@ mimi_err_t cron_service_start(void)
         }
     }
 
-    s_timer = mg_timer_add(s_mgr, MIMI_CRON_CHECK_INTERVAL_MS, MG_TIMER_REPEAT, cron_task_main, NULL);
-    if (!s_timer) return MIMI_ERR_NO_MEM;
+    const mimi_config_t *cfg = mimi_config_get();
+    int interval_ms = (cfg->cron_check_interval_ms > 0) ? cfg->cron_check_interval_ms : (60 * 1000);
+
+    mimi_err_t err = mimi_timer_start(interval_ms, true,
+                                      (mimi_timer_fn_t)cron_task_main, NULL,
+                                      &s_timer_handle);
+    if (err != MIMI_OK) return err;
 
     MIMI_LOGI(TAG, "Cron service started (%d jobs, check every %ds)",
-             s_job_count, MIMI_CRON_CHECK_INTERVAL_MS / 1000);
+             s_job_count, interval_ms / 1000);
     return MIMI_OK;
 }
 
 void cron_service_stop(void)
 {
-    if (s_mgr && s_timer) {
-        mg_timer_free(&s_mgr->timers, s_timer);
-        s_timer = NULL;
+    if (s_timer_handle != NULL) {
+        mimi_timer_stop(&s_timer_handle);
         MIMI_LOGI(TAG, "Cron service stopped");
     }
 }
@@ -427,9 +440,4 @@ void cron_list_jobs(const cron_job_t **jobs, int *count)
 {
     *jobs = s_jobs;
     *count = s_job_count;
-}
-
-void cron_service_set_mgr(struct mg_mgr *mgr)
-{
-    s_mgr = mgr;
 }

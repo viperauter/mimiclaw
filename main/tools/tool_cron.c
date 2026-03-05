@@ -3,17 +3,20 @@
 #include "bus/message_bus.h"
 
 #include <string.h>
-#include <time.h>
 #include <stdio.h>
-#include "platform/log.h"
+#include "log.h"
+#include "mimi_err.h"
+#include "mimi_time.h"
 #include "cJSON.h"
 
 static const char *TAG = "tool_cron";
 
 /* ── cron_add ─────────────────────────────────────────────────── */
 
-mimi_err_t tool_cron_add_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_cron_add_execute(const char *input_json, char *output, size_t output_size,
+                                 const mimi_session_ctx_t *session_ctx)
 {
+    (void)session_ctx;
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
@@ -76,7 +79,7 @@ mimi_err_t tool_cron_add_execute(const char *input_json, char *output, size_t ou
         job.at_epoch = (int64_t)at_epoch->valuedouble;
 
         /* Check if already in the past */
-        time_t now = time(NULL);
+        int64_t now = (int64_t)(mimi_time_ms() / 1000ULL);
         if (job.at_epoch <= now) {
             snprintf(output, output_size, "Error: at_epoch %lld is in the past (now=%lld)",
                      (long long)job.at_epoch, (long long)now);
@@ -119,9 +122,11 @@ mimi_err_t tool_cron_add_execute(const char *input_json, char *output, size_t ou
 
 /* ── cron_list ────────────────────────────────────────────────── */
 
-mimi_err_t tool_cron_list_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_cron_list_execute(const char *input_json, char *output, size_t output_size,
+                                  const mimi_session_ctx_t *session_ctx)
 {
     (void)input_json;
+    (void)session_ctx;
 
     const cron_job_t *jobs;
     int count;
@@ -165,8 +170,10 @@ mimi_err_t tool_cron_list_execute(const char *input_json, char *output, size_t o
 
 /* ── cron_remove ──────────────────────────────────────────────── */
 
-mimi_err_t tool_cron_remove_execute(const char *input_json, char *output, size_t output_size)
+mimi_err_t tool_cron_remove_execute(const char *input_json, char *output, size_t output_size,
+                                    const mimi_session_ctx_t *session_ctx)
 {
+    (void)session_ctx;
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
