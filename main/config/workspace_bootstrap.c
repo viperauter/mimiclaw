@@ -3,23 +3,21 @@
 #include "config.h"
 #include "fs/fs.h"
 #include "log.h"
+#include "platform/path_utils.h"
 
 #include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "workspace";
 
-#if defined(__unix__) || defined(__APPLE__)
 static int ensure_parent_dir_for_file(const char *file_path)
 {
     if (!file_path || file_path[0] == '\0') return -1;
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s", file_path);
-    char *slash = strrchr(tmp, '/');
-    if (!slash) return 0;          /* CWD */
-    if (slash == tmp) return 0;    /* root */
-    *slash = '\0';
-    return (mimi_fs_mkdir_p(tmp) == MIMI_OK) ? 0 : -1;
+    char dir[512];
+    if (mimi_path_dirname(file_path, dir, sizeof(dir)) != 0) {
+        return 0;  /* No directory component */
+    }
+    return (mimi_fs_mkdir_p(dir) == MIMI_OK) ? 0 : -1;
 }
 
 static bool write_file_if_missing(const char *path, const char *content)
@@ -53,18 +51,12 @@ static void bootstrap_vfs_layout(void)
     /* memory daily dir (derived from memory_file) */
     {
         char base[512];
-        const char *mem = cfg->memory_file;
-        const char *slash = mem ? strrchr(mem, '/') : NULL;
-        if (slash) {
-            size_t len = (size_t)(slash - mem);
-            if (len >= sizeof(base)) len = sizeof(base) - 1;
-            memcpy(base, mem, len);
-            base[len] = '\0';
-        } else {
-            snprintf(base, sizeof(base), "memory");
+        if (mimi_path_dirname(cfg->memory_file, base, sizeof(base)) != 0) {
+            strncpy(base, "memory", sizeof(base) - 1);
+            base[sizeof(base) - 1] = '\0';
         }
         char daily_dir[520];
-        snprintf(daily_dir, sizeof(daily_dir), "%s/daily", base);
+        mimi_path_join(base, "daily", daily_dir, sizeof(daily_dir));
         (void)mimi_fs_mkdir_p(daily_dir);
     }
 
@@ -129,12 +121,10 @@ static void bootstrap_vfs_layout(void)
         "- Use web_search for real-time info.\n"
         "- Use get_current_time for date/time.\n");
 }
-#endif
 
 mimi_err_t mimi_workspace_bootstrap(const char *config_path,
                                     bool create_starter_config_if_missing)
 {
-#if defined(__unix__) || defined(__APPLE__)
     const mimi_config_t *cfg = mimi_config_get();
 
     char base_buf[512] = {0};
@@ -187,10 +177,5 @@ mimi_err_t mimi_workspace_bootstrap(const char *config_path,
     }
 
     return MIMI_OK;
-#else
-    (void)config_path;
-    (void)create_starter_config_if_missing;
-    return MIMI_OK;
-#endif
 }
 

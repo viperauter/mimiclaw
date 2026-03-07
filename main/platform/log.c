@@ -7,17 +7,10 @@
 #include <sys/time.h>
 #include <time.h>
 
-#include "linenoise/linenoise.h"
-
 static mimi_log_level_t s_log_level = MIMI_LOG_NONE;
 
-/* Optional: only present when running the POSIX stdio CLI. If not linked in,
- * the symbol will resolve to NULL (on compilers supporting weak symbols). */
-#if defined(__GNUC__) || defined(__clang__)
-extern struct linenoiseState *g_linenoise_state __attribute__((weak));
-#else
-extern struct linenoiseState *g_linenoise_state;
-#endif
+/* For linenoise compatibility - now using microrl which doesn't need this */
+static int g_prompt_hidden = 0;
 
 static const char *level_name(mimi_log_level_t level)
 {
@@ -90,12 +83,14 @@ mimi_log_level_t mimi_log_get_level(void)
 
 void mimi_tty_hide_prompt(void)
 {
-    if (g_linenoise_state) linenoiseHide(g_linenoise_state);
+    /* microrl doesn't support hide/show prompt like linenoise */
+    g_prompt_hidden = 1;
 }
 
 void mimi_tty_show_prompt(void)
 {
-    if (g_linenoise_state) linenoiseShow(g_linenoise_state);
+    /* microrl doesn't support hide/show prompt like linenoise */
+    g_prompt_hidden = 0;
 }
 
 void mimi_tty_printf(const char *fmt, ...)

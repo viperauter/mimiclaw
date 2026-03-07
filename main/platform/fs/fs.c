@@ -93,6 +93,15 @@ static const fs_operations_t *get_impl_ops(fs_type_t type)
  * Path resolution
  * ========================================================================== */
 
+/* Platform-specific path separator */
+#ifdef _WIN32
+#define PATH_SEP "\\"
+#define PATH_SEP_CHAR '\\'
+#else
+#define PATH_SEP "/"
+#define PATH_SEP_CHAR '/'
+#endif
+
 static mimi_err_t resolve_path(const char *virt_path, char *out_real_path, size_t size)
 {
     if (!virt_path || !out_real_path || size == 0) {
@@ -109,7 +118,7 @@ static mimi_err_t resolve_path(const char *virt_path, char *out_real_path, size_
                 /* Matched mount point, replace with real path */
                 const char *rel_path = virt_path + mount_len;
                 if (rel_path[0] == '/') rel_path++; /* Skip leading slash */
-                snprintf(out_real_path, size, "%s/%s", s_mounts[i].real_path, rel_path);
+                snprintf(out_real_path, size, "%s" PATH_SEP "%s", s_mounts[i].real_path, rel_path);
                 return MIMI_OK;
             }
         }
@@ -129,7 +138,7 @@ static mimi_err_t resolve_path(const char *virt_path, char *out_real_path, size_
             }
         } else {
             /* Relative path: prepend base_dir */
-            snprintf(out_real_path, size, "%s/%s", ws->base_dir, virt_path);
+            snprintf(out_real_path, size, "%s" PATH_SEP "%s", ws->base_dir, virt_path);
         }
     } else {
         /* No workspace or base_dir, use path as-is */

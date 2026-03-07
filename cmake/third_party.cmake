@@ -14,7 +14,7 @@ endif()
 
 FetchContent_Declare(
     mongoose
-    GIT_REPOSITORY https://github.com/cesanta/mongoose.git
+    GIT_REPOSITORY https://gitee.com/mirrors/mongoose.git
     GIT_TAG 7.14
     SOURCE_DIR ${THIRD_PARTY_DIR}/mongoose
 )
@@ -53,28 +53,3 @@ add_library(cjson STATIC
 
 target_include_directories(cjson PUBLIC
     ${cjson_SOURCE_DIR})
-
-# =====================================================
-# linenoise
-# =====================================================
-
-if(NOT EXISTS ${THIRD_PARTY_DIR}/linenoise)
-    message(STATUS "Fetching linenoise from GitHub...")
-else()
-    message(STATUS "Using cached linenoise source: ${THIRD_PARTY_DIR}/linenoise")
-endif()
-
-FetchContent_Declare(
-    linenoise
-    GIT_REPOSITORY https://github.com/antirez/linenoise.git
-    GIT_TAG master
-    SOURCE_DIR ${THIRD_PARTY_DIR}/linenoise
-)
-
-FetchContent_Populate(linenoise)
-
-add_library(linenoise STATIC
-    ${linenoise_SOURCE_DIR}/linenoise.c
-)
-
-target_include_directories(linenoise PUBLIC ${linenoise_SOURCE_DIR})

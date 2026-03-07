@@ -4,6 +4,11 @@ project(mimiclaw C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Windows: static link pthread to avoid DLL dependency
+if(WIN32)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+endif()
+
 # --------------------------------
 # compiler options
 # --------------------------------
@@ -34,6 +39,7 @@ file(GLOB_RECURSE APP_SRC
     main/platform/fs/posix_impl/fs_posix.c
     main/platform/kv.c
     main/platform/http/mg_impl/http.c
+    main/platform/path_utils.c
 
     # Core app modules (platform-agnostic)
     main/bus/message_bus.c
@@ -50,11 +56,25 @@ file(GLOB_RECURSE APP_SRC
     main/heartbeat/heartbeat.c
     main/agent/context_builder.c
     main/agent/agent_loop.c
-    main/gateway/ws_server.c
-    main/telegram/telegram_bot.c
     main/proxy/http_proxy.c
-    main/cli/cli_core.c
-    main/cli/stdio_cli_posix.c
+    main/cli/editor.c
+    main/cli/cli_terminal.c
+
+    # Commands system (shared across channels)
+    main/commands/command_registry.c
+    main/commands/cmd_help.c
+    main/commands/cmd_session.c
+    main/commands/cmd_set.c
+    main/commands/cmd_memory.c
+    main/commands/cmd_ask.c
+    main/commands/cmd_exit.c
+
+    # Channels system
+    main/channels/channel_manager.c
+    main/channels/cli/cli_channel.c
+    main/channels/cli/terminal_stdio.c
+    main/channels/telegram/telegram_channel.c
+    main/channels/websocket/ws_channel.c
 )
 
 # --------------------------------
@@ -81,6 +101,10 @@ target_link_libraries(mimiclaw
     PRIVATE
     mongoose
     cjson
-    linenoise
     pthread
 )
+
+# Windows-specific libraries
+if(WIN32)
+    target_link_libraries(mimiclaw PRIVATE ws2_32)
+endif()

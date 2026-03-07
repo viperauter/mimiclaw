@@ -20,15 +20,24 @@ static bool set_clock_from_epoch(long long epoch, char *out, size_t out_size)
 
     time_t t = (time_t) epoch;
 
+#ifdef _WIN32
+    /* Windows doesn't have settimeofday/setenv */
+    (void)t;
+#else
     struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
     settimeofday(&tv, NULL);
 
     const mimi_config_t *cfg = mimi_config_get();
     setenv("TZ", (cfg->timezone[0] ? cfg->timezone : "UTC"), 1);
     tzset();
+#endif
 
     struct tm local;
+#ifdef _WIN32
+    localtime_s(&local, &t);
+#else
     localtime_r(&t, &local);
+#endif
     strftime(out, out_size, "%Y-%m-%d %H:%M:%S %Z (%A)", &local);
     return true;
 }

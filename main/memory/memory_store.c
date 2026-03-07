@@ -6,6 +6,7 @@
 #include "log.h"
 #include "mimi_time.h"
 #include "fs/fs.h"
+#include "platform/path_utils.h"
 
 static const char *TAG = "memory";
 
@@ -72,19 +73,13 @@ mimi_err_t memory_append_today(const char *note)
 
     /* Derive daily notes directory from memory_file dirname. */
     char base[256];
-    const char *mem = cfg->memory_file;
-    const char *slash = mem ? strrchr(mem, '/') : NULL;
-    if (slash) {
-        size_t len = (size_t)(slash - mem);
-        if (len >= sizeof(base)) len = sizeof(base) - 1;
-        memcpy(base, mem, len);
-        base[len] = '\0';
-    } else {
-        snprintf(base, sizeof(base), "memory");
+    if (mimi_path_dirname(cfg->memory_file, base, sizeof(base)) != 0) {
+        strncpy(base, "memory", sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
     }
 
     char path[512];
-    snprintf(path, sizeof(path), "%s/daily/%s.md", base, date_str);
+    mimi_path_join_multi(path, sizeof(path), base, "daily", date_str, ".md", NULL);
 
     mimi_file_t *f = NULL;
     mimi_err_t err = mimi_fs_open(path, "a", &f);
@@ -129,19 +124,13 @@ mimi_err_t memory_read_recent(char *buf, size_t size, int days)
         const mimi_config_t *cfg = mimi_config_get();
 
         char base[256];
-        const char *mem = cfg->memory_file;
-        const char *slash = mem ? strrchr(mem, '/') : NULL;
-        if (slash) {
-            size_t len = (size_t)(slash - mem);
-            if (len >= sizeof(base)) len = sizeof(base) - 1;
-            memcpy(base, mem, len);
-            base[len] = '\0';
-        } else {
-            snprintf(base, sizeof(base), "memory");
+        if (mimi_path_dirname(cfg->memory_file, base, sizeof(base)) != 0) {
+            strncpy(base, "memory", sizeof(base) - 1);
+            base[sizeof(base) - 1] = '\0';
         }
 
         char path[512];
-        snprintf(path, sizeof(path), "%s/daily/%s.md", base, date_str);
+        mimi_path_join_multi(path, sizeof(path), base, "daily", date_str, ".md", NULL);
 
         mimi_file_t *f = NULL;
         mimi_err_t err = mimi_fs_open(path, "r", &f);

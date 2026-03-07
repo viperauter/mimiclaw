@@ -10,6 +10,12 @@
 #include <sys/types.h>
 #include <dirent.h>
 
+/* Windows compatibility */
+#ifdef _WIN32
+#include <direct.h>
+#define mkdir(path, mode) _mkdir(path)
+#endif
+
 /* POSIX-specific file handles */
 typedef struct posix_file {
     FILE *fp;
