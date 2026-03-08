@@ -497,3 +497,168 @@ cd build && ./mimiclaw
 # Type: /help
 # Type: hello (should go to Agent)
 ```
+
+## Additional Features
+
+### Feature 1: Customization and Feature Toggling
+
+**Goal**: Allow users to customize and toggle features (e.g., Feishu, QQ channels) during build time.
+
+**Implementation Approach**: CMake + Configuration Header File
+
+#### Step 1: Create Configuration Template
+
+Create `mimiclaw_config.h.in`:
+
+```c
+/* mimiclaw_config.h.in - Configuration template */
+
+/* Feature toggles */
+#cmakedefine ENABLE_FEISHU
+#cmakedefine ENABLE_QQ
+#cmakedefine ENABLE_WEBSOCKET
+#cmakedefine ENABLE_STDIO
+
+/* Configuration parameters */
+#define MIMICLAW_MAX_CHANNELS @MIMICLAW_MAX_CHANNELS@
+#define MIMICLAW_MAX_GATEWAYS @MIMICLAW_MAX_GATEWAYS@
+#define MIMICLAW_HTTP_PORT @MIMICLAW_HTTP_PORT@
+```
+
+#### Step 2: Update CMakeLists.txt
+
+```cmake
+# Feature options
+option(ENABLE_FEISHU "Enable Feishu channel support" ON)
+option(ENABLE_QQ "Enable QQ channel support" ON)
+option(ENABLE_WEBSOCKET "Enable WebSocket support" ON)
+option(ENABLE_STDIO "Enable STDIO support" ON)
+
+# Configuration parameters
+set(MIMICLAW_MAX_CHANNELS 8 CACHE STRING "Maximum number of channels")
+set(MIMICLAW_MAX_GATEWAYS 8 CACHE STRING "Maximum number of gateways")
+set(MIMICLAW_HTTP_PORT 18789 CACHE STRING "HTTP server port")
+
+# Generate config header
+configure_file(
+    ${CMAKE_SOURCE_DIR}/include/mimiclaw_config.h.in
+    ${CMAKE_BINARY_DIR}/include/mimiclaw_config.h
+    @ONLY
+)
+
+include_directories(${CMAKE_BINARY_DIR}/include)
+```
+
+#### Step 3: Use Configuration in Code
+
+```c
+#include "mimiclaw_config.h"
+
+#ifdef ENABLE_FEISHU
+    if (feishu_channel_module_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "feishu_channel_module_init failed");
+    } else {
+        if (channel_register(&g_feishu_channel) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register Feishu channel");
+        }
+    }
+#endif
+
+#ifdef ENABLE_QQ
+    if (qq_channel_module_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "qq_channel_module_init failed");
+    } else {
+        if (channel_register(&g_qq_channel) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register QQ channel");
+        }
+    }
+#endif
+```
+
+#### Usage
+
+```bash
+# Build with specific features
+cmake -DENABLE_FEISHU=OFF -DENABLE_QQ=OFF ..
+
+# Full build (default)
+cmake ..
+```
+
+### Feature 2: Feishu Gateway Debugging
+
+**Goal**: Provide guidance for debugging Feishu WebSocket gateway communication.
+
+#### Step 1: Obtain Feishu Access Token
+
+1. **Register Developer Account**:
+   - Go to [Feishu Open Platform](https://open.feishu.cn/)
+   - Register and login with Feishu account
+
+2. **Create Enterprise Self-built App**:
+   - Go to Developer Console → Create App
+   - Fill in app name and description
+   - Select "Self-built" type
+
+3. **Get App Credentials**:
+   - In App Details → Credentials & Basic Info
+   - Note down `App ID` and `App Secret`
+
+4. **Generate Access Token**:
+   - API: `POST https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal/`
+   - Request body:
+     ```json
+     {
+       "app_id": "YOUR_APP_ID",
+       "app_secret": "YOUR_APP_SECRET"
+     }
+     ```
+   - Response contains `app_access_token` (valid for 2 hours)
+
+#### Step 2: Configure Feishu in Mimiclaw
+
+**config.json**:
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "app_id": "YOUR_APP_ID",
+      "app_secret": "YOUR_APP_SECRET",
+      "access_token": "YOUR_ACCESS_TOKEN"
+    }
+  }
+}
+```
+
+#### Step 3: Debugging Tips
+
+1. **Enable Debug Logs**:
+   ```bash
+   ./mimiclaw --logs debug
+   ```
+
+2. **Check Network Connectivity**:
+   - Ensure server can access `open.feishu.cn`
+   - Verify WebSocket connection URL
+
+3. **Permission Setup**:
+   - In Feishu Open Platform → Permission Management
+   - Add required permissions (e.g., message sending)
+   - Publish app or add test users
+
+4. **API Testing**:
+   - Use Feishu Open Platform's API Debug Tool
+   - Test token validity and permissions
+
+5. **Common Issues**:
+   - Token expiration: Implement auto-refresh
+   - Permission errors: Check app permissions
+   - Connection failures: Verify network and firewall settings
+
+#### Verification
+
+- [ ] Feishu WebSocket connects successfully
+- [ ] Messages are received and routed
+- [ ] Commands work in Feishu chat
+- [ ] Token refresh works automatically
