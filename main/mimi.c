@@ -125,7 +125,7 @@ static void parse_args(int argc, char **argv, bool *enable_logs, const char **co
     }
 }
 
-int main(int argc, char **argv)
+int mimi_main(int argc, char **argv)
 {
 #ifdef _WIN32
     /* Set Windows console to UTF-8 mode for proper Unicode/Chinese support */
@@ -307,5 +307,11 @@ int main(int argc, char **argv)
 
     MIMI_LOGI("main", "Runtime initialized. Entering main event loop...");
     return (mimi_runtime_run() == MIMI_OK) ? 0 : 1;
+}
+
+/* Main entry point */
+int main(int argc, char **argv)
+{
+    return mimi_main(argc, argv);
 }
 

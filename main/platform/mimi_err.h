@@ -17,7 +17,8 @@ enum {
     MIMI_ERR_IO = -7,
     MIMI_ERR_NOT_SUPPORTED = -8,
     MIMI_ERR_PERMISSION_DENIED = -9,
-    MIMI_ERR_EXIT = -10,  /* Request to exit the application */
+    MIMI_ERR_ALREADY_EXISTS = -10,
+    MIMI_ERR_EXIT = -11,  /* Request to exit the application */
 };
 
 const char *mimi_err_to_name(mimi_err_t err);

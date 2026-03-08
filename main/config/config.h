@@ -49,6 +49,16 @@ typedef struct mimi_config {
     char telegram_token[MIMI_CONFIG_TOKEN_LEN];
     char telegram_allow_from[MIMI_CONFIG_ALLOW_FROM_LEN]; /* comma-separated IDs */
 
+    /* channels.feishu */
+    bool feishu_enabled;
+    char feishu_app_id[64];
+    char feishu_app_secret[128];
+
+    /* channels.qq */
+    bool qq_enabled;
+    char qq_app_id[64];
+    char qq_token[256];
+
     /* proxy */
     char proxy_host[MIMI_CONFIG_HOST_LEN];
     char proxy_port[MIMI_CONFIG_PORT_LEN];

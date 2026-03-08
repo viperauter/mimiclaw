@@ -53,6 +53,10 @@ mimi_err_t mimi_runtime_run(void)
     /* Main event loop: poll Mongoose manager until exit requested. */
     while (!s_should_exit) {
         mg_mgr_poll(&s_mgr, 100);
+        
+        /* Poll STDIO gateway for CLI input */
+        extern void stdio_gateway_poll(void);
+        stdio_gateway_poll();
     }
 
     MIMI_LOGI("runtime", "Exit requested, shutting down...");

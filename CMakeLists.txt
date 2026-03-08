@@ -39,6 +39,7 @@ file(GLOB_RECURSE APP_SRC
     main/platform/fs/posix_impl/fs_posix.c
     main/platform/kv.c
     main/platform/http/mg_impl/http.c
+    main/platform/websocket/mg_impl/websocket.c
     main/platform/path_utils.c
 
     # Core app modules (platform-agnostic)
@@ -69,12 +70,24 @@ file(GLOB_RECURSE APP_SRC
     main/commands/cmd_ask.c
     main/commands/cmd_exit.c
 
+    # Gateway layer
+        main/gateway/gateway.c
+        main/gateway/gateway_manager.c
+        main/gateway/stdio/stdio_gateway.c
+        main/gateway/websocket/ws_gateway.c
+        main/gateway/websocket/ws_client_gateway.c
+        main/gateway/http/http_gateway.c
+
+    # Input processor
+    main/router/router.c
+
     # Channels system
     main/channels/channel_manager.c
     main/channels/cli/cli_channel.c
-    main/channels/cli/terminal_stdio.c
     main/channels/telegram/telegram_channel.c
     main/channels/websocket/ws_channel.c
+    main/channels/feishu/feishu_channel.c
+    main/channels/qq/qq_channel.c
 )
 
 # --------------------------------

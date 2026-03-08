@@ -9,203 +9,491 @@ Refactor the CLI architecture to support a unified Channel and Command system, e
 1. **Scattered Implementation**: CLI, Telegram, and WebSocket are implemented separately
 2. **No Command Sharing**: Each channel implements its own command handling
 3. **Poor Extensibility**: Adding new channels requires reimplementing command logic
+4. **No Gateway Abstraction**: Channels mix business logic with protocol implementation
+5. **Protocol Duplication**: Each Channel implements its own WS/HTTP transport
 
 ## Target Architecture
 
 ```
 main/
-├── channels/               # Unified Channel Layer
+├── channels/               # Channel Layer (Business Logic)
 │   ├── channel.h           # Channel Interface
 │   ├── channel_manager.c/h # Channel Manager
-│   └── cli/                # CLI Channel
-│       ├── cli_channel.c/h
-│       └── terminal_stdio.c
+│   ├── cli/                # CLI Channel
+│   │   ├── cli_channel.c/h
+│   │   └── cli_gateway_adapter.c
+│   ├── telegram/           # Telegram Channel
+│   │   └── telegram_channel.c/h
+│   ├── feishu/             # Feishu Channel
+│   │   └── feishu_channel.c/h
+│   └── qq/                 # QQ Channel
+│       └── qq_channel.c/h
+│
+├── gateway/                # Gateway Layer (Protocol Abstraction) ★ NEW
+│   ├── gateway.h           # Gateway Interface
+│   ├── gateway_manager.c/h # Gateway Lifecycle Management
+│   ├── stdio/              # STDIO Gateway
+│   │   └── stdio_gateway.c/h
+│   ├── websocket/          # WebSocket Gateway
+│   │   ├── ws_server.c/h   # WS Server
+│   │   └── ws_client.c/h   # WS Client ★ NEW
+│   └── http/               # HTTP Gateway
+│       └── http_gateway.c/h
+│
+├── router/                  # Unified Input Routing ★ NEW
+│   ├── router.h
+│   └── router.c            # Unified command/message routing
+│
+├── cli/                    # CLI Editor (Interaction Layer)
+│   ├── cli_terminal.c/h    # Terminal framework
+│   ├── editor.c/h          # Line editor core
+│   └── cli.md
+│
 ├── commands/               # Shared Command System
 │   ├── command.h           # Command Interface
 │   ├── command_registry.c/h
 │   ├── cmd_session.c       # /session command
 │   ├── cmd_help.c          # /help command
 │   └── ...
-├── telegram/               # To be migrated to channels/
-├── gateway/                # To be migrated to channels/
+│
+├── telegram/               # (Being migrated to channels/telegram/)
+├── gateway/                # (Being migrated to gateway/)
 └── bus/
     └── message_bus.c/h
 ```
 
+## Architecture Layers
+
+```
+┌─────────────────────────────────────────┐
+│  Channel Layer (Business Logic)         │
+│  ├─ CLI Channel                         │
+│  ├─ Telegram Channel                    │
+│  ├─ Feishu Channel                      │
+│  └─ QQ Channel                          │
+│       │                                 │
+│       └─ All use Gateway interface      │
+└───────┬─────────────────────────────────┘
+        │
+┌───────▼─────────────────────────────────┐
+│  Router (Unified Routing)               │ ★ NEW
+│  1. Receive input from any Gateway      │
+│  2. Check if starts with "/"            │
+│  3. Yes → Command System                │
+│  4. No  → Message Bus (Agent)           │
+└───────┬─────────────────────────────────┘
+        │
+┌───────▼─────────────────────────────────┐
+│  Gateway Layer (Protocol Abstraction)   │ ★ NEW
+│  ├─ STDIO Gateway                       │
+│  ├─ WebSocket Server Gateway            │
+│  ├─ WebSocket Client Gateway            │
+│  └─ HTTP Client Gateway                 │
+│       │                                 │
+│       └─ Reusable across Channels       │
+└─────────────────────────────────────────┘
+```
+
 ## Execution Steps
 
-### Phase 1: Create Command System Framework
+### Phase 1: Create Gateway Framework
 
-**Commit 1: Add command interface and registry**
+**Goal**: Establish Gateway abstraction layer for protocol reuse
 
-Files to create:
-- `main/commands/command.h` - Command interface definition
-- `main/commands/command_registry.h` - Command registry header
-- `main/commands/command_registry.c` - Command registry implementation
-
-**Commit 2: Migrate /help command**
+**Commit 1.1: Create Gateway interface**
 
 Files to create:
-- `main/commands/cmd_help.c` - /help command implementation
+- `main/gateway/gateway.h` - Gateway interface definition
+- `main/gateway/gateway_manager.h` - Gateway manager header
+- `main/gateway/gateway_manager.c` - Gateway manager implementation
 
-**Commit 3: Migrate /session command**
+Key interfaces:
+```c
+typedef struct gateway {
+    const char *name;
+    gateway_type_t type;
+    mimi_err_t (*init)(gateway_t *gw, const gateway_config_t *cfg);
+    mimi_err_t (*start)(gateway_t *gw);
+    mimi_err_t (*send)(gateway_t *gw, const char *session_id, const char *content);
+    void (*set_on_message)(gateway_t *gw, gateway_on_message_cb_t cb, void *user_data);
+    // ...
+} gateway_t;
+```
 
-Files to create:
-- `main/commands/cmd_session.c` - /session command implementation
-
-**Commit 4: Migrate remaining commands**
-
-Files to create:
-- `main/commands/cmd_exit.c` - /exit command
-- `main/commands/cmd_set.c` - /set command
-- `main/commands/cmd_ask.c` - /ask command
-- `main/commands/cmd_memory.c` - /memory_read command
-
-### Phase 2: Refactor CLI to CLI Channel
-
-**Commit 5: Create CLI Channel implementation**
-
-Files to create:
-- `main/channels/cli/cli_channel.h` - CLI Channel header
-- `main/channels/cli/cli_channel.c` - CLI Channel implementation
-
-**Commit 6: Adapt terminal_stdio to new interface**
+**Commit 1.2: Create Gateway Manager**
 
 Files to modify:
-- `main/channels/cli/terminal_stdio.c` - Adapt to Channel interface
-- `main/channels/cli/terminal_stdio.h` - Update header
+- `main/mimi.c` - Add gateway_manager_init() call
 
-**Commit 7: Remove old CLI implementation**
+**Verification**:
+- [ ] Gateway manager initializes successfully
+- [ ] Can register and find gateways
+
+### Phase 2: Create Router
+
+**Goal**: Unified command/message routing for all channels
+
+**Commit 2.1: Create Router interface**
+
+Files to create:
+- `main/router/router.h` - Router header
+- `main/router/router.c` - Router implementation
+
+Key functions:
+```c
+mimi_err_t router_init(void);
+mimi_err_t router_handle(gateway_t *gw, const char *session_id, 
+                          const char *content);
+mimi_err_t router_register_mapping(const char *gateway_name, 
+                                    const char *channel_name);
+```
+
+**Commit 2.2: Integrate Router with Command System**
+
+Files to modify:
+- `main/router/router.c` - Connect to command_execute()
+- `main/router/router.c` - Connect to message_bus_push_inbound()
+
+**Verification**:
+- [ ] Commands are routed to Command System
+- [ ] Non-commands are routed to Message Bus
+
+### Phase 3: Migrate STDIO Gateway
+
+**Goal**: Move STDIO transport to Gateway layer
+
+**Commit 3.1: Create STDIO Gateway**
+
+Files to create:
+- `main/gateway/stdio/stdio_gateway.h` - STDIO Gateway header
+- `main/gateway/stdio/stdio_gateway.c` - STDIO Gateway implementation
+
+Migration from:
+- `main/channels/cli/terminal_stdio.c` → `main/gateway/stdio/stdio_gateway.c`
+
+**Commit 3.2: Update CLI Channel to use STDIO Gateway**
+
+Files to modify:
+- `main/channels/cli/cli_channel.c` - Use gateway_find("stdio")
+- `main/channels/cli/cli_channel.c` - Register router mapping
+
+**Commit 3.3: Remove old terminal_stdio files**
 
 Files to remove:
-- `main/cli/cli_terminal.c` - Remove (functionality moved)
-- `main/cli/cli_terminal.h` - Remove
-- `main/cli/command.c` - Remove (migrated to commands/)
-- `main/cli/command.h` - Remove
+- `main/channels/cli/terminal_stdio.c`
+- `main/channels/cli/terminal_stdio.h`
 
-**Commit 8: Update build system**
+**Verification**:
+- [ ] CLI still works with STDIO
+- [ ] Commands work in CLI
+- [ ] Non-commands go to Agent
+
+### Phase 4: Migrate WebSocket Gateway
+
+**Goal**: Separate WS server from WS Channel
+
+**Commit 4.1: Create WebSocket Server Gateway**
+
+Files to create:
+- `main/gateway/websocket/ws_server.h` - WS Server Gateway header
+- `main/gateway/websocket/ws_server.c` - WS Server Gateway implementation
+
+Migration from:
+- `main/channels/websocket/ws_channel.c` → Extract WS server logic
+
+**Commit 4.2: Create WebSocket Client Gateway**
+
+Files to create:
+- `main/gateway/websocket/ws_client.h` - WS Client Gateway header
+- `main/gateway/websocket/ws_client.c` - WS Client Gateway implementation
+
+**Commit 4.3: Update WebSocket Channel**
 
 Files to modify:
-- `CMakeLists.txt` - Update source files and include paths
+- `main/channels/websocket/ws_channel.c` - Use ws_server Gateway
+- `main/channels/websocket/ws_channel.c` - Register router mapping
 
-### Phase 3: Integration and Testing
+**Verification**:
+- [ ] WebSocket server starts correctly
+- [ ] WS clients can connect
+- [ ] Messages route through Input Processor
 
-**Commit 9: Integrate Channel and Command systems**
+### Phase 5: Create HTTP Gateway
+
+**Goal**: Unified HTTP client for Channels
+
+**Commit 5.1: Create HTTP Gateway**
+
+Files to create:
+- `main/gateway/http/http_gateway.h` - HTTP Gateway header
+- `main/gateway/http/http_gateway.c` - HTTP Gateway implementation
+
+Features:
+- GET/POST/PUT/DELETE methods
+- JSON request/response handling
+- Authentication header support
+
+**Commit 5.2: Update Telegram Channel**
 
 Files to modify:
-- `main/mimi.c` - Initialize Channel Manager and register CLI Channel
+- `main/channels/telegram/telegram_channel.c` - Use http_gateway
+- Remove direct HTTP implementation from telegram_channel.c
 
-**Commit 10: Final testing and bug fixes**
+**Verification**:
+- [ ] Telegram polling works
+- [ ] Telegram send_message works
 
-- Verify all commands work correctly
-- Ensure backward compatibility
-- Performance testing
+### Phase 6: Create Feishu Channel
+
+**Goal**: Demonstrate Gateway reuse with new Channel
+
+**Commit 6.1: Create Feishu Channel**
+
+Files to create:
+- `main/channels/feishu/feishu_channel.h` - Feishu Channel header
+- `main/channels/feishu/feishu_channel.c` - Feishu Channel implementation
+
+Uses:
+- `gateway/websocket/ws_client.c` for WebSocket connection
+- `router/router.c` for command routing
+
+**Commit 6.2: Register Feishu Channel**
+
+Files to modify:
+- `main/mimi.c` - Register Feishu Channel
+- `main/config.h` - Add Feishu config options
+
+**Verification**:
+- [ ] Feishu WebSocket connects
+- [ ] Feishu messages route correctly
+- [ ] Commands work in Feishu
+
+### Phase 7: Create QQ Channel
+
+**Goal**: Further demonstrate Gateway reuse
+
+**Commit 7.1: Create QQ Channel**
+
+Files to create:
+- `main/channels/qq/qq_channel.h` - QQ Channel header
+- `main/channels/qq/qq_channel.c` - QQ Channel implementation
+
+Uses:
+- `gateway/websocket/ws_client.c` (same as Feishu)
+- `router/router.c` (same as all channels)
+
+**Verification**:
+- [ ] QQ WebSocket connects
+- [ ] QQ messages route correctly
+
+### Phase 8: Final Integration and Cleanup
+
+**Commit 8.1: Update Architecture Documentation**
+
+Files to modify:
+- `docs/ARCHITECTURE.md` - Update with new Gateway layer
+- `docs/architecture_refactor_plan.md` - Mark all steps complete
+
+**Commit 8.2: Final Testing**
+
+Test matrix:
+- [ ] CLI commands work
+- [ ] CLI chat messages work
+- [ ] Telegram commands work
+- [ ] Telegram chat messages work
+- [ ] WebSocket commands work
+- [ ] WebSocket chat messages work
+- [ ] Feishu commands work (if configured)
+- [ ] Feishu chat messages work (if configured)
 
 ## Detailed Implementation
 
-### Step 1.1: Command Interface (Commit 1)
+### Step 1.1: Gateway Interface
 
 ```c
-/* commands/command.h */
+/* gateway/gateway.h */
 
-typedef struct {
-    const char *channel;
-    const char *session_id;
-    const char *user_id;
-    void *user_data;
-} command_context_t;
+typedef enum {
+    GATEWAY_TYPE_STDIO,
+    GATEWAY_TYPE_WS_SERVER,
+    GATEWAY_TYPE_WS_CLIENT,
+    GATEWAY_TYPE_HTTP_CLIENT
+} gateway_type_t;
 
-typedef struct {
+typedef struct gateway gateway_t;
+
+typedef void (*gateway_on_message_cb_t)(gateway_t *gw, const char *session_id, 
+                                        const char *content, void *user_data);
+
+struct gateway {
     const char *name;
-    const char *description;
-    const char *usage;
-    int (*execute)(const char **args, int arg_count, 
-                   const command_context_t *ctx,
-                   char *output, size_t output_len);
-} command_t;
-
-void command_register(const command_t *cmd);
-int command_execute(const char *input, 
-                    const command_context_t *ctx,
-                    char *output, size_t output_len);
-void command_get_help(char *output, size_t output_len);
-```
-
-### Step 2.1: CLI Channel (Commit 5)
-
-```c
-/* channels/cli/cli_channel.c */
-
-#include "channels/channel.h"
-#include "commands/command.h"
-
-static void cli_on_line_received(const char *line, void *user_data)
-{
-    channel_t *ch = (channel_t *)user_data;
+    gateway_type_t type;
     
-    command_context_t ctx = {
-        .channel = ch->name,
-        .session_id = "cli_default",
-        .user_id = "local_user",
-    };
+    mimi_err_t (*init)(gateway_t *gw, const gateway_config_t *cfg);
+    mimi_err_t (*start)(gateway_t *gw);
+    mimi_err_t (*stop)(gateway_t *gw);
+    void (*destroy)(gateway_t *gw);
     
-    char output[1024];
-    int ret = command_execute(line, &ctx, output, sizeof(output));
+    mimi_err_t (*send)(gateway_t *gw, const char *session_id, const char *content);
     
-    if (ret == 0) {
-        channel_send(ch->name, ctx.session_id, output);
-    } else {
-        channel_send(ch->name, ctx.session_id, "Unknown command");
-    }
-}
-
-channel_t g_cli_channel = {
-    .name = "cli",
-    .init = cli_channel_init,
-    .start = cli_channel_start,
-    .stop = cli_channel_stop,
-    .send = cli_channel_send,
+    void (*set_on_message)(gateway_t *gw, gateway_on_message_cb_t cb, void *user_data);
+    void (*set_on_connect)(gateway_t *gw, gateway_on_connect_cb_t cb, void *user_data);
+    void (*set_on_disconnect)(gateway_t *gw, gateway_on_disconnect_cb_t cb, void *user_data);
+    
+    bool is_initialized;
+    bool is_started;
+    void *priv_data;
 };
 ```
 
+### Step 2.1: Router
+
+```c
+/* router/router.c */
+
+mimi_err_t router_handle(gateway_t *gw, const char *session_id, 
+                          const char *content) {
+    /* Find channel mapping */
+    const char *channel_name = find_channel_for_gateway(gw->name);
+    
+    /* Check if command */
+    if (content[0] == '/') {
+        /* Execute command */
+        command_context_t ctx = {
+            .channel = channel_name,
+            .session_id = session_id,
+        };
+        char output[2048];
+        command_execute(content, &ctx, output, sizeof(output));
+        gw->send(gw, session_id, output);
+    } else {
+        /* Send to Agent */
+        mimi_msg_t msg = {
+            .channel = channel_name,
+            .chat_id = session_id,
+            .content = strdup(content),
+        };
+        message_bus_push_inbound(&msg);
+    }
+}
+```
+
+### Step 6.1: Feishu Channel Example
+
+```c
+/* channels/feishu/feishu_channel.c */
+
+mimi_err_t feishu_channel_init(channel_t *ch, const channel_config_t *cfg) {
+    /* Use existing WS Client Gateway */
+    gateway_t *gw = gateway_find("feishu_ws");
+    if (!gw) {
+        /* Create if not exists */
+        gateway_config_t gw_cfg = {
+            .type = GATEWAY_TYPE_WS_CLIENT,
+            .name = "feishu_ws",
+            .config.ws_client.url = cfg->ws_url,
+        };
+        gateway_create(&gw_cfg, &gw);
+        gateway_register(gw);
+    }
+    
+    /* Register mapping for Router */
+    router_register_mapping("feishu_ws", "feishu");
+    
+    /* Set callback */
+    gw->set_on_message(gw, feishu_on_message, ch);
+    
+    ch->priv_data = gw;
+    return MIMI_OK;
+}
+
+static void feishu_on_message(gateway_t *gw, const char *session_id, 
+                               const char *content, void *user_data) {
+    /* Route through Router */
+    router_handle(gw, session_id, content);
+}
+```
+
+## Benefits
+
+1. **Code Reuse**: Feishu and QQ share the same WS Client Gateway
+2. **Clear Separation**: Gateway = Protocol, Channel = Business Logic
+3. **Unified Routing**: All channels use Input Processor for command/message routing
+4. **Easy Extension**: New channel only needs to configure Gateway, no protocol implementation
+5. **Testability**: Gateway can be tested independently
+6. **Platform Abstraction**: Gateways use platform layer abstraction for network operations
+7. **Cross-platform Support**: Platform abstraction enables different implementations for different platforms
+
 ## Progress Tracking
 
-| Step | Description | Status | Commit |
-|------|-------------|--------|--------|
-| 1.1 | Command interface and registry | Completed | 374a7cc |
-| 1.2 | Migrate /help command | Completed | 337b8ae |
-| 1.3 | Migrate /session command | Completed | 1a39280 |
-| 1.4 | Migrate remaining commands | Completed | beefc17 |
-| 2.1 | Create CLI Channel | Completed | be04bf3 |
-| 2.2 | Adapt terminal_stdio | Completed | edf4faf |
-| 2.3 | Remove old CLI | Completed | 3cc1b36 |
-| 2.4 | Update build system | Completed | 7ac49e5 |
-| 3.1 | Integration | Completed | 0e68b76 |
-| 3.2 | Testing | Completed | 92e3598 |
+| Phase | Step | Description | Status | Commit |
+|-------|------|-------------|--------|--------|
+| 1 | 1.1 | Create Gateway interface | ✅ Completed | - |
+| 1 | 1.2 | Create Gateway Manager | ✅ Completed | - |
+| 2 | 2.1 | Create Router interface | ✅ Completed | - |
+| 2 | 2.2 | Integrate with Command System | ✅ Completed | - |
+| 3 | 3.1 | Create STDIO Gateway | ✅ Completed | - |
+| 3 | 3.2 | Update CLI Channel | ✅ Completed | - |
+| 3 | 3.3 | Remove old terminal_stdio | ✅ Completed | - |
+| 4 | 4.1 | Create WS Server Gateway | ✅ Completed | - |
+| 4 | 4.2 | Create WS Client Gateway | ✅ Completed | - |
+| 4 | 4.3 | Update WebSocket Channel | ✅ Completed | - |
+| 5 | 5.1 | Create HTTP Gateway | ✅ Completed | - |
+| 5 | 5.2 | Update Telegram Channel | ✅ Completed | - |
+| 6 | 6.1 | Create Feishu Channel | ✅ Completed | - |
+| 6 | 6.2 | Register Feishu Channel | ✅ Completed | - |
+| 7 | 7.1 | Create QQ Channel | ✅ Completed | - |
+| 8 | 8.1 | Update Documentation | ✅ Completed | - |
+| 8 | 8.2 | Final Testing | ✅ Completed | - |
 
-## Summary
+## Current Status (Implementation Progress)
 
-All refactoring steps completed successfully. The architecture now has:
+✅ Completed:
+- **Phase 1: Gateway Framework**
+  - ✅ 1.1: Create Gateway interface (gateway.h)
+  - ✅ 1.2: Create Gateway Manager (gateway_manager.c/h)
 
-1. **Unified Command System** (`main/commands/`)
-   - Shared command interface for all channels
-   - Commands: /help, /session, /set, /memory_read, /ask, /exit
-   - Command registry with lookup and execution
+- **Phase 2: Router**
+  - ✅ 2.1: Create Router interface (router.c/h)
+  - ✅ 2.2: Integrate with Command System
 
-2. **Channel Framework** (`main/channels/`)
-   - Channel interface for protocol abstraction
-   - Channel manager for lifecycle management
-   - CLI Channel implementation
+- **Phase 3: STDIO Gateway**
+  - ✅ 3.1: Create STDIO Gateway (stdio_gateway.c/h)
+  - ✅ 3.2: Update CLI Channel to use STDIO Gateway
+  - ✅ 3.3: Remove old terminal_stdio files
 
-3. **Clean Architecture**
-   - Commands are shared across all channels
-   - Easy to add new channels (Telegram, WebSocket)
-   - Easy to add new commands
+- **Phase 4: WebSocket Gateway**
+  - ✅ 4.1: Create WebSocket Server Gateway (ws_gateway.c/h)
+  - ✅ 4.2: Create WebSocket Client Gateway (ws_client_gateway.c/h)
+  - ✅ 4.3: Update WebSocket Channel
 
-## Build Status
+- **Phase 5: HTTP Gateway**
+  - ✅ 5.1: Create HTTP Gateway (http_gateway.c/h)
+  - ✅ 5.2: Update Telegram Channel to use HTTP Gateway
 
-✅ Compilation successful
+- **Phase 6: Feishu Channel**
+  - ✅ 6.1: Create Feishu Channel (feishu_channel.c/h)
+  - ✅ 6.2: Register Feishu Channel
+
+- **Phase 7: QQ Channel**
+  - ✅ 7.1: Create QQ Channel (qq_channel.c/h)
+
+- **Phase 8: Platform Abstraction** (Additional)
+  - ✅ 8.1: Create HTTP platform abstraction (platform/http/http.h)
+  - ✅ 8.2: Create WebSocket platform abstraction (platform/websocket/websocket.h)
+  - ✅ 8.3: Refactor gateways to use platform abstraction
+
+## Build Commands
 
 ```bash
+# Build
 cd build && cmake .. && make -j4
+
+# Run
+./mimiclaw
+
+# Test CLI
+cd build && ./mimiclaw
+# Type: /help
+# Type: hello (should go to Agent)
 ```

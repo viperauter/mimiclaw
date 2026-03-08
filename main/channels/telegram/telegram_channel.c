@@ -1,16 +1,18 @@
 /**
  * Telegram Channel Implementation
  *
- * Full implementation of Telegram Bot as a Channel.
- * No backward compatibility - all logic is self-contained.
+ * Uses HTTP Gateway for Telegram Bot API integration.
+ * Routes messages through Input Processor for command/chat routing.
  */
 
 #include "channels/telegram/telegram_channel.h"
 #include "channels/channel_manager.h"
+#include "router/router.h"
 #include "commands/command.h"
 #include "config.h"
 #include "bus/message_bus.h"
-#include "http/http.h"
+#include "gateway/http/http_gateway.h"
+#include "gateway/gateway_manager.h"
 #include "log.h"
 #include "os/os.h"
 
@@ -28,60 +30,33 @@ static const int TG_POLL_TIMEOUT_S = 30;
 typedef struct {
     bool initialized;
     bool started;
-    
+    gateway_t *http_gateway;
     char bot_token[128];
     volatile bool running;
     long long update_offset;
-    
-    /* Callbacks */
-    void (*on_message)(channel_t *, const char *, const char *, void *);
-    void (*on_connect)(channel_t *, const char *, void *);
-    void (*on_disconnect)(channel_t *, const char *, void *);
-    void *callback_user_data;
 } telegram_channel_priv_t;
 
 static telegram_channel_priv_t s_priv = {0};
 
 /* Forward declarations */
-static void telegram_set_on_message_impl(channel_t *ch,
-                                          void (*cb)(channel_t *, const char *,
-                                                     const char *, void *),
-                                          void *user_data);
-static void telegram_set_on_connect_impl(channel_t *ch,
-                                          void (*cb)(channel_t *, const char *,
-                                                     void *),
-                                          void *user_data);
-static void telegram_set_on_disconnect_impl(channel_t *ch,
-                                             void (*cb)(channel_t *, const char *,
-                                                        void *),
-                                             void *user_data);
 static bool telegram_is_running_impl(channel_t *ch);
 
 /**
- * HTTP call to Telegram API
+ * HTTP call to Telegram API using HTTP Gateway
  */
 static mimi_err_t tg_http_call(const char *method, const char *json_body,
-                               mimi_http_response_t *out)
+                               char *response, size_t response_len)
 {
-    if (!s_priv.bot_token[0]) return MIMI_ERR_INVALID_STATE;
-
-    char url[256];
-    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/%s", s_priv.bot_token, method);
-
-    char headers[128] =
-        "Content-Type: application/json\r\n"
-        "Accept: application/json\r\n";
-
-    mimi_http_request_t req = {
-        .method = json_body ? "POST" : "GET",
-        .url = url,
-        .headers = headers,
-        .body = (const uint8_t *) json_body,
-        .body_len = json_body ? strlen(json_body) : 0,
-        .timeout_ms = (TG_POLL_TIMEOUT_S + 5) * 1000,
-    };
-
-    return mimi_http_exec(&req, out);
+    if (!s_priv.http_gateway) {
+        return MIMI_ERR_INVALID_STATE;
+    }
+    
+    if (json_body) {
+        return http_gateway_post(s_priv.http_gateway, method, json_body, 
+                              strlen(json_body), response, response_len);
+    } else {
+        return http_gateway_get(s_priv.http_gateway, method, response, response_len);
+    }
 }
 
 /**
@@ -111,22 +86,8 @@ static void handle_update_object(cJSON *upd)
 
     MIMI_LOGI(TAG, "Incoming message from chat %s: %.40s...", chat_id, text->valuestring);
 
-    /* Call channel callback if set */
-    if (s_priv.on_message) {
-        channel_t *ch = &g_telegram_channel;
-        s_priv.on_message(ch, chat_id, text->valuestring, s_priv.callback_user_data);
-    }
-
-    /* Also push to message bus for backward compatibility during transition */
-    mimi_msg_t m = {0};
-    strncpy(m.channel, MIMI_CHAN_TELEGRAM, sizeof(m.channel) - 1);
-    strncpy(m.chat_id, chat_id, sizeof(m.chat_id) - 1);
-    m.content = strdup(text->valuestring);
-    if (!m.content) return;
-
-    if (message_bus_push_inbound(&m) != MIMI_OK) {
-        free(m.content);
-    }
+    /* Route through Input Processor */
+    router_handle_telegram(chat_id, text->valuestring);
 }
 
 /**
@@ -150,22 +111,19 @@ static void telegram_poll_task(void *arg)
                      TG_POLL_TIMEOUT_S);
         }
 
-        mimi_http_response_t resp;
-        mimi_err_t err = tg_http_call(method, NULL, &resp);
+        char response[8192];
+        mimi_err_t err = tg_http_call(method, NULL, response, sizeof(response));
         if (err != MIMI_OK) {
-            MIMI_LOGW(TAG, "getUpdates failed: %s", mimi_err_to_name(err));
-            mimi_http_response_free(&resp);
+            MIMI_LOGW(TAG, "getUpdates failed: %d", err);
             continue;
         }
 
-        if (resp.status != 200 || !resp.body) {
-            MIMI_LOGW(TAG, "getUpdates HTTP %d", resp.status);
-            mimi_http_response_free(&resp);
+        if (response[0] == '\0') {
+            MIMI_LOGW(TAG, "getUpdates: empty response");
             continue;
         }
 
-        cJSON *root = cJSON_Parse((char *) resp.body);
-        mimi_http_response_free(&resp);
+        cJSON *root = cJSON_Parse(response);
         if (!root) {
             MIMI_LOGW(TAG, "getUpdates: invalid JSON");
             continue;
@@ -200,6 +158,7 @@ mimi_err_t telegram_channel_init_impl(channel_t *ch, const channel_config_t *cfg
 
     /* Load token from config */
     const mimi_config_t *config = mimi_config_get();
+    
     if (config->telegram_token[0] != '\0') {
         strncpy(s_priv.bot_token, config->telegram_token, sizeof(s_priv.bot_token) - 1);
         s_priv.bot_token[sizeof(s_priv.bot_token) - 1] = '\0';
@@ -211,7 +170,28 @@ mimi_err_t telegram_channel_init_impl(channel_t *ch, const channel_config_t *cfg
         MIMI_LOGI(TAG, "Telegram bot initialized with token prefix %.6s***", s_priv.bot_token);
     }
 
-    /* Store channel reference */
+    /* Get or create HTTP Gateway */
+    s_priv.http_gateway = gateway_manager_find("http");
+    if (!s_priv.http_gateway) {
+        MIMI_LOGE(TAG, "HTTP Gateway not found");
+        return MIMI_ERR_NOT_FOUND;
+    }
+
+    /* Configure HTTP Gateway for Telegram */
+    mimi_err_t err = http_gateway_configure("https://api.telegram.org/bot", 
+                                          s_priv.bot_token, 35000);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
+        return err;
+    }
+
+    /* Register mapping for Input Processor */
+    err = router_register_mapping("telegram", "telegram");
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to register input processor mapping");
+        return err;
+    }
+
     ch->priv_data = &s_priv;
     s_priv.initialized = true;
 
@@ -236,17 +216,25 @@ mimi_err_t telegram_channel_start_impl(channel_t *ch)
         return MIMI_OK;
     }
 
-    if (!s_priv.bot_token[0]) {
-        MIMI_LOGW(TAG, "Cannot start Telegram polling without bot token");
+    if (!s_priv.http_gateway) {
+        MIMI_LOGW(TAG, "Cannot start Telegram without HTTP Gateway");
         return MIMI_ERR_INVALID_STATE;
+    }
+
+    /* Start HTTP Gateway */
+    mimi_err_t err = gateway_start(s_priv.http_gateway);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to start HTTP Gateway: %d", err);
+        return err;
     }
 
     /* Start polling task */
     s_priv.running = true;
-    mimi_err_t err = mimi_task_create_detached("telegram_poll", telegram_poll_task, NULL);
+    err = mimi_task_create_detached("telegram_poll", telegram_poll_task, NULL);
     if (err != MIMI_OK) {
         s_priv.running = false;
-        MIMI_LOGE(TAG, "Failed to create telegram poll task: %s", mimi_err_to_name(err));
+        MIMI_LOGE(TAG, "Failed to create telegram poll task: %d", err);
+        gateway_stop(s_priv.http_gateway);
         return err;
     }
 
@@ -268,7 +256,12 @@ mimi_err_t telegram_channel_stop_impl(channel_t *ch)
 
     s_priv.running = false;
     s_priv.started = false;
-    
+
+    /* Stop HTTP Gateway */
+    if (s_priv.http_gateway) {
+        gateway_stop(s_priv.http_gateway);
+    }
+
     MIMI_LOGI(TAG, "Telegram Channel stopped");
     return MIMI_OK;
 }
@@ -284,10 +277,11 @@ void telegram_channel_destroy_impl(channel_t *ch)
         return;
     }
 
-    /* Stop first */
     telegram_channel_stop_impl(ch);
 
-    /* Clean up state */
+    /* Unregister mapping */
+    router_unregister_mapping("telegram");
+
     memset(&s_priv, 0, sizeof(s_priv));
 
     MIMI_LOGI(TAG, "Telegram Channel destroyed");
@@ -317,98 +311,94 @@ mimi_err_t telegram_channel_send_impl(channel_t *ch, const char *session_id,
     cJSON_Delete(body);
     if (!json) return MIMI_ERR_NO_MEM;
 
-    mimi_http_response_t resp;
-    mimi_err_t err = tg_http_call("sendMessage", json, &resp);
+    char response[8192];
+    mimi_err_t err = tg_http_call("sendMessage", json, response, sizeof(response));
     free(json);
-    if (err != MIMI_OK) return err;
-
-    if (resp.status != 200) {
-        MIMI_LOGW(TAG, "sendMessage HTTP %d", resp.status);
-        mimi_http_response_free(&resp);
-        return MIMI_ERR_FAIL;
+    
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to send message: %d", err);
+        return err;
     }
 
-    mimi_http_response_free(&resp);
     return MIMI_OK;
 }
 
 /**
- * Check if channel is running
+ * Check if Telegram Channel is running
  */
 static bool telegram_is_running_impl(channel_t *ch)
 {
     (void)ch;
-    return s_priv.initialized && s_priv.started;
+    return s_priv.running;
 }
 
 /**
- * Set message callback
+ * Set message callback (not used - polling is used)
  */
-static void telegram_set_on_message_impl(channel_t *ch,
-                                          void (*cb)(channel_t *, const char *,
-                                                     const char *, void *),
-                                          void *user_data)
+static void telegram_set_on_message(channel_t *ch,
+                                void (*cb)(channel_t *, const char *, 
+                                           const char *, void *),
+                                void *user_data)
 {
     (void)ch;
-    s_priv.on_message = cb;
-    s_priv.callback_user_data = user_data;
+    (void)cb;
+    (void)user_data;
+    /* Messages are handled via polling */
 }
 
 /**
- * Set connect callback
+ * Set connect callback (not used)
  */
-static void telegram_set_on_connect_impl(channel_t *ch,
-                                          void (*cb)(channel_t *, const char *,
-                                                     void *),
-                                          void *user_data)
+static void telegram_set_on_connect(channel_t *ch,
+                                void (*cb)(channel_t *, const char *, 
+                                           void *),
+                                void *user_data)
 {
     (void)ch;
-    s_priv.on_connect = cb;
-    s_priv.callback_user_data = user_data;
+    (void)cb;
+    (void)user_data;
 }
 
 /**
- * Set disconnect callback
+ * Set disconnect callback (not used)
  */
-static void telegram_set_on_disconnect_impl(channel_t *ch,
-                                             void (*cb)(channel_t *, const char *,
-                                                        void *),
-                                             void *user_data)
+static void telegram_set_on_disconnect(channel_t *ch,
+                                   void (*cb)(channel_t *, const char *, 
+                                              void *),
+                                   void *user_data)
 {
     (void)ch;
-    s_priv.on_disconnect = cb;
-    s_priv.callback_user_data = user_data;
+    (void)cb;
+    (void)user_data;
 }
+
+/**
+ * Global Telegram Channel instance
+ */
+channel_t g_telegram_channel = {
+    .name = "telegram",
+    .description = "Telegram Bot",
+    .require_auth = false,
+    .max_sessions = 0,
+    .init = telegram_channel_init_impl,
+    .start = telegram_channel_start_impl,
+    .stop = telegram_channel_stop_impl,
+    .destroy = telegram_channel_destroy_impl,
+    .send = telegram_channel_send_impl,
+    .is_running = telegram_is_running_impl,
+    .set_on_message = telegram_set_on_message,
+    .set_on_connect = telegram_set_on_connect,
+    .set_on_disconnect = telegram_set_on_disconnect,
+    .priv_data = NULL,
+    .is_initialized = false,
+    .is_started = false
+};
 
 /**
  * Initialize Telegram Channel module
- * Called before registering with Channel Manager
  */
 mimi_err_t telegram_channel_init(void)
 {
-    /* Initialize the global channel structure */
-    strncpy(g_telegram_channel.name, "telegram", sizeof(g_telegram_channel.name) - 1);
-    g_telegram_channel.name[sizeof(g_telegram_channel.name) - 1] = '\0';
-    
-    strncpy(g_telegram_channel.description, "Telegram Bot Channel", 
-            sizeof(g_telegram_channel.description) - 1);
-    g_telegram_channel.description[sizeof(g_telegram_channel.description) - 1] = '\0';
-    
-    g_telegram_channel.require_auth = false;
-    g_telegram_channel.max_sessions = -1;
-    g_telegram_channel.init = telegram_channel_init_impl;
-    g_telegram_channel.start = telegram_channel_start_impl;
-    g_telegram_channel.stop = telegram_channel_stop_impl;
-    g_telegram_channel.destroy = telegram_channel_destroy_impl;
-    g_telegram_channel.send = telegram_channel_send_impl;
-    g_telegram_channel.is_running = telegram_is_running_impl;
-    g_telegram_channel.set_on_message = telegram_set_on_message_impl;
-    g_telegram_channel.set_on_connect = telegram_set_on_connect_impl;
-    g_telegram_channel.set_on_disconnect = telegram_set_on_disconnect_impl;
-    g_telegram_channel.priv_data = NULL;
-    g_telegram_channel.is_initialized = false;
-    g_telegram_channel.is_started = false;
-
     return MIMI_OK;
 }
 
@@ -417,28 +407,18 @@ mimi_err_t telegram_channel_init(void)
  */
 mimi_err_t telegram_channel_set_token(const char *token)
 {
-    if (!token || !token[0]) return MIMI_ERR_INVALID_ARG;
+    if (!token) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    
     strncpy(s_priv.bot_token, token, sizeof(s_priv.bot_token) - 1);
-    MIMI_LOGI(TAG, "Telegram token updated");
+    s_priv.bot_token[sizeof(s_priv.bot_token) - 1] = '\0';
+    
+    /* Reconfigure HTTP Gateway with new token */
+    if (s_priv.http_gateway) {
+        http_gateway_configure("https://api.telegram.org/bot", s_priv.bot_token, 35000);
+    }
+    
+    MIMI_LOGI(TAG, "Telegram bot token updated");
     return MIMI_OK;
 }
-
-/* Global Telegram channel instance */
-channel_t g_telegram_channel = {
-    .name = "telegram",
-    .description = "Telegram Bot Channel",
-    .require_auth = false,
-    .max_sessions = -1,
-    .init = telegram_channel_init_impl,
-    .start = telegram_channel_start_impl,
-    .stop = telegram_channel_stop_impl,
-    .destroy = telegram_channel_destroy_impl,
-    .send = telegram_channel_send_impl,
-    .is_running = telegram_is_running_impl,
-    .set_on_message = telegram_set_on_message_impl,
-    .set_on_connect = telegram_set_on_connect_impl,
-    .set_on_disconnect = telegram_set_on_disconnect_impl,
-    .priv_data = NULL,
-    .is_initialized = false,
-    .is_started = false,
-};

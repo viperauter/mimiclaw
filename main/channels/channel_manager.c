@@ -3,6 +3,8 @@
  */
 
 #include "channels/channel_manager.h"
+#include "gateway/gateway_manager.h"
+#include "gateway/gateway.h"
 #include "log.h"
 #include <string.h>
 
@@ -96,7 +98,7 @@ mimi_err_t channel_register(channel_t *ch)
         return MIMI_ERR_INVALID_ARG;
     }
 
-    if (!ch->name || strlen(ch->name) == 0) {
+    if (strlen(ch->name) == 0) {
         MIMI_LOGE(TAG, "Channel name is required");
         return MIMI_ERR_INVALID_ARG;
     }
@@ -301,14 +303,72 @@ void channel_poll_all(void)
 extern mimi_err_t cli_channel_init(void);
 extern mimi_err_t telegram_channel_init(void);
 extern mimi_err_t ws_channel_init(void);
+extern mimi_err_t feishu_channel_init(void);
+extern mimi_err_t qq_channel_init(void);
 
 /* External channel instances */
 extern channel_t g_cli_channel;
 extern channel_t g_telegram_channel;
 extern channel_t g_websocket_channel;
+extern channel_t g_feishu_channel;
+extern channel_t g_qq_channel;
+
+/* External Gateway init functions */
+extern mimi_err_t gateway_manager_init(void);
+extern mimi_err_t stdio_gateway_module_init(void);
+extern mimi_err_t ws_gateway_module_init(void);
+extern gateway_t g_stdio_gateway;
+extern gateway_t g_ws_gateway;
+
+/* External Router init */
+extern mimi_err_t router_init(void);
 
 mimi_err_t channel_system_auto_init(void)
 {
+    /* Initialize Router (must be before channels) */
+    if (router_init() != MIMI_OK) {
+        MIMI_LOGE(TAG, "router_init failed");
+        return MIMI_ERR_FAIL;
+    }
+    MIMI_LOGI(TAG, "Router initialized");
+
+    /* Initialize Gateway Manager */
+    if (gateway_manager_init() != MIMI_OK) {
+        MIMI_LOGE(TAG, "gateway_manager_init failed");
+        return MIMI_ERR_FAIL;
+    }
+    MIMI_LOGI(TAG, "Gateway manager initialized");
+
+    extern mimi_err_t gateway_manager_register(gateway_t *gw);
+
+    /* Initialize and register STDIO Gateway */
+    if (stdio_gateway_module_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "stdio_gateway_module_init failed");
+    } else {
+        if (gateway_manager_register(&g_stdio_gateway) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register STDIO gateway");
+        } else {
+            /* Initialize the gateway */
+            if (gateway_init(&g_stdio_gateway, NULL) != MIMI_OK) {
+                MIMI_LOGW(TAG, "Failed to initialize STDIO gateway");
+            }
+        }
+    }
+
+    /* Initialize and register WebSocket Gateway */
+    if (ws_gateway_module_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "ws_gateway_module_init failed");
+    } else {
+        if (gateway_manager_register(&g_ws_gateway) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register WebSocket gateway");
+        } else {
+            /* Initialize the gateway */
+            if (gateway_init(&g_ws_gateway, NULL) != MIMI_OK) {
+                MIMI_LOGW(TAG, "Failed to initialize WebSocket gateway");
+            }
+        }
+    }
+
     /* Initialize Channel Manager */
     if (channel_manager_init() != MIMI_OK) {
         return MIMI_ERR_FAIL;
@@ -338,6 +398,24 @@ mimi_err_t channel_system_auto_init(void)
     } else {
         if (channel_register(&g_websocket_channel) != MIMI_OK) {
             MIMI_LOGW(TAG, "Failed to register WebSocket channel");
+        }
+    }
+
+    /* Initialize and register Feishu Channel */
+    if (feishu_channel_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "feishu_channel_init failed");
+    } else {
+        if (channel_register(&g_feishu_channel) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register Feishu channel");
+        }
+    }
+
+    /* Initialize and register QQ Channel */
+    if (qq_channel_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "qq_channel_init failed");
+    } else {
+        if (channel_register(&g_qq_channel) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register QQ channel");
         }
     }
 

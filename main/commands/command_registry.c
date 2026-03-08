@@ -166,7 +166,6 @@ int command_parse_input(const char *input,
     }
 
     /* Parse command name */
-    char *p_start = p;
     size_t name_len = 0;
 
     /* Skip leading '/' if present */

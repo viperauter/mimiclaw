@@ -303,14 +303,14 @@ static void cli_do_completion(cli_terminal_t *term)
         /* Extract prefix after "/" */
         int prefix_start = 1;
         int prefix_len = term->cursor - prefix_start;
-        if (prefix_len > 0 && prefix_len < sizeof(prefix) - 1) {
+        if (prefix_len > 0 && prefix_len < (int)sizeof(prefix) - 1) {
             memcpy(prefix, &term->line[prefix_start], prefix_len);
             prefix[prefix_len] = '\0';
         }
     } else {
         /* Regular word completion */
         int word_len = term->cursor - word_start;
-        if (word_len > 0 && word_len < sizeof(prefix) - 1) {
+        if (word_len > 0 && word_len < (int)sizeof(prefix) - 1) {
             memcpy(prefix, &term->line[word_start], word_len);
             prefix[word_len] = '\0';
         }
