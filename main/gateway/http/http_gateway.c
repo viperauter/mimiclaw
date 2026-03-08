@@ -47,6 +47,7 @@ static mimi_err_t http_gateway_init_impl(gateway_t *gw, const http_gateway_confi
     priv->gateway = gw;
     priv->initialized = true;
     priv->connected = true;
+    gw->is_initialized = true;
     
     MIMI_LOGI(TAG, "HTTP Gateway initialized (base_url: %s)", priv->base_url);
     return MIMI_OK;

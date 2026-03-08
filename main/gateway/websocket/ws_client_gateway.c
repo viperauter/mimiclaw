@@ -52,13 +52,16 @@ static void ws_client_event_handler(mimi_websocket_t *ws, mimi_ws_event_t event,
         
         case MIMI_WS_EVENT_MESSAGE:
         {
-            MIMI_LOGD(TAG, "Received WebSocket message: %.*s", (int)data_len, (const char *)data);
+            MIMI_LOGI(TAG, "Received WebSocket message: %.*s", (int)data_len, (const char *)data);
             
             /* Call gateway message callback if set */
             if (priv->gateway && priv->gateway->on_message_cb) {
+                MIMI_LOGI(TAG, "Calling message callback");
                 priv->gateway->on_message_cb(priv->gateway, "default", 
                                            (const char *)data, 
                                            priv->gateway->callback_user_data);
+            } else {
+                MIMI_LOGW(TAG, "No message callback set");
             }
             break;
         }
@@ -110,6 +113,9 @@ static mimi_err_t ws_client_gateway_init_impl(gateway_t *gw, const gateway_confi
     }
     if (ws_cfg && ws_cfg->api_token) {
         strncpy(priv->api_token, ws_cfg->api_token, sizeof(priv->api_token) - 1);
+        /* Build Authorization header */
+        snprintf(priv->auth_header, sizeof(priv->auth_header), 
+                 "Authorization: Bearer %s", ws_cfg->api_token);
     }
     priv->timeout_ms = (ws_cfg && ws_cfg->timeout_ms > 0) ? ws_cfg->timeout_ms : 30000;
     priv->ping_interval_ms = (ws_cfg && ws_cfg->ping_interval_ms > 0) ? ws_cfg->ping_interval_ms : 30000;
@@ -118,6 +124,7 @@ static mimi_err_t ws_client_gateway_init_impl(gateway_t *gw, const gateway_confi
     priv->initialized = true;
     priv->connected = false;
     priv->reconnecting = false;
+    gw->is_initialized = true;
     
     MIMI_LOGI(TAG, "WebSocket Client Gateway initialized (url: %s)", priv->url);
     return MIMI_OK;
@@ -260,7 +267,7 @@ mimi_err_t ws_client_gateway_connect(gateway_t *gw)
     /* Create WebSocket configuration */
     mimi_ws_config_t config = {
         .url = priv->url,
-        .headers = NULL,
+        .headers = priv->auth_header[0] ? priv->auth_header : NULL,
         .timeout_ms = priv->timeout_ms,
         .ping_interval_ms = priv->ping_interval_ms,
         .event_cb = ws_client_event_handler,

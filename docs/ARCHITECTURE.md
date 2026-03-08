@@ -470,9 +470,162 @@ Session files are JSONL (one JSON object per line):
 
 ---
 
+## Virtual File System (VFS) Architecture
+
+### Overview
+
+MimiClaw uses a virtual file system (VFS) layer that abstracts underlying file system operations. This allows consistent file access across different platforms (ESP32 SPIFFS, POSIX systems).
+
+### VFS Base Directory
+
+The VFS base directory is configured based on the platform:
+
+- **Linux/POSIX**: `~/.mimiclaw/workspace/`
+- **Windows**: `C:\Users\<username>\.mimiclaw\workspace\`
+- **ESP32**: `/spiffs/`
+
+### Directory Structure
+
+```
+~/.mimiclaw/
+├── config.json          # Configuration file (outside VFS)
+└── workspace/           # VFS base directory
+    ├── AGENTS.md        # Agent configuration
+    ├── HEARTBEAT.md     # Heartbeat status
+    ├── TOOLS.md         # Tool usage documentation
+    ├── config/          # Configuration files
+    │   ├── SOUL.md      # AI personality
+    │   └── USER.md      # User profile
+    ├── cron.json        # Cron jobs configuration
+    ├── memory/          # Memory files
+    │   ├── MEMORY.md    # Long-term memory
+    │   └── daily/       # Daily notes
+    ├── sessions/        # Session files
+    │   ├── cli_default.jsonl  # CLI session
+    │   ├── tg_12345.jsonl     # Telegram session
+    │   └── ws_client1.jsonl    # WebSocket session
+    └── skills/          # Skill files
+        ├── daily-briefing.md   # Daily briefing skill
+        ├── skill-creator.md    # Skill creator skill
+        └── weather.md          # Weather skill
+```
+
+### File Access Pattern
+
+All modules (session, skills, tools) use **VFS paths** (relative to the VFS base directory) for file operations:
+
+- **Session Manager**: Uses `sessions/<session_id>.jsonl` paths for storing chat history in JSONL format
+- **Skills System**: Uses `skills/<skill_name>.md` paths for skill definitions and configurations
+- **Memory Store**: Uses `memory/MEMORY.md` for long-term memory and `memory/daily/<date>.md` for daily notes
+- **Context Builder**: Uses `config/SOUL.md` for AI personality and `config/USER.md` for user profile
+- **Tools System**: Uses VFS paths for tool configurations and data storage
+
+### VFS Path vs Real Path Usage
+
+| Component | Path Type | Description |
+|-----------|-----------|-------------|
+| Session Manager | VFS Path | Uses relative paths like `sessions/cli_default.jsonl` |
+| Skills System | VFS Path | Uses relative paths like `skills/weather.md` |
+| Memory Store | VFS Path | Uses relative paths like `memory/MEMORY.md` |
+| Tools System | VFS Path | Uses relative paths for tool-specific data |
+| Configuration | Real Path | Uses absolute path to `~/.mimiclaw/config.json` (outside VFS) |
+
+### Detailed Directory Structure
+
+```
+~/.mimiclaw/            # Base directory (real path)
+├── config.json          # Configuration file (real path, outside VFS)
+└── workspace/           # VFS base directory
+    ├── AGENTS.md        # Agent configuration
+    ├── HEARTBEAT.md     # Heartbeat status
+    ├── TOOLS.md         # Tool usage documentation
+    ├── config/          # Configuration files
+    │   ├── SOUL.md      # AI personality
+    │   └── USER.md      # User profile
+    ├── cron.json        # Cron jobs configuration
+    ├── memory/          # Memory files
+    │   ├── MEMORY.md    # Long-term memory
+    │   └── daily/       # Daily notes
+    │       ├── 2024-01-01.md
+    │       └── 2024-01-02.md
+    ├── sessions/        # Session files
+    │   ├── cli_default.jsonl  # CLI session
+    │   ├── tg_12345.jsonl     # Telegram session
+    │   └── ws_client1.jsonl    # WebSocket session
+    └── skills/          # Skill files
+        ├── daily-briefing.md   # Daily briefing skill
+        ├── skill-creator.md    # Skill creator skill
+        └── weather.md          # Weather skill
+```
+
+### Session File Usage
+
+Session files store chat history in JSONL format, with one JSON object per line:
+
+```json
+{"role":"user","content":"Hello","ts":1738764800}
+{"role":"assistant","content":"Hi there!","ts":1738764802}
+```
+
+- **Location**: `sessions/<session_id>.jsonl` (VFS path)
+- **Naming convention**: `{channel}_{identifier}.jsonl`
+  - CLI: `cli_{session_name}.jsonl`
+  - Telegram: `tg_{chat_id}.jsonl`
+  - WebSocket: `ws_{client_id}.jsonl`
+
+### Skills File Usage
+
+Skill files are Markdown documents that define skill behavior and configuration:
+
+- **Location**: `skills/<skill_name>.md` (VFS path)
+- **Format**: Markdown with YAML frontmatter for metadata
+- **Purpose**: Define skill functionality, triggers, and responses
+
+### Tools File Usage
+
+Tools may use VFS paths for configuration and data storage:
+
+- **Configuration**: Stored in `tools/<tool_name>.json` (VFS path)
+- **Data**: Stored in `tools/<tool_name>/` directories (VFS paths)
+- **Usage**: Tools access their data using relative VFS paths
+
+### VFS API
+
+```c
+/* File operations */
+mimi_err_t mimi_fs_open(const char *path, const char *mode, mimi_file_t **out_file);
+mimi_err_t mimi_fs_close(mimi_file_t *file);
+mimi_err_t mimi_fs_read(mimi_file_t *file, void *buf, size_t len, size_t *out_read);
+mimi_err_t mimi_fs_write(mimi_file_t *file, const void *buf, size_t len, size_t *out_written);
+mimi_err_t mimi_fs_seek(mimi_file_t *file, int offset, int whence);
+
+/* Directory operations */
+mimi_err_t mimi_fs_mkdir(const char *path);
+mimi_err_t mimi_fs_mkdir_p(const char *path);
+
+/* Path operations */
+bool mimi_fs_exists(const char *path);
+```
+
+### Direct File System Access
+
+For files outside the VFS (like the main `config.json`), direct POSIX file operations are used:
+
+```c
+/* Direct POSIX API functions (bypassing VFS) */
+bool mimi_fs_exists_direct(const char *path);
+int mimi_fs_mkdir_p_direct(const char *dir);
+```
+
+---
+
 ## Configuration
 
-All configuration is done exclusively through `mimi_secrets.h` at build time. There is no runtime configuration — changing any setting requires `idf.py fullclean && idf.py build`.
+MimiClaw uses a dual-configuration approach:
+
+### 1. Build-time Configuration (`mimi_secrets.h`)
+
+For sensitive credentials and platform-specific settings:
 
 | Define                       | Description                             |
 |------------------------------|-----------------------------------------|
@@ -484,6 +637,65 @@ All configuration is done exclusively through `mimi_secrets.h` at build time. Th
 | `MIMI_SECRET_PROXY_HOST`    | HTTP proxy hostname/IP (optional)       |
 | `MIMI_SECRET_PROXY_PORT`    | HTTP proxy port (optional)              |
 | `MIMI_SECRET_SEARCH_KEY`    | Brave Search API key (optional)         |
+
+### 2. Runtime Configuration (`config.json`)
+
+For runtime settings stored in the user's home directory:
+
+**Location:**
+- **Linux/POSIX**: `~/.mimiclaw/config.json`
+- **Windows**: `C:\Users\<username>\.mimiclaw\config.json`
+
+**Example config.json:**
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.mimiclaw/workspace",
+      "timezone": "PST8PDT,M3.2.0,M11.1.0",
+      "model": "nvidia/nemotron-nano-9b-v2:free",
+      "provider": "openrouter",
+      "maxTokens": 8192,
+      "temperature": 0.1,
+      "maxToolIterations": 40,
+      "memoryWindow": 100,
+      "sendWorkingStatus": true
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_TELEGRAM_TOKEN",
+      "allowFrom": ["123456789"]
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "apiKey": "YOUR_API_KEY",
+      "apiBase": "https://openrouter.ai/api/v1/chat/completions"
+    }
+  },
+  "proxy": {
+    "host": "",
+    "port": "",
+    "type": "http"
+  },
+  "tools": {
+    "search": {
+      "apiKey": "YOUR_SEARCH_KEY"
+    }
+  },
+  "logging": {
+    "level": "info"
+  }
+}
+```
+
+### Configuration Priority
+
+1. `mimi_secrets.h` (build-time) - highest priority
+2. `config.json` (runtime) - overrides defaults
+3. Built-in defaults - lowest priority
 
 NVS is still initialized (required by ESP-IDF WiFi internals) but is not used for application configuration.
 
@@ -582,10 +794,13 @@ The loop repeats until `stop_reason` is `"end_turn"` (max 10 iterations).
 app_main()
   ├── init_nvs()                    NVS flash init (erase if corrupted)
   ├── esp_event_loop_create_default()
-  ├── init_spiffs()                 Mount SPIFFS at /spiffs
+  ├── mimi_fs_init()                Initialize VFS layer with base directory
+  ├── mimi_config_load()            Load config.json from ~/.mimiclaw/ (real path)
   ├── message_bus_init()            Create inbound + outbound queues
-  ├── memory_store_init()           Verify SPIFFS paths
-  ├── session_mgr_init()
+  ├── memory_store_init()           Initialize memory store with VFS paths
+  ├── session_mgr_init()            Initialize session manager with VFS paths
+  ├── skills_system_init()          Initialize skills system with VFS paths
+  ├── tools_system_init()           Initialize tools system with VFS paths
   ├── 
   ├── Initialize Channel System (NEW)
   │   ├── command_system_init()     Initialize command registry

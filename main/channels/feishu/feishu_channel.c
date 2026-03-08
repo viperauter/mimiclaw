@@ -62,7 +62,7 @@ static mimi_err_t feishu_get_tenant_token(void)
 
     char response[4096];
     mimi_err_t err = http_gateway_post(s_priv.http_gateway, 
-                                          "/open-apis/auth/v3/tenant_access_token/internal",
+                                          "/auth/v3/tenant_access_token/internal",
                                           json, strlen(json),
                                           response, sizeof(response));
     free(json);
@@ -165,6 +165,8 @@ static void on_ws_message(gateway_t *gw, const char *session_id,
         return;
     }
 
+    MIMI_LOGI(TAG, "Received WebSocket message: %s", content);
+
     /* Parse Feishu WebSocket message */
     cJSON *root = cJSON_Parse(content);
     if (!root) {
@@ -198,7 +200,17 @@ static void on_ws_message(gateway_t *gw, const char *session_id,
                                 
                                 if (sender_id && cJSON_IsString(sender_id) &&
                                     content && cJSON_IsString(content)) {
-                                    handle_message(sender_id->valuestring, content->valuestring);
+                                    /* Parse content JSON string to extract text */
+                                    cJSON *content_obj = cJSON_Parse(content->valuestring);
+                                    if (content_obj) {
+                                        cJSON *text = cJSON_GetObjectItem(content_obj, "text");
+                                        if (text && cJSON_IsString(text)) {
+                                            handle_message(sender_id->valuestring, text->valuestring);
+                                        }
+                                        cJSON_Delete(content_obj);
+                                    } else {
+                                        MIMI_LOGW(TAG, "Failed to parse content JSON: %s", content->valuestring);
+                                    }
                                 }
                             }
                         }
@@ -223,8 +235,15 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
         return MIMI_OK;
     }
 
-    /* Load credentials from config */
+    /* Check if Feishu is enabled */
     const mimi_config_t *config = mimi_config_get();
+    MIMI_LOGI(TAG, "Feishu config: enabled=%d, app_id=%s", config->feishu_enabled, config->feishu_app_id);
+    if (!config->feishu_enabled) {
+        MIMI_LOGI(TAG, "Feishu Channel is disabled");
+        return MIMI_ERR_NOT_SUPPORTED;
+    }
+
+    /* Load credentials from config */
     if (config->feishu_app_id[0] != '\0') {
         strncpy(s_priv.app_id, config->feishu_app_id, sizeof(s_priv.app_id) - 1);
     }
@@ -252,6 +271,23 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
         return MIMI_ERR_NOT_FOUND;
     }
 
+    /* Configure HTTP Gateway for Feishu */
+    mimi_err_t err = http_gateway_configure("https://open.feishu.cn/open-apis", 
+                                       s_priv.app_secret, 30000);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
+        return err;
+    }
+
+    /* Get tenant access token for WebSocket authentication */
+    if (s_priv.tenant_access_token[0] == '\0') {
+        err = feishu_get_tenant_token();
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Failed to get tenant access token: %d", err);
+            return err;
+        }
+    }
+
     /* Configure WebSocket Client Gateway for Feishu */
     /* Feishu WebSocket URL: wss://open.feishu.cn/open-apis/bot/v3/hyper-event */
     char ws_url[256];
@@ -259,17 +295,9 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
              "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
              s_priv.app_id);
     
-    mimi_err_t err = ws_client_gateway_configure(ws_url, s_priv.app_secret, 30000, 30000);
+    err = ws_client_gateway_configure(ws_url, s_priv.tenant_access_token, 30000, 30000);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to configure WebSocket Client Gateway: %d", err);
-        return err;
-    }
-
-    /* Configure HTTP Gateway for Feishu */
-    err = http_gateway_configure("https://open.feishu.cn/open-apis", 
-                               s_priv.app_secret, 30000);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
         return err;
     }
 

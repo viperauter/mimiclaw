@@ -153,7 +153,7 @@ mimi_err_t mimi_ws_connect(mimi_websocket_t *ws)
     }
     
     /* Create WebSocket connection */
-    ctx->conn = mg_ws_connect(&ctx->mgr, ctx->config.url, ws_event_handler, ctx, NULL);
+    ctx->conn = mg_ws_connect(&ctx->mgr, ctx->config.url, ws_event_handler, ctx, ctx->config.headers);
     if (!ctx->conn) {
         MIMI_LOGE("ws_mg", "Failed to create WebSocket connection to %s", ctx->config.url);
         return MIMI_ERR_IO;

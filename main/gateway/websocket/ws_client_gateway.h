@@ -28,6 +28,7 @@ typedef struct {
 typedef struct {
     char url[256];
     char api_token[128];
+    char auth_header[256];         /* Full Authorization header */
     int timeout_ms;
     int ping_interval_ms;
     

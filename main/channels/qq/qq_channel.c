@@ -164,8 +164,14 @@ mimi_err_t qq_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
         return MIMI_OK;
     }
 
-    /* Load credentials from config */
+    /* Check if QQ is enabled */
     const mimi_config_t *config = mimi_config_get();
+    if (!config->qq_enabled) {
+        MIMI_LOGI(TAG, "QQ Channel is disabled");
+        return MIMI_ERR_NOT_SUPPORTED;
+    }
+
+    /* Load credentials from config */
     if (config->qq_app_id[0] != '\0') {
         strncpy(s_priv.app_id, config->qq_app_id, sizeof(s_priv.app_id) - 1);
     }

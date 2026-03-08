@@ -324,6 +324,31 @@ mimi_err_t mimi_fs_readdir(mimi_dir_t *dir, char *name_out, size_t name_out_len,
  */
 mimi_err_t mimi_fs_closedir(mimi_dir_t *dir);
 
+/* ==========================================================================
+ * Direct POSIX API Functions
+ *
+ * These functions bypass the VFS layer and work directly with the file system.
+ * Useful for absolute paths outside the workspace.
+ * ========================================================================== */
+
+/**
+ * Check if a file or directory exists using direct POSIX API.
+ * This bypasses the VFS layer and works with absolute paths.
+ *
+ * @param path Path to check
+ * @return true if exists, false otherwise
+ */
+bool mimi_fs_exists_direct(const char *path);
+
+/**
+ * Create a directory and all parent directories using direct POSIX API.
+ * This bypasses the VFS layer and works with absolute paths.
+ *
+ * @param dir Directory path
+ * @return 0 on success, -1 on error
+ */
+int mimi_fs_mkdir_p_direct(const char *dir);
+
 #ifdef __cplusplus
 }
 #endif

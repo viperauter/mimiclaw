@@ -6,11 +6,17 @@
 #include "log.h"
 #include "cJSON.h"
 #include "fs/fs.h"
+#include "platform/path_utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>
+#endif
 
 static const char *TAG = "config";
 
@@ -49,10 +55,19 @@ static void apply_defaults(void)
     /* Use platform-appropriate default workspace */
     char default_workspace[512];
     const char *home = getenv("HOME");
+#ifdef _WIN32
+    if (!home || home[0] == '\0') {
+        home = getenv("USERPROFILE");
+    }
+#endif
     if (home && home[0] != '\0') {
-        snprintf(default_workspace, sizeof(default_workspace), "%s/.mimiclaw", home);
+        char tmp[512];
+        mimi_path_join(home, ".mimiclaw", tmp, sizeof(tmp));
+        mimi_path_join(tmp, "workspace", default_workspace, sizeof(default_workspace));
     } else {
-        snprintf(default_workspace, sizeof(default_workspace), "./spiffs");
+        char tmp[512];
+        mimi_path_join(".", ".mimiclaw", tmp, sizeof(tmp));
+        mimi_path_join(tmp, "workspace", default_workspace, sizeof(default_workspace));
     }
     safe_strcpy(s_config.workspace, sizeof(s_config.workspace), default_workspace);
     safe_strcpy(s_config.timezone, sizeof(s_config.timezone), "PST8PDT,M3.2.0,M11.1.0");
@@ -73,6 +88,16 @@ static void apply_defaults(void)
     s_config.telegram_enabled = false;
     s_config.telegram_token[0] = '\0';
     s_config.telegram_allow_from[0] = '\0';
+
+    /* Feishu */
+    s_config.feishu_enabled = false;
+    s_config.feishu_app_id[0] = '\0';
+    s_config.feishu_app_secret[0] = '\0';
+
+    /* QQ */
+    s_config.qq_enabled = false;
+    s_config.qq_app_id[0] = '\0';
+    s_config.qq_token[0] = '\0';
 
     /* Proxy */
     s_config.proxy_host[0] = '\0';
@@ -134,6 +159,8 @@ mimi_err_t mimi_config_load(const char *path)
         return MIMI_OK;
     }
 
+    MIMI_LOGI(TAG, "Loading config from: %s", path);
+
     mimi_file_t *f = NULL;
     mimi_err_t ferr = mimi_fs_open(path, "rb", &f);
     if (ferr != MIMI_OK) {
@@ -144,6 +171,7 @@ mimi_err_t mimi_config_load(const char *path)
         MIMI_LOGE(TAG, "Cannot open config: %s", path);
         return MIMI_ERR_IO;
     }
+    MIMI_LOGI(TAG, "Config file opened successfully");
 
     (void)mimi_fs_seek(f, 0, SEEK_END);
     long n = 0;
@@ -171,6 +199,7 @@ mimi_err_t mimi_config_load(const char *path)
         MIMI_LOGW(TAG, "Invalid JSON in %s; using defaults", path);
         return MIMI_OK;
     }
+    MIMI_LOGI(TAG, "Config JSON parsed successfully");
 
     /* agents.defaults (nanobot-style) */
     cJSON *agents = cJSON_GetObjectItem(root, "agents");
@@ -200,6 +229,12 @@ mimi_err_t mimi_config_load(const char *path)
     }
 
     expand_tilde_inplace(s_config.workspace, sizeof(s_config.workspace));
+    
+    /* Normalize path separators to platform-specific format */
+    char normalized_workspace[512];
+    if (mimi_path_normalize(s_config.workspace, normalized_workspace, sizeof(normalized_workspace)) == 0) {
+        safe_strcpy(s_config.workspace, sizeof(s_config.workspace), normalized_workspace);
+    }
 
     /* providers.* — pick apiKey/apiBase by provider name */
     cJSON *providers = cJSON_GetObjectItem(root, "providers");
@@ -224,11 +259,48 @@ mimi_err_t mimi_config_load(const char *path)
     cJSON *tg = channels && cJSON_IsObject(channels) ? cJSON_GetObjectItem(channels, "telegram") : NULL;
     if (cJSON_IsObject(tg)) {
         cJSON *en = cJSON_GetObjectItem(tg, "enabled");
-        if (cJSON_IsBool(en)) s_config.telegram_enabled = cJSON_IsTrue(en);
+        if (en && (cJSON_IsBool(en) || cJSON_IsNumber(en))) {
+            s_config.telegram_enabled = cJSON_IsTrue(en) || (cJSON_IsNumber(en) && en->valueint != 0);
+        }
         json_str_to_buf(cJSON_GetObjectItem(tg, "token"), s_config.telegram_token, sizeof(s_config.telegram_token), false);
         cJSON *allow = cJSON_GetObjectItem(tg, "allowFrom");
         if (allow && cJSON_IsArray(allow))
             parse_allow_from(allow, s_config.telegram_allow_from, sizeof(s_config.telegram_allow_from));
+    }
+
+    /* channels.feishu */
+    cJSON *feishu = channels && cJSON_IsObject(channels) ? cJSON_GetObjectItem(channels, "feishu") : NULL;
+    MIMI_LOGI(TAG, "Loading feishu config, channels=%p, feishu=%p", (void*)channels, (void*)feishu);
+    if (cJSON_IsObject(feishu)) {
+        cJSON *en = cJSON_GetObjectItem(feishu, "enabled");
+        cJSON *app_id = cJSON_GetObjectItem(feishu, "appId");
+        cJSON *app_secret = cJSON_GetObjectItem(feishu, "appSecret");
+        MIMI_LOGI(TAG, "Feishu fields: enabled=%p (type=%d, val=%d), appId=%p, appSecret=%p",
+                  (void*)en, en ? en->type : -1, en ? cJSON_IsTrue(en) : -1, (void*)app_id, (void*)app_secret);
+        if (en && (cJSON_IsBool(en) || cJSON_IsNumber(en))) {
+            s_config.feishu_enabled = cJSON_IsTrue(en) || (cJSON_IsNumber(en) && en->valueint != 0);
+            MIMI_LOGI(TAG, "Feishu enabled set to: %d", s_config.feishu_enabled);
+        }
+        if (app_id && cJSON_IsString(app_id)) {
+            strncpy(s_config.feishu_app_id, app_id->valuestring, sizeof(s_config.feishu_app_id) - 1);
+            MIMI_LOGI(TAG, "Feishu app_id set to: %s", s_config.feishu_app_id);
+        }
+        if (app_secret && cJSON_IsString(app_secret)) {
+            strncpy(s_config.feishu_app_secret, app_secret->valuestring, sizeof(s_config.feishu_app_secret) - 1);
+        }
+    } else {
+        MIMI_LOGW(TAG, "Feishu config not found or not an object");
+    }
+
+    /* channels.qq */
+    cJSON *qq = channels && cJSON_IsObject(channels) ? cJSON_GetObjectItem(channels, "qq") : NULL;
+    if (cJSON_IsObject(qq)) {
+        cJSON *en = cJSON_GetObjectItem(qq, "enabled");
+        if (en && (cJSON_IsBool(en) || cJSON_IsNumber(en))) {
+            s_config.qq_enabled = cJSON_IsTrue(en) || (cJSON_IsNumber(en) && en->valueint != 0);
+        }
+        json_str_to_buf(cJSON_GetObjectItem(qq, "appId"), s_config.qq_app_id, sizeof(s_config.qq_app_id), false);
+        json_str_to_buf(cJSON_GetObjectItem(qq, "secret"), s_config.qq_token, sizeof(s_config.qq_token), false);
     }
 
     /* proxy (top-level or under a key) */
@@ -302,18 +374,40 @@ mimi_err_t mimi_config_save(const char *path)
     }
 
     cJSON *channels = cJSON_CreateObject();
-    cJSON *tg = cJSON_CreateObject();
-    if (channels && tg) {
-        cJSON_AddBoolToObject(tg, "enabled", s_config.telegram_enabled);
-        cJSON_AddStringToObject(tg, "token", s_config.telegram_token);
-        if (s_config.telegram_allow_from[0]) {
-            cJSON *arr = cJSON_CreateArray();
-            if (arr) {
-                cJSON_AddItemToArray(arr, cJSON_CreateString(s_config.telegram_allow_from));
-                cJSON_AddItemToObject(tg, "allowFrom", arr);
+    if (channels) {
+        /* telegram */
+        cJSON *tg = cJSON_CreateObject();
+        if (tg) {
+            cJSON_AddBoolToObject(tg, "enabled", s_config.telegram_enabled);
+            cJSON_AddStringToObject(tg, "token", s_config.telegram_token);
+            if (s_config.telegram_allow_from[0]) {
+                cJSON *arr = cJSON_CreateArray();
+                if (arr) {
+                    cJSON_AddItemToArray(arr, cJSON_CreateString(s_config.telegram_allow_from));
+                    cJSON_AddItemToObject(tg, "allowFrom", arr);
+                }
             }
+            cJSON_AddItemToObject(channels, "telegram", tg);
         }
-        cJSON_AddItemToObject(channels, "telegram", tg);
+
+        /* feishu */
+        cJSON *feishu = cJSON_CreateObject();
+        if (feishu) {
+            cJSON_AddBoolToObject(feishu, "enabled", s_config.feishu_enabled);
+            cJSON_AddStringToObject(feishu, "appId", s_config.feishu_app_id);
+            cJSON_AddStringToObject(feishu, "appSecret", s_config.feishu_app_secret);
+            cJSON_AddItemToObject(channels, "feishu", feishu);
+        }
+
+        /* qq */
+        cJSON *qq = cJSON_CreateObject();
+        if (qq) {
+            cJSON_AddBoolToObject(qq, "enabled", s_config.qq_enabled);
+            cJSON_AddStringToObject(qq, "appId", s_config.qq_app_id);
+            cJSON_AddStringToObject(qq, "secret", s_config.qq_token);
+            cJSON_AddItemToObject(channels, "qq", qq);
+        }
+
         cJSON_AddItemToObject(root, "channels", channels);
     }
 
@@ -344,15 +438,34 @@ mimi_err_t mimi_config_save(const char *path)
     cJSON_Delete(root);
     if (!json_str) return MIMI_ERR_NO_MEM;
 
-    mimi_file_t *f = NULL;
-    mimi_err_t err = mimi_fs_open(path, "w", &f);
-    if (err != MIMI_OK) {
+    /* Use standard POSIX file operations for absolute paths outside VFS */
+#ifdef _WIN32
+    /* Convert UTF-8 path to wide string for Windows */
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (wlen <= 0) {
         free(json_str);
         return MIMI_ERR_IO;
     }
-    size_t written = 0;
-    err = mimi_fs_write(f, json_str, strlen(json_str), &written);
-    mimi_fs_close(f);
+    wchar_t *wpath = (wchar_t *)malloc(wlen * sizeof(wchar_t));
+    if (!wpath) {
+        free(json_str);
+        return MIMI_ERR_NO_MEM;
+    }
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
+    
+    FILE *fp = _wfopen(wpath, L"w");
+    free(wpath);
+#else
+    FILE *fp = fopen(path, "w");
+#endif
+    
+    if (!fp) {
+        free(json_str);
+        return MIMI_ERR_IO;
+    }
+    size_t len = strlen(json_str);
+    size_t written = fwrite(json_str, 1, len, fp);
+    fclose(fp);
     free(json_str);
-    return (err == MIMI_OK) ? MIMI_OK : MIMI_ERR_IO;
+    return (written == len) ? MIMI_OK : MIMI_ERR_IO;
 }

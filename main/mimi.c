@@ -190,22 +190,30 @@ int mimi_main(int argc, char **argv)
         return 1;
     }
     
+    /* Initialize logging early - before config loading so we can see config logs
+     * Priority: 1) command line log_level, 2) default "info" level
+     * After config is loaded, we'll re-configure with config file's log level if needed */
+    if (enable_logs) {
+        mimi_log_setup(log_level ? log_level : "info");
+    }
+
     /* Load runtime config */
     if (mimi_config_load(config_path) != MIMI_OK) {
         MIMI_LOGW("main", "config load failed; using defaults");
     }
     const mimi_config_t *cfg = mimi_config_get();
-    
-    /* Set log level - only if --logs flag is provided */
-    if (enable_logs) {
-        if (log_level) {
-            // Command line log level takes precedence over config
-            mimi_log_setup(log_level);
-        } else {
-            // Use log level from config
-            mimi_log_setup(cfg->log_level);
-        }
+
+    /* Re-configure log level from config file if:
+     * - logs are enabled
+     * - no command line log level specified (command line takes precedence)
+     */
+    if (enable_logs && !log_level) {
+        mimi_log_setup(cfg->log_level);
     }
+
+    /* Debug: print config values */
+    MIMI_LOGI("main", "Config loaded: feishu_enabled=%d, feishu_app_id=%s",
+              cfg->feishu_enabled, cfg->feishu_app_id[0] ? cfg->feishu_app_id : "(empty)");
 
     const char *kv_path = "./kv.json";
 

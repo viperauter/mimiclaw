@@ -20,6 +20,17 @@ static int ensure_parent_dir_for_file(const char *file_path)
     return (mimi_fs_mkdir_p(dir) == MIMI_OK) ? 0 : -1;
 }
 
+/* Ensure parent directory exists using direct POSIX API for absolute paths */
+static int ensure_parent_dir_posix(const char *file_path)
+{
+    if (!file_path || file_path[0] == '\0') return -1;
+    char dir[512];
+    if (mimi_path_dirname(file_path, dir, sizeof(dir)) != 0) {
+        return 0;  /* No directory component */
+    }
+    return mimi_fs_mkdir_p_direct(dir);
+}
+
 static bool write_file_if_missing(const char *path, const char *content)
 {
     if (!path || path[0] == '\0') return false;
@@ -127,17 +138,13 @@ mimi_err_t mimi_workspace_bootstrap(const char *config_path,
 {
     const mimi_config_t *cfg = mimi_config_get();
 
-    char base_buf[512] = {0};
     const char *base = NULL;
 
     if (cfg->workspace[0]) {
-        /* Scheme B: keep cfg->workspace as the top-level folder, put VFS under "<workspace>/workspace". */
-        size_t n = strlen(cfg->workspace);
-        const char *sep = (n > 0 && cfg->workspace[n - 1] == '/') ? "" : "/";
-        snprintf(base_buf, sizeof(base_buf), "%s%sworkspace", cfg->workspace, sep);
-        base = base_buf;
+        /* Use cfg->workspace directly as the VFS base directory */
+        base = cfg->workspace;
     } else {
-        base = "./spiffs";
+        base = "./";
     }
 
     /* Create and activate default workspace */
@@ -152,14 +159,19 @@ mimi_err_t mimi_workspace_bootstrap(const char *config_path,
         return MIMI_ERR_FAIL;
     }
 
-    /* Ensure base directory exists */
-    (void)mimi_fs_mkdir_p(base);
+    /* Ensure base directory exists using direct POSIX API for absolute paths */
+    if (base[0] == '/' || (base[0] != '\0' && base[1] == ':')) {
+        /* Absolute path - use direct POSIX API */
+        (void)mimi_fs_mkdir_p_direct(base);
+    } else {
+        /* Relative path - use VFS */
+        (void)mimi_fs_mkdir_p(base);
+    }
 
+    /* Check if config exists using direct POSIX API (for absolute paths outside VFS) */
     bool config_missing = false;
     if (config_path && config_path[0]) {
-        bool exists = false;
-        (void)mimi_fs_exists(config_path, &exists);
-        config_missing = !exists;
+        config_missing = !mimi_fs_exists_direct(config_path);
     }
 
     bootstrap_vfs_layout();
@@ -167,8 +179,9 @@ mimi_err_t mimi_workspace_bootstrap(const char *config_path,
         MIMI_LOGI(TAG, "Bootstrapped workspace layout");
     }
 
+    /* Create starter config if missing using direct POSIX API */
     if (create_starter_config_if_missing && config_missing && config_path && config_path[0]) {
-        (void)ensure_parent_dir_for_file(config_path);
+        (void)ensure_parent_dir_posix(config_path);
         if (mimi_config_save(config_path) == MIMI_OK) {
             MIMI_LOGI(TAG, "Created starter config at %s", config_path);
         } else {
@@ -178,4 +191,3 @@ mimi_err_t mimi_workspace_bootstrap(const char *config_path,
 
     return MIMI_OK;
 }
-

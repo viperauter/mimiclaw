@@ -1,5 +1,6 @@
 #include "fs.h"
 #include "log.h"
+#include "path_utils.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -111,7 +112,7 @@ static mimi_err_t resolve_path(const char *virt_path, char *out_real_path, size_
     workspace_t *ws = (s_current_workspace >= 0) ? &s_workspaces[s_current_workspace] : NULL;
 
     /* If absolute path, check mount points first */
-    if (virt_path[0] == '/') {
+    if (mimi_path_is_absolute(virt_path)) {
         for (int i = 0; i < s_mount_count; i++) {
             size_t mount_len = strlen(s_mounts[i].virt_path);
             if (strncmp(virt_path, s_mounts[i].virt_path, mount_len) == 0) {
@@ -126,7 +127,7 @@ static mimi_err_t resolve_path(const char *virt_path, char *out_real_path, size_
 
     /* No mount point matched, use workspace base directory */
     if (ws && ws->base_dir[0] != '\0') {
-        if (virt_path[0] == '/') {
+        if (mimi_path_is_absolute(virt_path)) {
             /* Absolute path: check if it's already under base_dir */
             size_t base_len = strlen(ws->base_dir);
             if (strncmp(virt_path, ws->base_dir, base_len) == 0) {
@@ -766,4 +767,65 @@ mimi_err_t mimi_fs_shutdown(void)
 
     MIMI_LOGI(TAG, "VFS layer shutdown");
     return MIMI_OK;
+}
+
+/* ==========================================================================
+ * Direct POSIX API Functions
+ * ========================================================================== */
+
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#define F_OK 0
+#define access _access
+#else
+#include <unistd.h>
+#endif
+
+bool mimi_fs_exists_direct(const char *path)
+{
+    if (!path || path[0] == '\0') return false;
+    return (access(path, F_OK) == 0);
+}
+
+int mimi_fs_mkdir_p_direct(const char *path)
+{
+    if (!path || path[0] == '\0') return -1;
+    
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    
+    size_t len = strlen(tmp);
+    if (len > 0 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
+        tmp[len - 1] = '\0';
+    }
+    
+    /* On Windows, skip drive letter (e.g., "C:\") */
+    char *start = tmp;
+    #ifdef _WIN32
+    if (tmp[0] != '\0' && tmp[1] == ':') {
+        start = tmp + 2;  /* Skip "C:" */
+    }
+    #endif
+    
+    /* Create parent directories */
+    for (char *p = start + 1; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            char sep = *p;
+            *p = '\0';
+            #ifdef _WIN32
+            _mkdir(tmp);
+            #else
+            mkdir(tmp, 0755);
+            #endif
+            *p = sep;
+        }
+    }
+    
+    #ifdef _WIN32
+    return _mkdir(tmp);
+    #else
+    return mkdir(tmp, 0755);
+    #endif
 }
