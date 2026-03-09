@@ -160,22 +160,27 @@ mimi_err_t mimi_ws_connect(mimi_websocket_t *ws)
         MIMI_LOGE("ws_mg", "Failed to create WebSocket connection to %s", ctx->config.url);
         return MIMI_ERR_IO;
     }
-    
-    /* Set connection timeout */
-    if (ctx->config.timeout_ms > 0) {
-        uint64_t start = mg_millis();
-        while (!ctx->connected) {
-            /* Use runtime event loop - just sleep and check */
-            mimi_sleep_ms(10);
-            if ((mg_millis() - start) > ctx->config.timeout_ms) {
-                MIMI_LOGE("ws_mg", "WebSocket connection timeout");
-                mg_close_conn(ctx->conn);
-                ctx->conn = NULL;
-                return MIMI_ERR_TIMEOUT;
-            }
+
+    /* If using TLS (wss://), configure SNI based on original hostname.
+     * This mirrors the HTTP client TLS setup and is required to avoid
+     * "plain HTTP request was sent to HTTPS port" errors. */
+    if (mg_url_is_ssl(ctx->config.url)) {
+        struct mg_str host = mg_url_host(ctx->config.url);
+        char host_name[128] = {0};
+        if (host.len > 0 && host.len < (int)sizeof(host_name)) {
+            memcpy(host_name, host.buf, host.len);
+            host_name[host.len] = '\0';
+
+            struct mg_tls_opts opts;
+            memset(&opts, 0, sizeof(opts));
+            opts.name = mg_str(host_name);   /* SNI / hostname verification */
+            opts.skip_verification = 1;      /* dev env: skip CA verification */
+            mg_tls_init(ctx->conn, &opts);
+
+            MIMI_LOGI("ws_mg", "Initialized TLS for WS with host=%s", host_name);
         }
     }
-    
+
     return MIMI_OK;
 }
 

@@ -83,7 +83,7 @@ mimi_err_t mimi_runtime_init(void)
                 break;
         }
     }
-    //mg_log_set(mg_log_level);
+    mg_log_set(mg_log_level);
 
     /* Initialize Mongoose manager */
     mg_mgr_init(&s_mgr);
