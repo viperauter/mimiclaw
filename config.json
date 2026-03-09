@@ -1,0 +1,28 @@
+{
+  "providers": {
+    "openrouter": {
+      "apiKey": "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",
+      "apiBase": "https://openrouter.ai/api/v1/chat/completions"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-nano-9b-v2:free",
+      "maxTokens": 8192,
+      "temperature": 0.1
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "allowFrom": [""]
+    }
+  },
+  "proxy": { "host": "", "port": "", "type": "http" },
+  "tools": { "search": { "apiKey": "" } },
+  "logging": {
+    "level": "info"
+  }
+}

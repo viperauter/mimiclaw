@@ -385,7 +385,9 @@ void app_terminal_poll_all(void)
 {
     if (!g_state.initialized) return;
     
-    for (int i = 0; i < g_state.count; i++) {
+    bool should_exit = false;
+    
+    for (int i = 0; i < g_state.count && !should_exit; i++) {
         app_terminal_t *term = g_state.terminals[i];
         s_current_term = term;
         
@@ -398,7 +400,16 @@ void app_terminal_poll_all(void)
         char buf[16];
         int n = term->transport.read(term->transport.ctx, buf, sizeof(buf));
         if (n > 0) {
-            for (int j = 0; j < n; j++) {
+            for (int j = 0; j < n && !should_exit; j++) {
+                /* Check for EOT (Ctrl+D, 0x04) - exit command */
+                if (buf[j] == 0x04) {
+                    MIMI_LOGI(TAG, "EOT (Ctrl+D) received, requesting exit");
+                    /* Output newline to ensure clean shell prompt */
+                    term->transport.write(term->transport.ctx, "\n", 1);
+                    mimi_runtime_request_exit();
+                    should_exit = true;
+                    break;
+                }
                 cli_terminal_feed_char(term->editor_term, buf[j]);
             }
         } else if (n < 0) {
@@ -406,6 +417,16 @@ void app_terminal_poll_all(void)
             MIMI_LOGW(TAG, "Terminal '%s' read error, removing", term->name);
             app_terminal_destroy(term);
             i--; /* Adjust index since we removed current */
+        } else if (n == 0) {
+            /* EOF - only request exit if not already requested */
+            if (!mimi_runtime_should_exit()) {
+                MIMI_LOGI(TAG, "EOF received, requesting exit");
+                /* Output newline to ensure clean shell prompt */
+                term->transport.write(term->transport.ctx, "\n", 1);
+                mimi_runtime_request_exit();
+            }
+            should_exit = true;
+            break; /* Exit loop */
         }
     }
     

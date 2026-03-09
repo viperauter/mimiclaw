@@ -1,6 +1,7 @@
 #include "../websocket.h"
 #include "../../log.h"
-
+#include "../../runtime.h"
+#include "../../mimi_time.h"
 #include "mongoose.h"
 
 #include <stdlib.h>
@@ -13,7 +14,6 @@ typedef struct {
     mimi_ws_event_cb event_cb;
     void *user_data;
     
-    struct mg_mgr mgr;
     struct mg_connection *conn;
     bool connected;
     
@@ -116,9 +116,6 @@ mimi_websocket_t *mimi_ws_create(const mimi_ws_config_t *config)
     ctx->ping_interval_ms = config->ping_interval_ms > 0 ? 
                            config->ping_interval_ms : 30000;
     
-    /* Initialize Mongoose manager */
-    mg_mgr_init(&ctx->mgr);
-    
     return ws;
 }
 
@@ -131,10 +128,8 @@ void mimi_ws_destroy(mimi_websocket_t *ws)
     /* Disconnect if connected */
     if (ctx->conn) {
         mg_close_conn(ctx->conn);
+        ctx->conn = NULL;
     }
-    
-    /* Free Mongoose manager */
-    mg_mgr_free(&ctx->mgr);
     
     free(ws);
 }
@@ -150,10 +145,17 @@ mimi_err_t mimi_ws_connect(mimi_websocket_t *ws)
     /* Close existing connection if any */
     if (ctx->conn) {
         mg_close_conn(ctx->conn);
+        ctx->conn = NULL;
     }
     
     /* Create WebSocket connection */
-    ctx->conn = mg_ws_connect(&ctx->mgr, ctx->config.url, ws_event_handler, ctx, ctx->config.headers);
+    struct mg_mgr *mgr = (struct mg_mgr *)mimi_runtime_get_event_loop();
+    if (!mgr) {
+        MIMI_LOGE("ws_mg", "Failed to get runtime event loop");
+        return MIMI_ERR_INVALID_STATE;
+    }
+
+    ctx->conn = mg_ws_connect(mgr, ctx->config.url, ws_event_handler, ctx, ctx->config.headers);
     if (!ctx->conn) {
         MIMI_LOGE("ws_mg", "Failed to create WebSocket connection to %s", ctx->config.url);
         return MIMI_ERR_IO;
@@ -163,7 +165,8 @@ mimi_err_t mimi_ws_connect(mimi_websocket_t *ws)
     if (ctx->config.timeout_ms > 0) {
         uint64_t start = mg_millis();
         while (!ctx->connected) {
-            mg_mgr_poll(&ctx->mgr, 10);
+            /* Use runtime event loop - just sleep and check */
+            mimi_sleep_ms(10);
             if ((mg_millis() - start) > ctx->config.timeout_ms) {
                 MIMI_LOGE("ws_mg", "WebSocket connection timeout");
                 mg_close_conn(ctx->conn);
@@ -228,6 +231,9 @@ void mimi_ws_poll(mimi_websocket_t *ws, uint32_t timeout_ms)
         }
     }
     
-    /* Poll for events */
-    mg_mgr_poll(&ctx->mgr, timeout_ms);
+    /* Event loop is handled by runtime, no need to poll here */
+    /* Just sleep to avoid busy loop if called directly */
+    if (timeout_ms > 0) {
+        mimi_sleep_ms(timeout_ms);
+    }
 }

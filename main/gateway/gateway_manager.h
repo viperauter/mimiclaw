@@ -71,6 +71,34 @@ int gateway_manager_count(void);
 void gateway_manager_foreach(void (*callback)(gateway_t *gw, void *user_data), 
                              void *user_data);
 
+/* Gateway System Level Functions */
+
+/**
+ * Initialize gateway system
+ * Registers and initializes all built-in gateways
+ * @return MIMI_OK on success
+ */
+mimi_err_t gateway_system_init(void);
+
+/**
+ * Start gateway system
+ * Starts all registered gateways
+ * @return MIMI_OK on success
+ */
+mimi_err_t gateway_system_start(void);
+
+/**
+ * Stop gateway system
+ * Stops all registered gateways
+ */
+void gateway_system_stop(void);
+
+/**
+ * Deinitialize gateway system
+ * Destroys all gateways and cleanup
+ */
+void gateway_system_deinit(void);
+
 #ifdef __cplusplus
 }
 #endif

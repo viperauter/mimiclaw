@@ -11,6 +11,7 @@
 #include "platform/log.h"
 #include "platform/os/os.h"
 #include "platform/runtime.h"
+#include "platform/mimi_time.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -27,6 +28,7 @@
 #endif
 
 static const char *TAG = "gw_stdio";
+static volatile bool s_running = false;
 
 /* STDIO Gateway private data */
 typedef struct {
@@ -47,6 +49,22 @@ typedef struct {
 } stdio_gateway_priv_t;
 
 static stdio_gateway_priv_t s_priv = {0};
+
+/* STDIO gateway task function - runs in its own thread */
+static void stdio_gateway_task(void *arg)
+{
+    (void)arg;
+    MIMI_LOGI(TAG, "STDIO gateway task started");
+
+    s_running = true;
+
+    while (s_running) {
+        app_terminal_poll_all();
+        mimi_sleep_ms(100); /* Same interval as main event loop */
+    }
+
+    MIMI_LOGI(TAG, "STDIO gateway task stopped");
+}
 
 #ifdef _WIN32
 /* Convert wide character to UTF-8 */
@@ -74,10 +92,11 @@ static void wide_to_utf8(stdio_gateway_priv_t *ctx, wchar_t wc)
 /* Transport read function */
 static int stdio_transport_read(void *ctx, char *buf, int len)
 {
-    stdio_gateway_priv_t *priv = (stdio_gateway_priv_t *)ctx;
+    (void)ctx;
     if (!buf || len <= 0) return 0;
 
 #ifdef _WIN32
+    stdio_gateway_priv_t *priv = (stdio_gateway_priv_t *)ctx;
     int n = 0;
 
     /* Return remaining UTF-8 bytes from previous wide char */
@@ -138,9 +157,8 @@ static int stdio_transport_write(void *ctx, const char *buf, int len)
 /* Transport available check */
 static bool stdio_transport_available(void *ctx)
 {
-    stdio_gateway_priv_t *priv = (stdio_gateway_priv_t *)ctx;
-
 #ifdef _WIN32
+    stdio_gateway_priv_t *priv = (stdio_gateway_priv_t *)ctx;
     if (priv->utf8_pos < priv->utf8_len) {
         return true;
     }
@@ -269,6 +287,17 @@ static mimi_err_t stdio_gateway_start_impl(gateway_t *gw)
     }
 
     s_priv.started = true;
+    
+    /* Create detached task for STDIO polling */
+    mimi_err_t err = mimi_task_create_detached("stdio_gw", stdio_gateway_task, NULL);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to create STDIO gateway task: %d", err);
+        s_priv.started = false;
+        app_terminal_destroy(s_priv.terminal);
+        s_priv.terminal = NULL;
+        return err;
+    }
+    
     MIMI_LOGI(TAG, "STDIO Gateway started");
     return MIMI_OK;
 }
@@ -280,6 +309,12 @@ static mimi_err_t stdio_gateway_stop_impl(gateway_t *gw)
     if (!s_priv.started) {
         return MIMI_OK;
     }
+
+    /* Stop the task first */
+    s_running = false;
+
+    /* Wait for the task to stop */
+    mimi_sleep_ms(50);
 
     if (s_priv.terminal) {
         app_terminal_destroy(s_priv.terminal);
@@ -317,14 +352,6 @@ static mimi_err_t stdio_gateway_send_impl(gateway_t *gw, const char *session_id,
 
     app_terminal_output_ln(s_priv.terminal, content);
     return MIMI_OK;
-}
-
-/* Poll function - should be called from main loop */
-void stdio_gateway_poll(void)
-{
-    if (s_priv.started) {
-        app_terminal_poll_all();
-    }
 }
 
 /* Global STDIO Gateway instance */

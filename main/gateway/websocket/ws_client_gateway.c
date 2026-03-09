@@ -77,13 +77,10 @@ static void ws_client_event_handler(mimi_websocket_t *ws, mimi_ws_event_t event,
                                            priv->gateway->callback_user_data);
             }
             
-            /* Auto reconnect */
-            if (!priv->reconnecting) {
-                priv->reconnecting = true;
-                MIMI_LOGI(TAG, "Attempting to reconnect in 5 seconds...");
-                mimi_sleep_ms(5000);
-                ws_client_gateway_connect(priv->gateway);
-            }
+            /* Auto reconnect is disabled here to avoid recursive reconnect
+             * inside the event handler, which can conflict with connection
+             * teardown and cause crashes. Reconnect, if needed, should be
+             * handled by higher-level logic. */
             break;
         }
         
@@ -132,6 +129,10 @@ static mimi_err_t ws_client_gateway_init_impl(gateway_t *gw, const gateway_confi
 
 static mimi_err_t ws_client_gateway_start_impl(gateway_t *gw)
 {
+    if (!gw || !gw->priv_data) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    
     ws_client_gateway_priv_t *priv = (ws_client_gateway_priv_t *)gw->priv_data;
     
     if (!priv->initialized) {
@@ -154,7 +155,14 @@ static mimi_err_t ws_client_gateway_start_impl(gateway_t *gw)
 
 static mimi_err_t ws_client_gateway_stop_impl(gateway_t *gw)
 {
+    if (!gw || !gw->priv_data) {
+        return MIMI_OK;
+    }
+    
     ws_client_gateway_priv_t *priv = (ws_client_gateway_priv_t *)gw->priv_data;
+    
+    /* Set stopping flag to prevent reconnection */
+    priv->stopping = true;
     
     if (!priv->connected) {
         return MIMI_OK;
@@ -169,6 +177,10 @@ static mimi_err_t ws_client_gateway_stop_impl(gateway_t *gw)
 
 static void ws_client_gateway_destroy_impl(gateway_t *gw)
 {
+    if (!gw || !gw->priv_data) {
+        return;
+    }
+    
     ws_client_gateway_priv_t *priv = (ws_client_gateway_priv_t *)gw->priv_data;
     
     ws_client_gateway_stop_impl(gw);
@@ -181,6 +193,11 @@ static mimi_err_t ws_client_gateway_send_impl(gateway_t *gw, const char *session
                                             const char *content)
 {
     (void)session_id;
+    
+    if (!gw || !gw->priv_data) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    
     ws_client_gateway_priv_t *priv = (ws_client_gateway_priv_t *)gw->priv_data;
     
     if (!priv->connected || !priv->ws) {

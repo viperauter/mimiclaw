@@ -43,6 +43,7 @@ static feishu_channel_priv_t s_priv = {0};
 
 /* Forward declarations */
 static bool feishu_is_running_impl(channel_t *ch);
+static mimi_err_t feishu_get_ws_url(char *ws_url, size_t ws_url_size);
 
 /**
  * Get tenant access token from Feishu
@@ -62,7 +63,7 @@ static mimi_err_t feishu_get_tenant_token(void)
 
     char response[4096];
     mimi_err_t err = http_gateway_post(s_priv.http_gateway, 
-                                          "/auth/v3/tenant_access_token/internal",
+                                          "/open-apis/auth/v3/tenant_access_token/internal",
                                           json, strlen(json),
                                           response, sizeof(response));
     free(json);
@@ -96,6 +97,89 @@ static mimi_err_t feishu_get_tenant_token(void)
 
     cJSON_Delete(root);
     return err;
+}
+
+/**
+ * Get Feishu WebSocket connection URL via /callback/ws/endpoint
+ * This follows the official Feishu SDK flow using AppID/AppSecret.
+ */
+static mimi_err_t feishu_get_ws_url(char *ws_url, size_t ws_url_size)
+{
+    if (!ws_url || ws_url_size == 0) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    if (!s_priv.app_id[0] || !s_priv.app_secret[0]) {
+        MIMI_LOGE(TAG, "Feishu AppID/AppSecret not configured");
+        return MIMI_ERR_INVALID_STATE;
+    }
+
+    if (!s_priv.http_gateway) {
+        MIMI_LOGE(TAG, "HTTP Gateway not initialized for Feishu");
+        return MIMI_ERR_INVALID_STATE;
+    }
+
+    /* Build request body: {"AppID": "...", "AppSecret": "..."} */
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return MIMI_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(body, "AppID", s_priv.app_id);
+    cJSON_AddStringToObject(body, "AppSecret", s_priv.app_secret);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        return MIMI_ERR_NO_MEM;
+    }
+
+    char response[4096];
+    mimi_err_t err = http_gateway_post(s_priv.http_gateway,
+                                       "/callback/ws/endpoint",
+                                       json, strlen(json),
+                                       response, sizeof(response));
+    free(json);
+
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to get Feishu WS endpoint: %d", err);
+        return err;
+    }
+
+    if (response[0] == '\0') {
+        MIMI_LOGE(TAG, "Empty Feishu WS endpoint response");
+        return MIMI_ERR_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(response);
+    if (!root) {
+        MIMI_LOGE(TAG, "Invalid Feishu WS endpoint response: %s", response);
+        return MIMI_ERR_FAIL;
+    }
+
+    /* According to Feishu SDK, URL field is in data.URL */
+    cJSON *data = cJSON_GetObjectItem(root, "data");
+    cJSON *url = data ? cJSON_GetObjectItem(data, "URL") : NULL;
+    if (url && cJSON_IsString(url)) {
+        strncpy(ws_url, url->valuestring, ws_url_size - 1);
+        ws_url[ws_url_size - 1] = '\0';
+        MIMI_LOGI(TAG, "Feishu WS URL acquired: %.64s...", ws_url);
+        cJSON_Delete(root);
+        return MIMI_OK;
+    }
+
+    /* Log full response for debugging if URL not found */
+    cJSON *code = cJSON_GetObjectItem(root, "code");
+    cJSON *msg = cJSON_GetObjectItem(root, "msg");
+    if (code && cJSON_IsNumber(code)) {
+        MIMI_LOGE(TAG, "Feishu endpoints returned error, code=%d, msg=%s, resp=%s",
+                  code->valueint,
+                  (msg && cJSON_IsString(msg)) ? msg->valuestring : "(null)",
+                  response);
+    } else {
+        MIMI_LOGE(TAG, "Failed to parse Feishu WS URL from endpoints response: %s", response);
+    }
+    cJSON_Delete(root);
+    return MIMI_ERR_FAIL;
 }
 
 /**
@@ -167,53 +251,37 @@ static void on_ws_message(gateway_t *gw, const char *session_id,
 
     MIMI_LOGI(TAG, "Received WebSocket message: %s", content);
 
-    /* Parse Feishu WebSocket message */
     cJSON *root = cJSON_Parse(content);
     if (!root) {
         MIMI_LOGW(TAG, "Invalid WebSocket message format");
         return;
     }
 
-    /* Handle different message types */
-    cJSON *type = cJSON_GetObjectItem(root, "type");
-    if (type && cJSON_IsString(type)) {
-        const char *msg_type = type->valuestring;
-        
-        if (strcmp(msg_type, "event") == 0) {
-            /* Event message - handle user messages */
-            cJSON *data = cJSON_GetObjectItem(root, "data");
-            if (data) {
-                cJSON *event = cJSON_GetObjectItem(data, "event");
-                if (event && cJSON_IsString(event)) {
-                    const char *event_type = event->valuestring;
-                    
-                    if (strcmp(event_type, "im.message.receive_v1") == 0) {
-                        /* User message received */
-                        cJSON *event_data = cJSON_GetObjectItem(data, "event_data");
-                        if (event_data) {
-                            cJSON *sender = cJSON_GetObjectItem(event_data, "sender");
-                            cJSON *message = cJSON_GetObjectItem(event_data, "message");
-                            
-                            if (sender && message) {
-                                cJSON *sender_id = cJSON_GetObjectItem(sender, "sender_id");
-                                cJSON *content = cJSON_GetObjectItem(message, "content");
-                                
-                                if (sender_id && cJSON_IsString(sender_id) &&
-                                    content && cJSON_IsString(content)) {
-                                    /* Parse content JSON string to extract text */
-                                    cJSON *content_obj = cJSON_Parse(content->valuestring);
-                                    if (content_obj) {
-                                        cJSON *text = cJSON_GetObjectItem(content_obj, "text");
-                                        if (text && cJSON_IsString(text)) {
-                                            handle_message(sender_id->valuestring, text->valuestring);
-                                        }
-                                        cJSON_Delete(content_obj);
-                                    } else {
-                                        MIMI_LOGW(TAG, "Failed to parse content JSON: %s", content->valuestring);
-                                    }
-                                }
-                            }
+    cJSON *header = cJSON_GetObjectItem(root, "header");
+    cJSON *event = cJSON_GetObjectItem(root, "event");
+
+    if (header && event) {
+        cJSON *event_type = cJSON_GetObjectItem(header, "event_type");
+        if (event_type && cJSON_IsString(event_type) && 
+            strcmp(event_type->valuestring, "im.message.receive_v1") == 0) {
+            
+            cJSON *sender = cJSON_GetObjectItem(event, "sender");
+            cJSON *message = cJSON_GetObjectItem(event, "message");
+            
+            if (sender && message) {
+                cJSON *sender_id = cJSON_GetObjectItem(sender, "sender_id");
+                cJSON *content = cJSON_GetObjectItem(message, "content");
+                
+                if (sender_id && content && cJSON_IsString(content)) {
+                    cJSON *content_obj = cJSON_Parse(content->valuestring);
+                    if (content_obj) {
+                        cJSON *text = cJSON_GetObjectItem(content_obj, "text");
+                        if (text && cJSON_IsString(text)) {
+                            handle_message(sender_id->valuestring, text->valuestring);
                         }
+                        cJSON_Delete(content_obj);
+                    } else {
+                        MIMI_LOGW(TAG, "Failed to parse content JSON: %s", content->valuestring);
                     }
                 }
             }
@@ -264,6 +332,9 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
         return MIMI_ERR_NOT_FOUND;
     }
 
+    /* Set WebSocket message handler early to avoid missing initial messages */
+    gateway_set_on_message(s_priv.ws_gateway, on_ws_message, ch);
+
     /* Get or create HTTP Gateway */
     s_priv.http_gateway = gateway_manager_find("http");
     if (!s_priv.http_gateway) {
@@ -271,31 +342,47 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
         return MIMI_ERR_NOT_FOUND;
     }
 
-    /* Configure HTTP Gateway for Feishu */
-    mimi_err_t err = http_gateway_configure("https://open.feishu.cn/open-apis", 
-                                       s_priv.app_secret, 30000);
+    /* Configure HTTP Gateway for Feishu (base domain only) */
+    mimi_err_t err = http_gateway_configure("https://open.feishu.cn",
+                                            NULL, 30000);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
         return err;
     }
 
-    /* Get tenant access token for WebSocket authentication */
+    /* Prepare tenant access token for legacy hyper-event fallback */
     if (s_priv.tenant_access_token[0] == '\0') {
         err = feishu_get_tenant_token();
         if (err != MIMI_OK) {
             MIMI_LOGE(TAG, "Failed to get tenant access token: %d", err);
-            return err;
+            /* Don't return immediately, new WS endpoint flow may not need it */
         }
     }
 
-    /* Configure WebSocket Client Gateway for Feishu */
-    /* Feishu WebSocket URL: wss://open.feishu.cn/open-apis/bot/v3/hyper-event */
+    /*
+     * Preferred: use Feishu official /open-apis/bot/v3/endpoints to get dynamic
+     * WebSocket URL. If this fails (e.g. 404 or feature not enabled), fall
+     * back to legacy hyper-event URL with tenant_access_token auth.
+     */
     char ws_url[256];
-    snprintf(ws_url, sizeof(ws_url), 
-             "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
-             s_priv.app_id);
-    
-    err = ws_client_gateway_configure(ws_url, s_priv.tenant_access_token, 30000, 30000);
+    const char *ws_token = NULL;
+    err = feishu_get_ws_url(ws_url, sizeof(ws_url));
+    if (err == MIMI_OK) {
+        ws_token = NULL; /* auth embedded in URL */
+    } else {
+        MIMI_LOGW(TAG, "Feishu endpoints not available, falling back to hyper-event URL");
+        snprintf(ws_url, sizeof(ws_url),
+                 "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
+                 s_priv.app_id);
+        if (s_priv.tenant_access_token[0] != '\0') {
+            ws_token = s_priv.tenant_access_token;
+        } else {
+            ws_token = NULL;
+        }
+    }
+
+    /* Configure WebSocket Client Gateway */
+    err = ws_client_gateway_configure(ws_url, ws_token, 30000, 30000);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to configure WebSocket Client Gateway: %d", err);
         return err;
@@ -343,9 +430,6 @@ mimi_err_t feishu_channel_start_impl(channel_t *ch)
         MIMI_LOGE(TAG, "Failed to start HTTP Gateway: %d", err);
         return err;
     }
-
-    /* Set WebSocket message handler */
-    gateway_set_on_message(s_priv.ws_gateway, on_ws_message, ch);
 
     /* Start WebSocket Gateway */
     err = gateway_start(s_priv.ws_gateway);

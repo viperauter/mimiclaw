@@ -189,3 +189,89 @@ void gateway_manager_foreach(void (*callback)(gateway_t *gw, void *user_data),
         callback(g_manager.gateways[i], user_data);
     }
 }
+
+/* Gateway System Level Functions */
+
+/* External gateway declarations */
+extern gateway_t g_stdio_gateway;
+extern gateway_t g_ws_gateway;
+extern gateway_t* ws_client_gateway_get_instance(void);
+extern gateway_t* http_gateway_get_instance(void);
+extern mimi_err_t http_gateway_module_init(void);
+extern mimi_err_t ws_client_gateway_module_init(void);
+
+mimi_err_t gateway_system_init(void)
+{
+    MIMI_LOGI(TAG, "Initializing gateway system...");
+    
+    /* Initialize gateway manager */
+    if (gateway_manager_init() != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to initialize gateway manager");
+        return MIMI_ERR_FAIL;
+    }
+    
+    /* Initialize HTTP Gateway module */
+    if (http_gateway_module_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "Failed to initialize HTTP gateway module");
+    }
+    
+    /* Initialize WebSocket Client Gateway module */
+    if (ws_client_gateway_module_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "Failed to initialize WebSocket client gateway module");
+    }
+    
+    /* Register STDIO Gateway */
+    if (gateway_manager_register(&g_stdio_gateway) != MIMI_OK) {
+        MIMI_LOGW(TAG, "Failed to register STDIO gateway");
+    } else {
+        if (gateway_init(&g_stdio_gateway, NULL) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to initialize STDIO gateway");
+        }
+    }
+    
+    /* Register WebSocket Server Gateway */
+    if (gateway_manager_register(&g_ws_gateway) != MIMI_OK) {
+        MIMI_LOGW(TAG, "Failed to register WebSocket gateway");
+    } else {
+        if (gateway_init(&g_ws_gateway, NULL) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to initialize WebSocket gateway");
+        }
+    }
+    
+    /* Get and register HTTP Gateway instance */
+    gateway_t *http_gw = http_gateway_get_instance();
+    if (http_gw) {
+        if (gateway_manager_register(http_gw) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register HTTP gateway");
+        }
+    }
+    
+    /* Get and register WebSocket Client Gateway instance */
+    gateway_t *ws_client_gw = ws_client_gateway_get_instance();
+    if (ws_client_gw) {
+        if (gateway_manager_register(ws_client_gw) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register WebSocket client gateway");
+        }
+    }
+    
+    MIMI_LOGI(TAG, "Gateway system initialized (%d gateways)", gateway_manager_count());
+    return MIMI_OK;
+}
+
+mimi_err_t gateway_system_start(void)
+{
+    MIMI_LOGI(TAG, "Starting gateway system...");
+    return gateway_manager_start_all();
+}
+
+void gateway_system_stop(void)
+{
+    MIMI_LOGI(TAG, "Stopping gateway system...");
+    gateway_manager_stop_all();
+}
+
+void gateway_system_deinit(void)
+{
+    MIMI_LOGI(TAG, "Deinitializing gateway system...");
+    gateway_manager_destroy_all();
+}

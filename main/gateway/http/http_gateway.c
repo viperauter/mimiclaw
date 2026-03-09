@@ -55,6 +55,10 @@ static mimi_err_t http_gateway_init_impl(gateway_t *gw, const http_gateway_confi
 
 static mimi_err_t http_gateway_start_impl(gateway_t *gw)
 {
+    if (!gw || !gw->priv_data) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    
     http_gateway_priv_t *priv = (http_gateway_priv_t *)gw->priv_data;
     
     if (!priv->initialized) {
@@ -72,6 +76,10 @@ static mimi_err_t http_gateway_start_impl(gateway_t *gw)
 
 static mimi_err_t http_gateway_stop_impl(gateway_t *gw)
 {
+    if (!gw || !gw->priv_data) {
+        return MIMI_OK;
+    }
+    
     http_gateway_priv_t *priv = (http_gateway_priv_t *)gw->priv_data;
     
     if (!priv->connected) {
@@ -85,6 +93,10 @@ static mimi_err_t http_gateway_stop_impl(gateway_t *gw)
 
 static void http_gateway_destroy_impl(gateway_t *gw)
 {
+    if (!gw || !gw->priv_data) {
+        return;
+    }
+    
     http_gateway_priv_t *priv = (http_gateway_priv_t *)gw->priv_data;
     
     http_gateway_stop_impl(gw);

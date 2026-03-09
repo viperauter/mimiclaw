@@ -30,7 +30,7 @@ void mimi_vlog(mimi_log_level_t level, const char *tag, const char *fmt, va_list
     struct timeval tv;
     gettimeofday(&tv, NULL);
     
-    struct tm *tm_info = localtime(&tv.tv_sec);
+    struct tm *tm_info = localtime((const time_t *)&tv.tv_sec);
     char time_buf[16];
     strftime(time_buf, sizeof(time_buf), "%H:%M:%S", tm_info);
     long ms = tv.tv_usec / 1000;

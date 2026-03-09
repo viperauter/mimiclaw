@@ -36,44 +36,6 @@ typedef struct {
     http_phase_t phase;
 } http_ctx_t;
 
-/* Resolve hostname from URL using system resolver, return numeric IPv4 string. */
-static bool resolve_host_ip(const char *url, char *ip_out, size_t ip_out_len)
-{
-    if (!url || !ip_out || ip_out_len == 0) return false;
-
-    struct mg_str host = mg_url_host(url);
-    if (host.len == 0 || !host.buf) return false;
-
-    char hostbuf[128];
-    if (host.len >= sizeof(hostbuf)) return false;
-    memcpy(hostbuf, host.buf, host.len);
-    hostbuf[host.len] = '\0';
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(hostbuf, NULL, &hints, &res);
-    if (rc != 0 || !res) {
-        return false;
-    }
-
-    bool ok = false;
-    for (struct addrinfo *p = res; p != NULL; p = p->ai_next) {
-        if (p->ai_family == AF_INET) {
-            struct sockaddr_in *sa = (struct sockaddr_in *)p->ai_addr;
-            const char *s = inet_ntop(AF_INET, &sa->sin_addr, ip_out, (socklen_t)ip_out_len);
-            if (s) ok = true;
-            break;
-        }
-    }
-
-    freeaddrinfo(res);
-    return ok;
-}
-
 /* Common helper: send HTTP request (after TCP/TLS is ready). */
 static void http_send_request(struct mg_connection *c, http_ctx_t *ctx)
 {
@@ -309,34 +271,7 @@ static mimi_err_t mimi_http_exec_direct(const mimi_http_request_t *req, mimi_htt
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
 
-    /* Work around environments where UDP DNS (e.g. 8.8.8.8) is blocked:
-       resolve host via system getaddrinfo(), then connect to numeric IPv4 string.
-       This bypasses Mongoose's internal DNS, but we still send correct
-       Host header and SNI using the original hostname. */
-    char ip[64];
-    char ip_url[512];
-    const char *connect_url = req->url;
-
-    if (resolve_host_ip(req->url, ip, sizeof(ip))) {
-        const char *uri = mg_url_uri(req->url);
-        if (!uri) uri = "/";
-
-        /* Preserve original scheme prefix (e.g. "https://") by copying up to host. */
-        const char *host_start = strstr(req->url, "://");
-        size_t scheme_len = 0;
-        if (host_start) {
-            scheme_len = (host_start - req->url) + 3;  // include ://
-        }
-
-        if (scheme_len > 0 && scheme_len < sizeof(ip_url)) {
-            memcpy(ip_url, req->url, scheme_len);
-            snprintf(ip_url + scheme_len, sizeof(ip_url) - scheme_len,
-                     "%s%s", ip, uri);
-            connect_url = ip_url;
-        }
-    }
-
-    struct mg_connection *c = mg_http_connect(&mgr, connect_url, http_ev_direct, &ctx);
+    struct mg_connection *c = mg_http_connect(&mgr, req->url, http_ev_direct, &ctx);
     if (!c) {
         mg_mgr_free(&mgr);
         return MIMI_ERR_IO;

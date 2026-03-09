@@ -41,14 +41,32 @@ const channel_manager_config_t* channel_manager_get_config(void);
 bool channel_manager_is_initialized(void);
 
 /**
+ * Initialize channel system
+ * Registers and initializes all built-in channels (but does not start them)
+ * @return MIMI_OK on success
+ */
+mimi_err_t channel_system_init(void);
+
+/**
+ * Start channel system
+ * Starts all registered channels
+ * @return MIMI_OK on success
+ */
+mimi_err_t channel_system_start(void);
+
+/**
+ * Stop channel system
+ * Stops all registered channels
+ */
+void channel_system_stop(void);
+
+/**
  * Auto-initialize channel manager and register all built-in channels
  * This is a convenience function that:
- * 1. Initializes channel manager
- * 2. Initializes and registers CLI Channel
- * 3. Initializes and registers Telegram Channel (optional)
- * 4. Initializes and registers WebSocket Channel (optional)
- * 5. Starts all registered channels
+ * 1. Initializes channel system
+ * 2. Starts all registered channels
  * @return MIMI_OK on success, error code otherwise
+ * @deprecated Use channel_system_init() + channel_system_start() instead
  */
 mimi_err_t channel_system_auto_init(void);
 

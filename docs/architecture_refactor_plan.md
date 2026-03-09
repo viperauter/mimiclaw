@@ -16,6 +16,10 @@ Refactor the CLI architecture to support a unified Channel and Command system, e
 
 ```
 main/
+├── main.c                  # Platform-specific entry point (POSIX)
+├── app/                    # Platform-agnostic application layer ★ NEW
+│   ├── app.h               # Application interface definition
+│   └── app.c               # Application core implementation
 ├── channels/               # Channel Layer (Business Logic)
 │   ├── channel.h           # Channel Interface
 │   ├── channel_manager.c/h # Channel Manager
@@ -123,7 +127,7 @@ typedef struct gateway {
 **Commit 1.2: Create Gateway Manager**
 
 Files to modify:
-- `main/mimi.c` - Add gateway_manager_init() call
+- `main/app/app.c` - Add gateway_manager_init() call
 
 **Verification**:
 - [ ] Gateway manager initializes successfully
@@ -260,7 +264,7 @@ Uses:
 **Commit 6.2: Register Feishu Channel**
 
 Files to modify:
-- `main/mimi.c` - Register Feishu Channel
+- `main/app/app.c` - Register Feishu Channel
 - `main/config.h` - Add Feishu config options
 
 **Verification**:

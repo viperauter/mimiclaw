@@ -36,6 +36,7 @@ typedef struct {
     bool initialized;
     bool connected;
     bool reconnecting;
+    bool stopping;                 /* Set when gateway is being stopped */
     
     /* Platform WebSocket */
     mimi_websocket_t *ws;

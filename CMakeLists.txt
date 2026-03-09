@@ -23,7 +23,8 @@ include(cmake/third_party.cmake)
 # source files
 # --------------------------------
 file(GLOB_RECURSE APP_SRC
-    main/mimi.c
+    main/main.c
+    main/app/app.c
     main/config/config.c
     main/config/workspace_bootstrap.c
 
@@ -102,6 +103,7 @@ add_executable(mimiclaw
 # --------------------------------
 target_include_directories(mimiclaw PRIVATE
     main
+    main/app
     main/platform
     main/config
     third_party

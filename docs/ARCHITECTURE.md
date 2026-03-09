@@ -1,142 +1,250 @@
 # MimiClaw Architecture
 
-> ESP32-S3 AI Agent firmware — C/FreeRTOS implementation running on bare metal (no Linux).
+> Cross-platform AI Agent framework — C implementation supporting both POSIX systems (Linux/macOS) and embedded platforms (ESP32).
 
 ---
 
 ## System Overview
 
 ```
-Telegram App (User)          WebSocket Client              CLI Terminal
-    │                              │                            │
-    │  HTTPS Long Polling          │  WS Protocol               │  STDIO
-    │                              │                            │
-    ▼                              ▼                            ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Unified Channel Layer                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   Telegram   │  │  WebSocket   │  │     CLI      │  │   (Future)   │     │
-│  │   Channel    │  │   Channel    │  │   Channel    │  │              │     │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────────────┘     │
-│         │                  │                  │                              │
-│         └──────────────────┴──────────────────┘                              │
-│                            │                                                 │
-│              ┌─────────────▼──────────────┐                                  │
-│              │     Channel Manager        │                                  │
-│              │  (Lifecycle & Routing)     │                                  │
-│              └─────────────┬──────────────┘                                  │
-└────────────────────────────┼────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              External Interfaces                                     │
+│                                                                                      │
+│   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
+│   │   Telegram   │    │   WebSocket  │    │     CLI      │    │    Feishu    │      │
+│   │     Bot      │    │    Server    │    │   Terminal   │    │     Bot      │      │
+│   │  (HTTPS API) │    │  (WS Protocol)│    │   (STDIO)    │    │  (WS+HTTP)   │      │
+│   └──────┬───────┘    └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │
+└──────────┼──────────────────┼──────────────────┼──────────────────┼────────────────┘
+           │                  │                  │                  │
+           ▼                  ▼                  ▼                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              Gateway Layer                                           │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐   │
+│  │  Transport Protocol Abstraction                                               │   │
+│  │                                                                              │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │   │
+│  │  │   HTTP       │  │  WebSocket   │  │    STDIO     │  │  WebSocket   │     │   │
+│  │  │   Client     │  │   Server     │  │   Gateway    │  │   Client     │     │   │
+│  │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │   │
+│  │         │                  │                  │                  │           │   │
+│  │         └──────────────────┴──────────────────┴──────────────────┘           │   │
+│  │                            │                                                  │   │
+│  │              ┌─────────────▼──────────────┐                                   │   │
+│  │              │     Gateway Manager        │                                   │   │
+│  │              │  (Lifecycle & Registry)    │                                   │   │
+│  │              └─────────────┬──────────────┘                                   │   │
+│  └────────────────────────────┼──────────────────────────────────────────────────┘   │
+└───────────────────────────────┼─────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              Channel Layer                                           │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐   │
+│  │  Business Logic & Protocol Handling                                           │   │
+│  │                                                                              │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │   │
+│  │  │   Telegram   │  │  WebSocket   │  │     CLI      │  │    Feishu    │     │   │
+│  │  │   Channel    │  │   Channel    │  │   Channel    │  │   Channel    │     │   │
+│  │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │   │
+│  │         │                  │                  │                  │           │   │
+│  │         └──────────────────┴──────────────────┴──────────────────┘           │   │
+│  │                            │                                                  │   │
+│  │              ┌─────────────▼──────────────┐                                   │   │
+│  │              │     Channel Manager        │                                   │   │
+│  │              │  (Lifecycle & Routing)     │                                   │   │
+│  │              └─────────────┬──────────────┘                                   │   │
+│  └────────────────────────────┼──────────────────────────────────────────────────┘   │
+└───────────────────────────────┼─────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              Core System                                             │
+│                                                                                      │
+│   ┌─────────────┐       ┌──────────────────┐                                        │
+│   │  Inbound    │◀──────│   Message Bus    │                                        │
+│   │   Queue     │       │   (mimi_msg_t)   │                                        │
+│   └──────┬──────┘       └──────────────────┘                                        │
+│          │                                                                           │
+│          ▼                                                                           │
+│   ┌────────────────────────┐                                                        │
+│   │     Agent Loop          │                                                       │
+│   │                         │                                                       │
+│   │  Context ──▶ LLM Proxy │                                                       │
+│   │  Builder      (HTTPS)   │                                                       │
+│   │       ▲          │      │                                                       │
+│   │       │     tool_use?   │                                                       │
+│   │       │          ▼      │                                                       │
+│   │  Tool Results ◀─ Tools  │                                                       │
+│   │              (web_search)│                                                      │
+│   └──────────┬─────────────┘                                                        │
+│              │                                                                       │
+│       ┌──────▼───────┐                                                              │
+│       │ Outbound Queue│                                                              │
+│       └──────┬───────┘                                                              │
+│              │                                                                       │
+│              ▼                                                                       │
+│       ┌──────────────┐                                                               │
+│       │   Channel    │───▶ Routes to appropriate channel                            │
+│       │   Manager    │                                                               │
+│       └──────────────┘                                                               │
+│                                                                                      │
+│   ┌──────────────────────────────────────────┐                                       │
+│   │  VFS Storage                             │                                       │
+│   │  ~/.mimiclaw/workspace/                  │                                       │
+│   │  /spiffs/ (ESP32)                        │                                       │
+│   │  config/, memory/, sessions/, skills/    │                                       │
+│   └──────────────────────────────────────────┘                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
                              │
-                             ▼
-              ┌──────────────────────────────┐
-              │    Shared Command System     │
-              │  /help /session /set /ask    │
-              │  /memory_read /exit          │
-              └──────────────┬───────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            Core System                                       │
-│                                                                              │
-│   ┌─────────────┐       ┌──────────────────┐                                 │
-│   │  Inbound    │◀──────│   Message Bus    │                                 │
-│   │   Queue     │       │   (mimi_msg_t)   │                                 │
-│   └──────┬──────┘       └──────────────────┘                                 │
-│          │                                                                   │
-│          ▼                                                                   │
-│   ┌────────────────────────┐                                                 │
-│   │     Agent Loop          │                                                │
-│   │     (Core 1)            │                                                │
-│   │                         │                                                │
-│   │  Context ──▶ LLM Proxy │                                                │
-│   │  Builder      (HTTPS)   │                                                │
-│   │       ▲          │      │                                                │
-│   │       │     tool_use?   │                                                │
-│   │       │          ▼      │                                                │
-│   │  Tool Results ◀─ Tools  │                                                │
-│   │              (web_search)│                                               │
-│   └──────────┬─────────────┘                                                 │
-│              │                                                               │
-│       ┌──────▼───────┐                                                       │
-│       │ Outbound Queue│                                                       │
-│       └──────┬───────┘                                                       │
-│              │                                                               │
-│              ▼                                                               │
-│       ┌──────────────┐                                                       │
-│       │   Channel    │───▶ Routes to appropriate channel (telegram/ws/cli)   │
-│       │   Manager    │                                                       │
-│       └──────────────┘                                                       │
-│                                                                              │
-│   ┌──────────────────────────────────────────┐                               │
-│   │  SPIFFS (12 MB)                          │                               │
-│   │  /spiffs/config/  SOUL.md, USER.md       │                               │
-│   │  /spiffs/memory/  MEMORY.md, YYYY-MM-DD  │                               │
-│   │  /spiffs/sessions/ tg_<chat_id>.jsonl    │                               │
-│   └──────────────────────────────────────────┘                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-                             │
-                             │  Anthropic Messages API (HTTPS)
-                             │  + Brave Search API (HTTPS)
+                             │  LLM API (HTTPS)
+                             │  + Search API (HTTPS)
                              ▼
                     ┌───────────┐   ┌──────────────┐
-                    │ Claude API │   │ Brave Search │
+                    │ LLM API   │   │ Search API   │
+                    │(Claude/etc)│   │ (Brave/etc)  │
                     └───────────┘   └──────────────┘
 ```
 
 ---
 
-## Architecture Refactor: Channel & Command System
+## Layered Architecture
 
-### Overview
+### 1. Platform Layer (`main/platform/`)
 
-The architecture has been refactored to support a **unified Channel and Command system**, enabling code reuse across CLI, Telegram, and WebSocket channels.
+The foundation layer providing OS abstraction and basic services.
 
-### Key Changes
+**Components:**
+- **OS Abstraction** (`os/`): Task/thread management, mutexes, sleep functions
+- **Runtime** (`runtime.c/h`): Event loop management, cleanup callbacks
+- **Logging** (`log.h`): Unified logging interface
+- **Time** (`mimi_time.h`): Time and delay functions
+- **File System** (`fs/`): VFS and direct file system operations
 
-1. **Unified Channel Layer** (`main/channels/`)
-   - All communication channels implement the same `channel_t` interface
-   - Channel Manager handles lifecycle (init, start, stop, destroy)
-   - Easy to add new channels (Telegram, WebSocket, future protocols)
+**Key Design:**
+- Platform-agnostic APIs that work on both POSIX and FreeRTOS
+- No business logic dependencies
+- Provides services via callback registration (e.g., cleanup callbacks)
 
-2. **Shared Command System** (`main/commands/`)
-   - Commands are registered once and shared across all channels
-   - Consistent command interface: `/help`, `/session`, `/set`, `/ask`, `/memory_read`, `/exit`
-   - Command context includes channel, session_id, user_id
+### 2. Gateway Layer (`main/gateway/`)
 
-3. **Message Flow**
-   - Inbound: Channel → Message Bus → Agent Loop
-   - Outbound: Agent Loop → Channel Manager → Appropriate Channel
+Transport protocol abstraction layer. Each gateway handles a specific communication protocol.
 
-### Directory Structure
+**Components:**
+- **Gateway Interface** (`gateway.h`): Unified gateway abstraction
+- **Gateway Manager** (`gateway_manager.c/h`): Lifecycle management and registry
+- **STDIO Gateway** (`stdio/`): Standard input/output transport
+- **HTTP Gateway** (`http/`): HTTP client for REST APIs
+- **WebSocket Gateway** (`websocket/`): WebSocket server and client
 
+**Key Design:**
+- Each gateway owns its own thread(s) for I/O operations
+- Thread creation happens in gateway's `start()` implementation
+- Gateways are protocol-agnostic and don't know about business logic
+- Channel layer uses gateways via the unified interface
+
+**Gateway Interface:**
+```c
+typedef struct gateway {
+    char name[32];
+    gateway_type_t type;
+    
+    /* Lifecycle */
+    mimi_err_t (*init)(gateway_t *gw, const gateway_config_t *cfg);
+    mimi_err_t (*start)(gateway_t *gw);
+    mimi_err_t (*stop)(gateway_t *gw);
+    void (*destroy)(gateway_t *gw);
+    
+    /* Messaging */
+    mimi_err_t (*send)(gateway_t *gw, const char *session_id, const char *content);
+    
+    /* Callbacks */
+    void (*set_on_message)(gateway_t *gw, gateway_on_message_cb_t cb, void *user_data);
+    void (*set_on_connect)(gateway_t *gw, gateway_on_connect_cb_t cb, void *user_data);
+    void (*set_on_disconnect)(gateway_t *gw, gateway_on_disconnect_cb_t cb, void *user_data);
+    
+    bool is_initialized;
+    bool is_started;
+    void *priv_data;
+} gateway_t;
 ```
-main/
-├── channels/                    # Unified Channel Layer
-│   ├── channel.h                # Channel interface definition
-│   ├── channel_manager.c/h      # Channel lifecycle management
-│   ├── cli/                     # CLI Channel implementation
-│   │   ├── cli_channel.c/h
-│   │   └── terminal_stdio.c/h
-│   ├── telegram/                # Telegram Channel (to be migrated)
-│   │   └── telegram_bot.c/h
-│   └── gateway/                 # WebSocket Channel (to be migrated)
-│       └── ws_server.c/h
-├── commands/                    # Shared Command System
-│   ├── command.h                # Command interface
-│   ├── command_registry.c/h     # Command registration & execution
-│   ├── cmd_help.c               # /help command
-│   ├── cmd_session.c            # /session command
-│   ├── cmd_set.c                # /set command
-│   ├── cmd_ask.c                # /ask command
-│   ├── cmd_memory.c             # /memory_read command
-│   └── cmd_exit.c               # /exit command
-├── cli/                         # CLI Editor (transport agnostic)
-│   ├── cli_terminal.c/h         # Terminal framework
-│   ├── editor.c/h               # Line editor with history
-│   └── cli.md                   # Documentation
-└── bus/
-    └── message_bus.c/h          # Message routing
+
+### 3. Channel Layer (`main/channels/`)
+
+Business logic layer handling protocol-specific message processing.
+
+**Components:**
+- **Channel Interface** (`channel.h`): Unified channel abstraction
+- **Channel Manager** (`channel_manager.c/h`): Lifecycle management
+- **CLI Channel** (`cli/`): Command-line interface channel
+- **Telegram Channel** (`telegram/`): Telegram Bot API integration
+- **Feishu Channel** (`feishu/`): Feishu/Lark integration
+- **WebSocket Channel** (`websocket/`): WebSocket client channel
+- **QQ Channel** (`qq/`): QQ Bot integration
+
+**Key Design:**
+- Each channel uses one or more gateways for transport
+- Channels register callbacks with gateways to receive messages
+- Channels handle protocol-specific message formatting
+- Thread management is delegated to gateways
+
+**Channel-Gateway Relationship:**
 ```
+Channel (Business Logic)
+    │
+    │ 1. Find gateway
+    │ 2. Register callback
+    │ 3. Call gateway_start()
+    │
+    ▼
+Gateway (Transport)
+    │
+    │ 1. Create thread(s)
+    │ 2. Handle I/O
+    │ 3. Call channel callback
+    │
+    ▼
+Channel (Process message)
+```
+
+### 4. Command System (`main/commands/`)
+
+Shared command system used by all channels.
+
+**Components:**
+- **Command Registry** (`command_registry.c/h`): Command registration and execution
+- **Command Implementations** (`cmd_*.c`): Individual command handlers
+
+**Available Commands:**
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/help` | Show available commands | `/help` |
+| `/session` | Session management | `/session list`, `/session new abc` |
+| `/set` | Set configuration | `/set key value` |
+| `/ask` | Ask AI a question | `/ask What is the weather?` |
+| `/memory_read` | Read memory file | `/memory_read` |
+| `/exit` | Exit application | `/exit` |
+
+### 5. Core System
+
+**Message Bus** (`main/bus/`):
+- Two queues: Inbound (channels → agent) and Outbound (agent → channels)
+- Message format: `mimi_msg_t` with channel, session_id, and content
+
+**Agent Loop** (`main/agent/`):
+- Processes messages from inbound queue
+- Builds context and calls LLM API
+- Handles tool use and ReAct loop
+- Sends responses to outbound queue
+
+**Tools** (`main/tools/`):
+- Tool registry for dynamic tool registration
+- Tool implementations (web_search, etc.)
+
+**Memory** (`main/memory/`):
+- Session management (JSONL files)
+- Long-term memory (MEMORY.md)
+- Daily notes
 
 ---
 
@@ -145,712 +253,359 @@ main/
 ### Inbound Message Flow
 
 ```
-1. User sends message (Telegram / WebSocket / CLI)
-2. Channel receives message via its transport layer
-3. Channel wraps message in mimi_msg_t with channel identifier
-4. Message pushed to Inbound Queue (FreeRTOS xQueue)
-5. Agent Loop (Core 1) pops message:
-   a. Load session history from SPIFFS (JSONL)
-   b. Build system prompt (SOUL.md + USER.md + MEMORY.md + recent notes + tool guidance)
-   c. Build cJSON messages array (history + current message)
-   d. ReAct loop (max 10 iterations):
-      i.   Call Claude API via HTTPS (non-streaming, with tools array)
-      ii.  Parse JSON response → text blocks + tool_use blocks
-      iii. If stop_reason == "tool_use":
-           - Execute each tool (e.g. web_search → Brave Search API)
-           - Append assistant content + tool_result to messages
-           - Continue loop
-      iv.  If stop_reason == "end_turn": break with final text
-   e. Save user message + final assistant text to session file
-   f. Push response to Outbound Queue
+1. External input received
+   (Telegram HTTPS / WebSocket / STDIO / Feishu)
+   
+2. Gateway layer processes transport
+   - Gateway thread receives raw data
+   - Protocol-specific parsing
+   
+3. Gateway calls channel callback
+   - on_message(gateway, session_id, content, channel_data)
+   
+4. Channel processes business logic
+   - Parse commands or chat messages
+   - Wrap in mimi_msg_t
+   
+5. Message pushed to Inbound Queue
+   
+6. Agent Loop processes message
+   - Load session history
+   - Build context (SOUL.md + USER.md + memory)
+   - Call LLM API with ReAct loop
+   - Push response to Outbound Queue
 ```
 
 ### Outbound Message Flow
 
 ```
-6. Channel Manager routes response by channel field:
-   - "telegram" → Telegram Channel → sendMessage API
-   - "websocket" → WebSocket Channel → WS frame
-   - "cli" → CLI Channel → STDIO output
-7. User receives reply
-```
-
-### Command Execution Flow
-
-```
-CLI/Telegram/WebSocket
-        │
-        ▼
-┌───────────────┐
-│ Channel receives│
-│   input        │
-└───────┬───────┘
-        │
-        ▼
-┌───────────────┐     ┌─────────────────┐
-│  Parse command │────▶│  Is it a /cmd?  │
-└───────────────┘     └────────┬────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │                     │
-                   Yes                   No
-                    │                     │
-                    ▼                     ▼
-          ┌─────────────────┐    ┌─────────────────┐
-          │ Command System  │    │  Treat as chat  │
-          │   Execute       │    │  message → LLM  │
-          └────────┬────────┘    └─────────────────┘
-                   │
-                   ▼
-          ┌─────────────────┐
-          │  Send response  │
-          │  via Channel    │
-          └─────────────────┘
+7. Outbound Dispatch receives message
+   - Routes by channel field
+   
+8. Channel sends via gateway
+   - channel_send() → gateway_send()
+   
+9. Gateway transmits to external
+   - HTTP POST / WebSocket frame / STDIO output
 ```
 
 ---
 
-## Module Map
+## Thread Model
+
+### Thread Ownership
+
+| Component | Thread Ownership | Notes |
+|-----------|-----------------|-------|
+| **Platform Layer** | None | Provides thread creation API only |
+| **Gateway Layer** | Each gateway owns its thread(s) | Created in gateway_start() |
+| **Channel Layer** | None | Uses gateway threads via callbacks |
+| **Agent Loop** | Owns one thread | Message processing |
+| **Outbound Dispatch** | Owns one thread | Message routing |
+| **Heartbeat** | Owns one thread | Periodic tasks |
+| **Cron Service** | Owns one thread | Scheduled jobs |
+
+### Thread Creation Pattern
+
+```c
+// Gateway implementation example
+static void gateway_task(void *arg)
+{
+    while (s_running) {
+        // Poll for I/O
+        poll_io();
+        mimi_sleep_ms(100);
+    }
+}
+
+mimi_err_t gateway_start(gateway_t *gw)
+{
+    // Initialize resources
+    
+    // Create thread for I/O
+    s_running = true;
+    return mimi_task_create_detached("gateway_name", gateway_task, NULL);
+}
+
+mimi_err_t gateway_stop(gateway_t *gw)
+{
+    // Signal thread to stop
+    s_running = false;
+    
+    // Cleanup resources
+}
+```
+
+---
+
+## Directory Structure
 
 ```
 main/
-├── mimi.c                  Entry point — app_main() orchestrates init + startup
-├── mimi_config.h           All compile-time constants + build-time secrets include
-├── mimi_secrets.h          Build-time credentials (gitignored, highest priority)
-├── mimi_secrets.h.example  Template for mimi_secrets.h
+├── main.c                      # Entry point
+├── mimi_config.h               # Compile-time configuration
+├── mimi_secrets.h              # Build-time credentials (gitignored)
 │
-├── channels/               # Unified Channel Layer (NEW)
-│   ├── channel.h           # Channel interface definition
-│   ├── channel_manager.c/h # Channel lifecycle management
-│   ├── cli/                # CLI Channel
-│   │   ├── cli_channel.c/h
-│   │   └── terminal_stdio.c/h
-│   ├── telegram/           # Telegram Channel (migrating)
-│   │   └── telegram_bot.c/h
-│   └── gateway/            # WebSocket Channel (migrating)
-│       └── ws_server.c/h
+├── platform/                   # Platform Layer
+│   ├── os/                     # OS Abstraction
+│   │   ├── os.h                # OS interface
+│   │   └── posix_impl/         # POSIX implementation
+│   ├── runtime.c/h             # Runtime management
+│   ├── log.h                   # Logging interface
+│   ├── mimi_time.h             # Time functions
+│   ├── mimi_err.h              # Error codes
+│   └── fs/                     # File system
+│       ├── mimi_fs.h           # VFS interface
+│       └── posix/              # POSIX implementation
 │
-├── commands/               # Shared Command System (NEW)
-│   ├── command.h           # Command interface
-│   ├── command_registry.c/h # Command registration & execution
-│   ├── cmd_help.c          # /help command
-│   ├── cmd_session.c       # /session command
-│   ├── cmd_set.c           # /set command
-│   ├── cmd_ask.c           # /ask command
-│   ├── cmd_memory.c        # /memory_read command
-│   └── cmd_exit.c          # /exit command
+├── gateway/                    # Gateway Layer
+│   ├── gateway.h               # Gateway interface
+│   ├── gateway.c               # Gateway base implementation
+│   ├── gateway_manager.c/h     # Gateway lifecycle management
+│   ├── stdio/                  # STDIO Gateway
+│   │   ├── stdio_gateway.c/h
+│   │   └── stdio_transport.c/h
+│   ├── http/                   # HTTP Gateway
+│   │   └── http_gateway.c/h
+│   └── websocket/              # WebSocket Gateway
+│       ├── ws_gateway.c/h      # WebSocket Server
+│       └── ws_client_gateway.c/h  # WebSocket Client
 │
-├── cli/                    # CLI Editor Framework
-│   ├── cli_terminal.c/h    # Terminal abstraction layer
-│   ├── editor.c/h          # Line editor with history & completion
-│   └── cli.md              # Documentation
+├── channels/                   # Channel Layer
+│   ├── channel.h               # Channel interface
+│   ├── channel_manager.c/h     # Channel lifecycle management
+│   ├── cli/                    # CLI Channel
+│   │   └── cli_channel.c/h
+│   ├── telegram/               # Telegram Channel
+│   │   └── telegram_channel.c/h
+│   ├── feishu/                 # Feishu Channel
+│   │   └── feishu_channel.c/h
+│   ├── websocket/              # WebSocket Channel
+│   │   └── ws_channel.c/h
+│   └── qq/                     # QQ Channel
+│       └── qq_channel.c/h
 │
-├── bus/
-│   ├── message_bus.h       # mimi_msg_t struct, queue API
-│   └── message_bus.c       # Two FreeRTOS queues: inbound + outbound
+├── commands/                   # Command System
+│   ├── command.h               # Command interface
+│   ├── command_registry.c/h    # Command registration
+│   ├── cmd_help.c              # /help command
+│   ├── cmd_session.c           # /session command
+│   ├── cmd_set.c               # /set command
+│   ├── cmd_ask.c               # /ask command
+│   ├── cmd_memory.c            # /memory_read command
+│   └── cmd_exit.c              # /exit command
 │
-├── wifi/
-│   ├── wifi_manager.h      # WiFi STA lifecycle API
-│   └── wifi_manager.c      # Event handler, exponential backoff
+├── cli/                        # CLI Framework
+│   ├── cli_terminal.c/h        # Terminal abstraction
+│   ├── editor.c/h              # Line editor
+│   └── cli.md                  # Documentation
 │
-├── telegram/               # (Being migrated to channels/telegram/)
-│   ├── telegram_bot.h      # Bot init/start, send_message API
-│   └── telegram_bot.c      # Long polling loop, JSON parsing
+├── bus/                        # Message Bus
+│   ├── message_bus.h           # Message format
+│   └── message_bus.c           # Queue implementation
 │
-├── llm/
-│   ├── llm_proxy.h         # llm_chat() + llm_chat_tools() API
-│   └── llm_proxy.c         # Anthropic Messages API implementation
+├── agent/                      # Agent System
+│   ├── agent_loop.c/h          # Main agent task
+│   ├── context_builder.c/h     # Context building
+│   └── agent.h                 # Agent interface
 │
-├── agent/
-│   ├── agent_loop.h        # Agent task init/start
-│   ├── agent_loop.c        # ReAct loop: LLM call → tool execution
-│   ├── context_builder.h   # System prompt + messages builder
-│   └── context_builder.c   # Reads bootstrap files + memory
+├── llm/                        # LLM Integration
+│   ├── llm_proxy.c/h           # LLM API client
+│   └── llm_provider.h          # Provider interface
 │
-├── tools/
-│   ├── tool_registry.h     # Tool definition struct, register/dispatch
-│   ├── tool_registry.c     # Tool registration, JSON schema builder
-│   ├── tool_web_search.h   # Web search tool API
-│   └── tool_web_search.c   # Brave Search API via HTTPS
+├── tools/                      # Tool System
+│   ├── tool_registry.c/h       # Tool registration
+│   ├── tool_web_search.c/h     # Web search tool
+│   └── tool_execute.c/h        # Tool execution
 │
-├── memory/
-│   ├── memory_store.h      # Long-term + daily memory API
-│   ├── memory_store.c      # MEMORY.md read/write
-│   ├── session_mgr.h       # Per-chat session API
-│   └── session_mgr.c       # JSONL session files
+├── memory/                     # Memory System
+│   ├── memory_store.c/h        # Long-term memory
+│   ├── session_mgr.c/h         # Session management
+│   └── memory.h                # Memory interface
 │
-├── gateway/                # (Being migrated to channels/gateway/)
-│   ├── ws_server.h         # WebSocket server API
-│   └── ws_server.c         # ESP HTTP server with WS upgrade
+├── router/                     # Message Router
+│   └── router.c/h              # Message routing
 │
-├── proxy/
-│   ├── http_proxy.h        # Proxy connection API
-│   └── http_proxy.c        # HTTP CONNECT tunnel + TLS
+├── heartbeat/                  # Heartbeat Service
+│   └── heartbeat.c/h           # Periodic status updates
 │
-└── ota/
-    ├── ota_manager.h       # OTA update API
-    └── ota_manager.c       # esp_https_ota wrapper
+├── cron/                       # Cron Service
+│   └── cron_service.c/h        # Scheduled tasks
+│
+├── skills/                     # Skills System
+│   └── skills.c/h              # Skill management
+│
+├── config/                     # Configuration
+│   └── config.c/h              # Runtime configuration
+│
+├── app/                        # Application Layer
+│   └── app.c/h                 # Application initialization
+│
+└── utils/                      # Utilities
+    ├── json_utils.c/h          # JSON helpers
+    └── string_utils.c/h        # String helpers
 ```
 
 ---
 
-## Channel Interface
+## Key Design Principles
 
-All channels implement the `channel_t` interface:
+### 1. Layer Isolation
 
-```c
-typedef struct channel {
-    const char *name;
-    const char *description;
-    
-    /* Lifecycle */
-    mimi_err_t (*init)(struct channel *ch, const channel_config_t *cfg);
-    mimi_err_t (*start)(struct channel *ch);
-    mimi_err_t (*stop)(struct channel *ch);
-    void (*destroy)(struct channel *ch);
-    
-    /* Messaging */
-    mimi_err_t (*send)(struct channel *ch, const char *session_id, 
-                       const char *content);
-    
-    /* Callbacks */
-    void (*on_message)(struct channel *ch, const char *session_id,
-                       const char *content, void *user_data);
-    void (*on_connect)(struct channel *ch, const char *session_id,
-                       void *user_data);
-    void (*on_disconnect)(struct channel *ch, const char *session_id,
-                          void *user_data);
-    
-    /* State */
-    bool is_initialized;
-    bool is_started;
-    void *priv_data;
-} channel_t;
-```
+- **Platform Layer**: No dependencies on upper layers
+- **Gateway Layer**: Only depends on Platform Layer
+- **Channel Layer**: Depends on Gateway and Platform Layers
+- **Application Layer**: Orchestrates all layers
 
-### Channel Manager API
+### 2. Thread Ownership
 
-```c
-/* Initialize channel manager */
-mimi_err_t channel_manager_init(void);
+- Each component that needs concurrent execution owns its thread(s)
+- No shared threads between components
+- Communication via queues and callbacks
 
-/* Register a channel */
-mimi_err_t channel_register(channel_t *ch);
+### 3. Callback-Based Communication
 
-/* Start/stop all channels */
-mimi_err_t channel_start_all(void);
-void channel_stop_all(void);
+- Gateways notify channels via callbacks
+- Channels don't poll gateways
+- Platform layer uses cleanup callbacks for business logic
 
-/* Send message through a channel */
-mimi_err_t channel_send(const char *channel_name, const char *session_id,
-                        const char *content);
+### 4. Protocol Abstraction
 
-/* Find a channel by name */
-channel_t* channel_find(const char *name);
-```
-
----
-
-## Command System Interface
-
-Commands are shared across all channels:
-
-```c
-/* Command context */
-typedef struct {
-    const char *channel;      // Channel name ("cli", "telegram", "websocket")
-    const char *session_id;   // Session identifier
-    const char *user_id;      // User identifier
-    void *user_data;          // Channel-specific data
-} command_context_t;
-
-/* Command definition */
-typedef struct {
-    const char *name;         // Command name (without "/")
-    const char *description;  // Help description
-    const char *usage;        // Usage syntax
-    int (*execute)(const char **args, int arg_count,
-                   const command_context_t *ctx,
-                   char *output, size_t output_len);
-} command_t;
-
-/* Register a command */
-void command_register(const command_t *cmd);
-
-/* Execute a command from input string */
-int command_execute(const char *input, const command_context_t *ctx,
-                    char *output, size_t output_len);
-
-/* Get tab completions */
-int command_get_completions(const char *prefix, char **out_matches, int max_matches);
-```
-
-### Available Commands
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/help` | Show available commands | `/help` |
-| `/session` | Session management | `/session list`, `/session new abc`, `/session use abc` |
-| `/set` | Set configuration | `/set key value` |
-| `/ask` | Ask AI a question | `/ask What is the weather?` |
-| `/memory_read` | Read memory file | `/memory_read` |
-| `/exit` | Exit application | `/exit` |
-
----
-
-## FreeRTOS Task Layout
-
-| Task               | Core | Priority | Stack  | Description                          |
-|--------------------|------|----------|--------|--------------------------------------|
-| `tg_poll`          | 0    | 5        | 12 KB  | Telegram long polling (30s timeout)  |
-| `ws_server`        | 0    | 5        | 8 KB   | WebSocket server (port 18789)        |
-| `stdio_cli`        | 0    | 3        | 8 KB   | CLI terminal input handling          |
-| `agent_loop`       | 1    | 6        | 12 KB  | Message processing + Claude API call |
-| `outbound`         | 0    | 5        | 8 KB   | Route responses to channels          |
-| httpd (internal)   | 0    | 5        | —      | WebSocket HTTP server                |
-| wifi_event (IDF)   | 0    | 8        | —      | WiFi event handling (ESP-IDF)        |
-
-**Core allocation strategy**: Core 0 handles I/O (network, serial, WiFi). Core 1 is dedicated to the agent loop (CPU-bound JSON building + waiting on HTTPS).
-
----
-
-## Memory Budget
-
-| Purpose                            | Location       | Size     |
-|------------------------------------|----------------|----------|
-| FreeRTOS task stacks               | Internal SRAM  | ~40 KB   |
-| WiFi buffers                       | Internal SRAM  | ~30 KB   |
-| TLS connections x2 (Telegram + Claude) | PSRAM      | ~120 KB  |
-| JSON parse buffers                 | PSRAM          | ~32 KB   |
-| Session history cache              | PSRAM          | ~32 KB   |
-| System prompt buffer               | PSRAM          | ~16 KB   |
-| LLM response stream buffer         | PSRAM          | ~32 KB   |
-| Remaining available                | PSRAM          | ~7.7 MB  |
-
-Large buffers (32 KB+) are allocated from PSRAM via `heap_caps_calloc(1, size, MALLOC_CAP_SPIRAM)`.
-
----
-
-## Flash Partition Layout
-
-```
-Offset      Size      Name        Purpose
-─────────────────────────────────────────────
-0x009000    24 KB     nvs         ESP-IDF internal use (WiFi calibration etc.)
-0x00F000     8 KB     otadata     OTA boot state
-0x011000     4 KB     phy_init    WiFi PHY calibration
-0x020000     2 MB     ota_0       Firmware slot A
-0x220000     2 MB     ota_1       Firmware slot B
-0x420000    12 MB     spiffs      Markdown memory, sessions, config
-0xFF0000    64 KB     coredump    Crash dump storage
-```
-
-Total: 16 MB flash.
-
----
-
-## Storage Layout (SPIFFS)
-
-SPIFFS is a flat filesystem — no real directories. Files use path-like names.
-
-```
-/spiffs/config/SOUL.md          AI personality definition
-/spiffs/config/USER.md          User profile
-/spiffs/memory/MEMORY.md        Long-term persistent memory
-/spiffs/memory/2026-02-05.md    Daily notes (one file per day)
-/spiffs/sessions/tg_12345.jsonl Session history (one file per Telegram chat)
-/spiffs/sessions/cli_default.jsonl CLI session history
-```
-
-Session files are JSONL (one JSON object per line):
-```json
-{"role":"user","content":"Hello","ts":1738764800}
-{"role":"assistant","content":"Hi there!","ts":1738764802}
-```
-
----
-
-## Virtual File System (VFS) Architecture
-
-### Overview
-
-MimiClaw uses a virtual file system (VFS) layer that abstracts underlying file system operations. This allows consistent file access across different platforms (ESP32 SPIFFS, POSIX systems).
-
-### VFS Base Directory
-
-The VFS base directory is configured based on the platform:
-
-- **Linux/POSIX**: `~/.mimiclaw/workspace/`
-- **Windows**: `C:\Users\<username>\.mimiclaw\workspace\`
-- **ESP32**: `/spiffs/`
-
-### Directory Structure
-
-```
-~/.mimiclaw/
-├── config.json          # Configuration file (outside VFS)
-└── workspace/           # VFS base directory
-    ├── AGENTS.md        # Agent configuration
-    ├── HEARTBEAT.md     # Heartbeat status
-    ├── TOOLS.md         # Tool usage documentation
-    ├── config/          # Configuration files
-    │   ├── SOUL.md      # AI personality
-    │   └── USER.md      # User profile
-    ├── cron.json        # Cron jobs configuration
-    ├── memory/          # Memory files
-    │   ├── MEMORY.md    # Long-term memory
-    │   └── daily/       # Daily notes
-    ├── sessions/        # Session files
-    │   ├── cli_default.jsonl  # CLI session
-    │   ├── tg_12345.jsonl     # Telegram session
-    │   └── ws_client1.jsonl    # WebSocket session
-    └── skills/          # Skill files
-        ├── daily-briefing.md   # Daily briefing skill
-        ├── skill-creator.md    # Skill creator skill
-        └── weather.md          # Weather skill
-```
-
-### File Access Pattern
-
-All modules (session, skills, tools) use **VFS paths** (relative to the VFS base directory) for file operations:
-
-- **Session Manager**: Uses `sessions/<session_id>.jsonl` paths for storing chat history in JSONL format
-- **Skills System**: Uses `skills/<skill_name>.md` paths for skill definitions and configurations
-- **Memory Store**: Uses `memory/MEMORY.md` for long-term memory and `memory/daily/<date>.md` for daily notes
-- **Context Builder**: Uses `config/SOUL.md` for AI personality and `config/USER.md` for user profile
-- **Tools System**: Uses VFS paths for tool configurations and data storage
-
-### VFS Path vs Real Path Usage
-
-| Component | Path Type | Description |
-|-----------|-----------|-------------|
-| Session Manager | VFS Path | Uses relative paths like `sessions/cli_default.jsonl` |
-| Skills System | VFS Path | Uses relative paths like `skills/weather.md` |
-| Memory Store | VFS Path | Uses relative paths like `memory/MEMORY.md` |
-| Tools System | VFS Path | Uses relative paths for tool-specific data |
-| Configuration | Real Path | Uses absolute path to `~/.mimiclaw/config.json` (outside VFS) |
-
-### Detailed Directory Structure
-
-```
-~/.mimiclaw/            # Base directory (real path)
-├── config.json          # Configuration file (real path, outside VFS)
-└── workspace/           # VFS base directory
-    ├── AGENTS.md        # Agent configuration
-    ├── HEARTBEAT.md     # Heartbeat status
-    ├── TOOLS.md         # Tool usage documentation
-    ├── config/          # Configuration files
-    │   ├── SOUL.md      # AI personality
-    │   └── USER.md      # User profile
-    ├── cron.json        # Cron jobs configuration
-    ├── memory/          # Memory files
-    │   ├── MEMORY.md    # Long-term memory
-    │   └── daily/       # Daily notes
-    │       ├── 2024-01-01.md
-    │       └── 2024-01-02.md
-    ├── sessions/        # Session files
-    │   ├── cli_default.jsonl  # CLI session
-    │   ├── tg_12345.jsonl     # Telegram session
-    │   └── ws_client1.jsonl    # WebSocket session
-    └── skills/          # Skill files
-        ├── daily-briefing.md   # Daily briefing skill
-        ├── skill-creator.md    # Skill creator skill
-        └── weather.md          # Weather skill
-```
-
-### Session File Usage
-
-Session files store chat history in JSONL format, with one JSON object per line:
-
-```json
-{"role":"user","content":"Hello","ts":1738764800}
-{"role":"assistant","content":"Hi there!","ts":1738764802}
-```
-
-- **Location**: `sessions/<session_id>.jsonl` (VFS path)
-- **Naming convention**: `{channel}_{identifier}.jsonl`
-  - CLI: `cli_{session_name}.jsonl`
-  - Telegram: `tg_{chat_id}.jsonl`
-  - WebSocket: `ws_{client_id}.jsonl`
-
-### Skills File Usage
-
-Skill files are Markdown documents that define skill behavior and configuration:
-
-- **Location**: `skills/<skill_name>.md` (VFS path)
-- **Format**: Markdown with YAML frontmatter for metadata
-- **Purpose**: Define skill functionality, triggers, and responses
-
-### Tools File Usage
-
-Tools may use VFS paths for configuration and data storage:
-
-- **Configuration**: Stored in `tools/<tool_name>.json` (VFS path)
-- **Data**: Stored in `tools/<tool_name>/` directories (VFS paths)
-- **Usage**: Tools access their data using relative VFS paths
-
-### VFS API
-
-```c
-/* File operations */
-mimi_err_t mimi_fs_open(const char *path, const char *mode, mimi_file_t **out_file);
-mimi_err_t mimi_fs_close(mimi_file_t *file);
-mimi_err_t mimi_fs_read(mimi_file_t *file, void *buf, size_t len, size_t *out_read);
-mimi_err_t mimi_fs_write(mimi_file_t *file, const void *buf, size_t len, size_t *out_written);
-mimi_err_t mimi_fs_seek(mimi_file_t *file, int offset, int whence);
-
-/* Directory operations */
-mimi_err_t mimi_fs_mkdir(const char *path);
-mimi_err_t mimi_fs_mkdir_p(const char *path);
-
-/* Path operations */
-bool mimi_fs_exists(const char *path);
-```
-
-### Direct File System Access
-
-For files outside the VFS (like the main `config.json`), direct POSIX file operations are used:
-
-```c
-/* Direct POSIX API functions (bypassing VFS) */
-bool mimi_fs_exists_direct(const char *path);
-int mimi_fs_mkdir_p_direct(const char *dir);
-```
+- Gateway layer abstracts transport protocols
+- Channel layer abstracts business logic
+- Easy to add new protocols or channels
 
 ---
 
 ## Configuration
 
-MimiClaw uses a dual-configuration approach:
+### Build-time Configuration (`mimi_secrets.h`)
 
-### 1. Build-time Configuration (`mimi_secrets.h`)
+| Define | Description |
+|--------|-------------|
+| `MIMI_SECRET_WIFI_SSID` | WiFi SSID (ESP32) |
+| `MIMI_SECRET_WIFI_PASS` | WiFi password (ESP32) |
+| `MIMI_SECRET_API_KEY` | LLM API key |
+| `MIMI_SECRET_MODEL` | Model ID |
 
-For sensitive credentials and platform-specific settings:
+### Runtime Configuration (`~/.mimiclaw/config.json`)
 
-| Define                       | Description                             |
-|------------------------------|-----------------------------------------|
-| `MIMI_SECRET_WIFI_SSID`     | WiFi SSID                               |
-| `MIMI_SECRET_WIFI_PASS`     | WiFi password                           |
-| `MIMI_SECRET_TG_TOKEN`      | Telegram Bot API token                  |
-| `MIMI_SECRET_API_KEY`       | Anthropic API key                       |
-| `MIMI_SECRET_MODEL`         | Model ID (default: claude-opus-4-6)     |
-| `MIMI_SECRET_PROXY_HOST`    | HTTP proxy hostname/IP (optional)       |
-| `MIMI_SECRET_PROXY_PORT`    | HTTP proxy port (optional)              |
-| `MIMI_SECRET_SEARCH_KEY`    | Brave Search API key (optional)         |
-
-### 2. Runtime Configuration (`config.json`)
-
-For runtime settings stored in the user's home directory:
-
-**Location:**
-- **Linux/POSIX**: `~/.mimiclaw/config.json`
-- **Windows**: `C:\Users\<username>\.mimiclaw\config.json`
-
-**Example config.json:**
 ```json
 {
   "agents": {
     "defaults": {
-      "workspace": "~/.mimiclaw/workspace",
-      "timezone": "PST8PDT,M3.2.0,M11.1.0",
-      "model": "nvidia/nemotron-nano-9b-v2:free",
-      "provider": "openrouter",
-      "maxTokens": 8192,
-      "temperature": 0.1,
-      "maxToolIterations": 40,
-      "memoryWindow": 100,
-      "sendWorkingStatus": true
+      "model": "claude-3-opus-20240229",
+      "provider": "anthropic",
+      "maxTokens": 4096
     }
   },
   "channels": {
     "telegram": {
       "enabled": true,
-      "token": "YOUR_TELEGRAM_TOKEN",
-      "allowFrom": ["123456789"]
+      "token": "YOUR_TOKEN"
     }
   },
   "providers": {
-    "openrouter": {
-      "apiKey": "YOUR_API_KEY",
-      "apiBase": "https://openrouter.ai/api/v1/chat/completions"
+    "anthropic": {
+      "apiKey": "YOUR_KEY",
+      "apiBase": "https://api.anthropic.com/v1"
     }
-  },
-  "proxy": {
-    "host": "",
-    "port": "",
-    "type": "http"
-  },
-  "tools": {
-    "search": {
-      "apiKey": "YOUR_SEARCH_KEY"
-    }
-  },
-  "logging": {
-    "level": "info"
   }
 }
 ```
 
-### Configuration Priority
-
-1. `mimi_secrets.h` (build-time) - highest priority
-2. `config.json` (runtime) - overrides defaults
-3. Built-in defaults - lowest priority
-
-NVS is still initialized (required by ESP-IDF WiFi internals) but is not used for application configuration.
-
 ---
 
-## Message Bus Protocol
+## Storage Layout (VFS)
 
-The internal message bus uses two FreeRTOS queues carrying `mimi_msg_t`:
-
-```c
-typedef struct {
-    char channel[16];   // "telegram", "websocket", "cli"
-    char chat_id[32];   // Telegram chat ID or WS client ID or CLI session
-    char *content;      // Heap-allocated text (ownership transferred)
-} mimi_msg_t;
 ```
-
-- **Inbound queue**: channels → agent loop (depth: 8)
-- **Outbound queue**: agent loop → dispatch → channels (depth: 8)
-- Content string ownership is transferred on push; receiver must `free()`.
-
----
-
-## WebSocket Protocol
-
-Port: **18789**. Max clients: **4**.
-
-**Client → Server:**
-```json
-{"type": "message", "content": "Hello", "chat_id": "ws_client1"}
+~/.mimiclaw/
+├── config.json                 # Runtime configuration (real path)
+└── workspace/                  # VFS base directory
+    ├── config/
+    │   ├── SOUL.md            # AI personality
+    │   └── USER.md            # User profile
+    ├── memory/
+    │   ├── MEMORY.md          # Long-term memory
+    │   └── daily/             # Daily notes
+    │       └── 2024-01-01.md
+    ├── sessions/              # Session files
+    │   ├── cli_default.jsonl
+    │   ├── tg_12345.jsonl
+    │   └── ws_client1.jsonl
+    └── skills/                # Skill files
+        └── weather.md
 ```
-
-**Server → Client:**
-```json
-{"type": "response", "content": "Hi there!", "chat_id": "ws_client1"}
-```
-
-Client `chat_id` is auto-assigned on connection (`ws_<fd>`) but can be overridden in the first message.
-
----
-
-## Claude API Integration
-
-Endpoint: `POST https://api.anthropic.com/v1/messages`
-
-Request format (Anthropic-native, non-streaming, with tools):
-```json
-{
-  "model": "claude-opus-4-6",
-  "max_tokens": 4096,
-  "system": "<system prompt>",
-  "tools": [
-    {
-      "name": "web_search",
-      "description": "Search the web for current information.",
-      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
-    }
-  ],
-  "messages": [
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hi!"},
-    {"role": "user", "content": "What's the weather today?"}
-  ]
-}
-```
-
-Key difference from OpenAI: `system` is a top-level field, not inside the `messages` array.
-
-Non-streaming JSON response:
-```json
-{
-  "id": "msg_xxx",
-  "type": "message",
-  "role": "assistant",
-  "content": [
-    {"type": "text", "text": "Let me search for that."},
-    {"type": "tool_use", "id": "toolu_xxx", "name": "web_search", "input": {"query": "weather today"}}
-  ],
-  "stop_reason": "tool_use"
-}
-```
-
-When `stop_reason` is `"tool_use"`, the agent loop executes each tool and sends results back:
-```json
-{"role": "assistant", "content": [<text + tool_use blocks>]}
-{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_xxx", "content": "..."}]}
-```
-
-The loop repeats until `stop_reason` is `"end_turn"` (max 10 iterations).
 
 ---
 
 ## Startup Sequence
 
+### Initialization Phase (app_init)
+
 ```
-app_main()
-  ├── init_nvs()                    NVS flash init (erase if corrupted)
-  ├── esp_event_loop_create_default()
-  ├── mimi_fs_init()                Initialize VFS layer with base directory
-  ├── mimi_config_load()            Load config.json from ~/.mimiclaw/ (real path)
-  ├── message_bus_init()            Create inbound + outbound queues
-  ├── memory_store_init()           Initialize memory store with VFS paths
-  ├── session_mgr_init()            Initialize session manager with VFS paths
-  ├── skills_system_init()          Initialize skills system with VFS paths
-  ├── tools_system_init()           Initialize tools system with VFS paths
-  ├── 
-  ├── Initialize Channel System (NEW)
-  │   ├── command_system_init()     Initialize command registry
-  │   ├── cmd_help_init()           Register /help command
-  │   ├── cmd_session_init()        Register /session command
-  │   ├── cmd_set_init()            Register /set command
-  │   ├── cmd_memory_read_init()    Register /memory_read command
-  │   ├── cmd_ask_init()            Register /ask command
-  │   ├── cmd_exit_init()           Register /exit command
-  │   ├── channel_manager_init()    Initialize channel manager
-  │   ├── cli_channel_init()        Initialize CLI channel
-  │   └── channel_register()        Register CLI channel
-  │
-  ├── wifi_manager_init()           Init WiFi STA mode
-  ├── http_proxy_init()             Load proxy config
-  ├── telegram_bot_init()           Load bot token
-  ├── llm_proxy_init()              Load API key + model
-  ├── tool_registry_init()          Register tools
-  ├── agent_loop_init()
-  │
-  ├── wifi_manager_start()          Connect to WiFi
-  │   └── wifi_manager_wait_connected(30s)
-  │
-  └── [if WiFi connected]
-      ├── channel_start_all()       Start all registered channels (NEW)
-      ├── telegram_bot_start()      Start Telegram polling
-      ├── agent_loop_start()        Start agent processing
-      ├── ws_server_start()         Start WebSocket server
-      └── outbound_dispatch task    Start outbound routing
+app_init()
+  ├── mimi_fs_init()              # Initialize VFS
+  ├── posix_fs_register()         # Register POSIX filesystem
+  ├── mimi_workspace_bootstrap()  # Setup workspace
+  ├── mimi_kv_init()              # Initialize KV store
+  ├── http_proxy_init()           # Initialize HTTP proxy
+  ├── message_bus_init()          # Create inbound/outbound queues
+  ├── mimi_runtime_init()         # Initialize runtime
+  ├── command_system_auto_init()  # Initialize command system
+  ├── gateway_system_init()       # Initialize gateway system
+  │   ├── gateway_manager_init()  # Init gateway manager
+  │   ├── Register all gateways   # STDIO, WS, HTTP, WS Client
+  │   └── Initialize gateways     # Call gateway_init() for each
+  ├── channel_system_init()       # Initialize channel system
+  │   ├── router_init()           # Initialize message router
+  │   ├── channel_manager_init()  # Init channel manager
+  │   └── Register all channels   # CLI, Telegram, Feishu, QQ, WS
+  ├── memory_store_init()         # Initialize memory system
+  ├── skill_loader_init()         # Initialize skill loader
+  ├── session_mgr_init()          # Initialize session manager
+  ├── tool_registry_init()        # Initialize tool registry
+  ├── llm_proxy_init()            # Initialize LLM proxy
+  └── agent_loop_init()           # Initialize agent loop
 ```
 
----
+### Startup Phase (app_start)
 
-## Nanobot Reference Mapping
+```
+app_start()
+  ├── agent_loop_start()          # Start agent processing
+  ├── Create outbound_dispatch task  # Message routing task
+  ├── cron_service_init/start()   # Start cron service
+  ├── heartbeat_init/start()      # Start heartbeat service
+  ├── Register cleanup callbacks  # Register app_cleanup()
+  ├── gateway_system_start()      # Start all gateways
+  │   └── Each gateway creates its thread(s)
+  ├── channel_system_start()      # Start all channels
+  │   └── Each channel starts its gateway(s)
+  └── Application ready
+```
 
-| Nanobot Module              | MimiClaw Equivalent            | Notes                        |
-|-----------------------------|--------------------------------|------------------------------|
-| `agent/loop.py`             | `agent/agent_loop.c`           | ReAct loop with tool use     |
-| `agent/context.py`          | `agent/context_builder.c`      | Loads SOUL.md + USER.md + memory |
-| `agent/memory.py`           | `memory/memory_store.c`        | MEMORY.md + daily notes      |
-| `session/manager.py`        | `memory/session_mgr.c`         | JSONL per chat, ring buffer  |
-| `channels/telegram.py`      | `channels/telegram/`           | Migrated to Channel system   |
-| `channels/gateway.py`       | `channels/gateway/`            | Migrated to Channel system   |
-| `channels/cli.py`           | `channels/cli/`                | New Channel implementation   |
-| `commands/registry.py`      | `commands/command_registry.c`  | Shared command system        |
-| `bus/events.py` + `queue.py`| `bus/message_bus.c`            | FreeRTOS queues              |
-| `providers/litellm_provider.py` | `llm/llm_proxy.c`         | Direct Anthropic API         |
-| `config/schema.py`          | `mimi_config.h` + `mimi_secrets.h` | Build-time secrets    |
-| `cli/commands.py`           | `commands/`                    | Shared across all channels   |
-| `agent/tools/*`             | `tools/tool_registry.c` + `tool_web_search.c` | web_search via Brave |
+### Runtime Phase (app_run)
+
+```
+app_run()
+  └── mimi_runtime_run()          # Main event loop
+      └── Cleanup on exit
+          ├── Execute cleanup callbacks
+          ├── Stop all channels
+          └── Stop all gateways
+```
+
+### Key Functions
+
+| Function | Phase | Description |
+|----------|-------|-------------|
+| `gateway_system_init()` | Init | Register and initialize all gateways |
+| `gateway_system_start()` | Start | Start all gateways (create threads) |
+| `gateway_system_stop()` | Stop | Stop all gateways |
+| `channel_system_init()` | Init | Register and initialize all channels |
+| `channel_system_start()` | Start | Start all channels |
+| `channel_system_stop()` | Stop | Stop all channels |
 
 ---
 
@@ -858,9 +613,23 @@ app_main()
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| CLI Channel | ✅ Completed | `channels/cli/` |
+| Platform Layer | ✅ Completed | `platform/` |
+| Gateway Layer | ✅ Completed | `gateway/` |
+| Channel Layer | ✅ Completed | `channels/` |
 | Command System | ✅ Completed | `commands/` |
-| Telegram Channel | 🔄 In Progress | `channels/telegram/` |
-| WebSocket Channel | 🔄 In Progress | `channels/gateway/` |
-| Message Bus | ✅ Compatible | `bus/message_bus.c` |
+| Message Bus | ✅ Completed | `bus/` |
+| Agent System | ✅ Completed | `agent/` |
+| Tool System | ✅ Completed | `tools/` |
+| Memory System | ✅ Completed | `memory/` |
+| VFS Layer | ✅ Completed | `platform/fs/` |
 
+---
+
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Linux (POSIX) | ✅ Supported | Full feature set |
+| macOS (POSIX) | ✅ Supported | Full feature set |
+| ESP32 (FreeRTOS) | 🔄 In Progress | WiFi, OTA, SPIFFS |
+| Windows | 🔄 In Progress | Basic support |

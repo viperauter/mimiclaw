@@ -6,6 +6,16 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#define F_OK 0
+#define access _access
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
+
 #define MAX_WORKSPACES 8
 #define MAX_MOUNT_POINTS 16
 #define MAX_FS_IMPLS 4
@@ -769,18 +779,7 @@ mimi_err_t mimi_fs_shutdown(void)
     return MIMI_OK;
 }
 
-/* ==========================================================================
- * Direct POSIX API Functions
- * ========================================================================== */
-
-#ifdef _WIN32
-#include <direct.h>
-#include <io.h>
-#define F_OK 0
-#define access _access
-#else
-#include <unistd.h>
-#endif
+/* ========================================================================== * Direct POSIX API Functions * ========================================================================== */
 
 bool mimi_fs_exists_direct(const char *path)
 {

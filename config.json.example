@@ -1,0 +1,41 @@
+{
+  "providers": {
+    "anthropic": {
+      "apiKey": "sk-ant-xxx"
+    },
+    "openrouter": {
+      "apiKey": "sk-or-v1-xxx",
+      "apiBase": "https://openrouter.ai/api/v1/chat/completions"
+    },
+    "openai": {
+      "apiKey": "sk-xxx",
+      "apiBase": "https://api.openai.com/v1/chat/completions"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-5",
+      "provider": "openrouter"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "allowFrom": ["YOUR_TELEGRAM_USER_ID"]
+    }
+  },
+  "proxy": {
+    "host": "",
+    "port": "",
+    "type": "http"
+  },
+  "tools": {
+    "search": {
+      "apiKey": ""
+    }
+  },
+  "paths": {
+    "base": ""
+  }
+}
