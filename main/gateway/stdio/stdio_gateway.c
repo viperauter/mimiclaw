@@ -8,10 +8,10 @@
 #include "gateway/stdio/stdio_gateway.h"
 #include "router/router.h"
 #include "cli/cli_terminal.h"
-#include "platform/log.h"
-#include "platform/os/os.h"
-#include "platform/runtime.h"
-#include "platform/mimi_time.h"
+#include "log.h"
+#include "os/os.h"
+#include "runtime.h"
+#include "mimi_time.h"
 
 #include <stdio.h>
 #include <string.h>

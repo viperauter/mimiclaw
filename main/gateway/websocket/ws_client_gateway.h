@@ -10,7 +10,7 @@
 
 #include "gateway/gateway.h"
 #include "mimi_err.h"
-#include "platform/websocket/websocket.h"
+#include "websocket/websocket.h"
 
 #ifdef __cplusplus
 extern "C" {

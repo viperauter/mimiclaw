@@ -98,3 +98,52 @@ mimi_err_t mimi_queue_recv(mimi_queue_t *q, void *elem_out, uint32_t timeout_ms)
     return MIMI_OK;
 }
 
+mimi_err_t mimi_queue_try_send(mimi_queue_t *q, const void *elem)
+{
+    if (!q || !elem) return MIMI_ERR_INVALID_ARG;
+
+    mimi_mutex_lock(q->mu);
+    if (q->count == q->cap) {
+        mimi_mutex_unlock(q->mu);
+        return MIMI_ERR_WOULD_BLOCK;
+    }
+
+    uint8_t *dst = q->buf + (q->tail * q->elem_size);
+    memcpy(dst, elem, q->elem_size);
+    q->tail = (q->tail + 1) % q->cap;
+    q->count++;
+
+    mimi_cond_signal(q->cv_not_empty);
+    mimi_mutex_unlock(q->mu);
+    return MIMI_OK;
+}
+
+mimi_err_t mimi_queue_try_recv(mimi_queue_t *q, void *elem_out)
+{
+    if (!q || !elem_out) return MIMI_ERR_INVALID_ARG;
+
+    mimi_mutex_lock(q->mu);
+    if (q->count == 0) {
+        mimi_mutex_unlock(q->mu);
+        return MIMI_ERR_WOULD_BLOCK;
+    }
+
+    uint8_t *src = q->buf + (q->head * q->elem_size);
+    memcpy(elem_out, src, q->elem_size);
+    q->head = (q->head + 1) % q->cap;
+    q->count--;
+
+    mimi_cond_signal(q->cv_not_full);
+    mimi_mutex_unlock(q->mu);
+    return MIMI_OK;
+}
+
+size_t mimi_queue_count(mimi_queue_t *q)
+{
+    if (!q) return 0;
+    mimi_mutex_lock(q->mu);
+    size_t count = q->count;
+    mimi_mutex_unlock(q->mu);
+    return count;
+}
+

@@ -5,15 +5,24 @@
  */
 
 #include "gateway/http/http_gateway.h"
-#include "platform/log.h"
-#include "platform/runtime.h"
-#include "platform/http/http.h"
+#include "log.h"
+#include "runtime.h"
+#include "http/http.h"
+#include "os/os.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
 static const char *TAG = "gw_http";
+
+/* Synchronous callback for blocking HTTP requests */
+typedef struct {
+    mimi_err_t result;
+    bool completed;
+    mimi_mutex_t *mutex;
+    mimi_cond_t *cond;
+} sync_callback_data_t;
 
 /* Global HTTP Gateway instance */
 static http_gateway_priv_t s_http_priv = {0};
@@ -118,6 +127,24 @@ static mimi_err_t http_gateway_send_impl(gateway_t *gw, const char *session_id,
 
 /* HTTP Gateway module initialization */
 
+
+
+
+
+static void sync_http_callback(mimi_err_t err, mimi_http_response_t *resp, void *user_data)
+{
+    sync_callback_data_t *data = (sync_callback_data_t *)user_data;
+    if (data) {
+        mimi_mutex_lock(data->mutex);
+        data->result = err;
+        data->completed = true;
+        mimi_cond_signal(data->cond);
+        mimi_mutex_unlock(data->mutex);
+    }
+}
+
+
+
 mimi_err_t http_gateway_module_init(void)
 {
     memset(&s_http_priv, 0, sizeof(s_http_priv));
@@ -138,6 +165,10 @@ mimi_err_t http_gateway_module_init(void)
     g_http_gateway.is_started = false;
     
     MIMI_LOGI(TAG, "HTTP Gateway module initialized");
+    
+    /* Initialize HTTP platform module */
+    mimi_http_init();
+    
     return MIMI_OK;
 }
 
@@ -194,11 +225,47 @@ mimi_err_t http_gateway_get(gateway_t *gw, const char *endpoint,
         req.headers = headers;
     }
     
-    /* Execute HTTP request */
+    /* Execute HTTP request asynchronously but wait for completion */
     mimi_http_response_t resp;
-    mimi_err_t err = mimi_http_exec(&req, &resp);
+    memset(&resp, 0, sizeof(resp));
+    
+    sync_callback_data_t sync_data;
+    sync_data.result = MIMI_ERR_FAIL;
+    sync_data.completed = false;
+    
+    mimi_err_t mutex_err = mimi_mutex_create(&sync_data.mutex);
+    mimi_err_t cond_err = mimi_cond_create(&sync_data.cond);
+    if (mutex_err != MIMI_OK || cond_err != MIMI_OK) {
+        if (sync_data.mutex) {
+            mimi_mutex_destroy(sync_data.mutex);
+        }
+        if (sync_data.cond) {
+            mimi_cond_destroy(sync_data.cond);
+        }
+        return MIMI_ERR_FAIL;
+    }
+    
+    mimi_err_t err = mimi_http_exec_async(&req, &resp, sync_http_callback, &sync_data);
+    if (err != MIMI_OK) {
+        mimi_mutex_destroy(sync_data.mutex);
+        mimi_cond_destroy(sync_data.cond);
+        return err;
+    }
+    
+    /* Wait for callback */
+    mimi_mutex_lock(sync_data.mutex);
+    while (!sync_data.completed) {
+        mimi_cond_wait(sync_data.cond, sync_data.mutex, 60000); // 60s timeout
+    }
+    err = sync_data.result;
+    mimi_mutex_unlock(sync_data.mutex);
+    
+    mimi_mutex_destroy(sync_data.mutex);
+    mimi_cond_destroy(sync_data.cond);
+    
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "HTTP GET request failed: %d", err);
+        mimi_http_response_free(&resp);
         return err;
     }
     
@@ -257,11 +324,47 @@ mimi_err_t http_gateway_post(gateway_t *gw, const char *endpoint,
         .timeout_ms = priv->timeout_ms
     };
     
-    /* Execute HTTP request */
+    /* Execute HTTP request asynchronously but wait for completion */
     mimi_http_response_t resp;
-    mimi_err_t err = mimi_http_exec(&req, &resp);
+    memset(&resp, 0, sizeof(resp));
+    
+    sync_callback_data_t sync_data;
+    sync_data.result = MIMI_ERR_FAIL;
+    sync_data.completed = false;
+    
+    mimi_err_t mutex_err = mimi_mutex_create(&sync_data.mutex);
+    mimi_err_t cond_err = mimi_cond_create(&sync_data.cond);
+    if (mutex_err != MIMI_OK || cond_err != MIMI_OK) {
+        if (sync_data.mutex) {
+            mimi_mutex_destroy(sync_data.mutex);
+        }
+        if (sync_data.cond) {
+            mimi_cond_destroy(sync_data.cond);
+        }
+        return MIMI_ERR_FAIL;
+    }
+    
+    mimi_err_t err = mimi_http_exec_async(&req, &resp, sync_http_callback, &sync_data);
+    if (err != MIMI_OK) {
+        mimi_mutex_destroy(sync_data.mutex);
+        mimi_cond_destroy(sync_data.cond);
+        return err;
+    }
+    
+    /* Wait for callback */
+    mimi_mutex_lock(sync_data.mutex);
+    while (!sync_data.completed) {
+        mimi_cond_wait(sync_data.cond, sync_data.mutex, 60000); // 60s timeout
+    }
+    err = sync_data.result;
+    mimi_mutex_unlock(sync_data.mutex);
+    
+    mimi_mutex_destroy(sync_data.mutex);
+    mimi_cond_destroy(sync_data.cond);
+    
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "HTTP POST request failed: %d", err);
+        mimi_http_response_free(&resp);
         return err;
     }
     

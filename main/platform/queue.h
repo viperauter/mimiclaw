@@ -19,6 +19,15 @@ mimi_err_t mimi_queue_send(mimi_queue_t *q, const void *elem, uint32_t timeout_m
 /* Receives one element into elem_out (must have elem_size). */
 mimi_err_t mimi_queue_recv(mimi_queue_t *q, void *elem_out, uint32_t timeout_ms);
 
+/* Non-blocking send. Returns MIMI_ERR_WOULD_BLOCK if queue is full. */
+mimi_err_t mimi_queue_try_send(mimi_queue_t *q, const void *elem);
+
+/* Non-blocking receive. Returns MIMI_ERR_WOULD_BLOCK if queue is empty. */
+mimi_err_t mimi_queue_try_recv(mimi_queue_t *q, void *elem_out);
+
+/* Get current count of elements in queue. */
+size_t mimi_queue_count(mimi_queue_t *q);
+
 #ifdef __cplusplus
 }
 #endif

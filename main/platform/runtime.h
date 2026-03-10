@@ -93,6 +93,12 @@ bool mimi_runtime_should_exit(void);
  */
 void *mimi_runtime_get_event_loop(void);
 
+/**
+ * Get the event dispatcher.
+ * @return Pointer to event dispatcher
+ */
+void *mimi_runtime_get_dispatcher(void);
+
 #ifdef __cplusplus
 }
 #endif

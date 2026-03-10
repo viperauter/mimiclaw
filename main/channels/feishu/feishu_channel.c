@@ -350,44 +350,6 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
         return err;
     }
 
-    /* Prepare tenant access token for legacy hyper-event fallback */
-    if (s_priv.tenant_access_token[0] == '\0') {
-        err = feishu_get_tenant_token();
-        if (err != MIMI_OK) {
-            MIMI_LOGE(TAG, "Failed to get tenant access token: %d", err);
-            /* Don't return immediately, new WS endpoint flow may not need it */
-        }
-    }
-
-    /*
-     * Preferred: use Feishu official /open-apis/bot/v3/endpoints to get dynamic
-     * WebSocket URL. If this fails (e.g. 404 or feature not enabled), fall
-     * back to legacy hyper-event URL with tenant_access_token auth.
-     */
-    char ws_url[256];
-    const char *ws_token = NULL;
-    err = feishu_get_ws_url(ws_url, sizeof(ws_url));
-    if (err == MIMI_OK) {
-        ws_token = NULL; /* auth embedded in URL */
-    } else {
-        MIMI_LOGW(TAG, "Feishu endpoints not available, falling back to hyper-event URL");
-        snprintf(ws_url, sizeof(ws_url),
-                 "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
-                 s_priv.app_id);
-        if (s_priv.tenant_access_token[0] != '\0') {
-            ws_token = s_priv.tenant_access_token;
-        } else {
-            ws_token = NULL;
-        }
-    }
-
-    /* Configure WebSocket Client Gateway */
-    err = ws_client_gateway_configure(ws_url, ws_token, 30000, 30000);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to configure WebSocket Client Gateway: %d", err);
-        return err;
-    }
-
     /* Register mapping for Input Processor */
     err = router_register_mapping("feishu", "feishu");
     if (err != MIMI_OK) {
@@ -428,6 +390,44 @@ mimi_err_t feishu_channel_start_impl(channel_t *ch)
     mimi_err_t err = gateway_start(s_priv.http_gateway);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to start HTTP Gateway: %d", err);
+        return err;
+    }
+
+    /* Prepare tenant access token for legacy hyper-event fallback */
+    if (s_priv.tenant_access_token[0] == '\0') {
+        err = feishu_get_tenant_token();
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Failed to get tenant access token: %d", err);
+        }
+    }
+
+    /*
+     * Preferred: use Feishu official /open-apis/bot/v3/endpoints to get dynamic
+     * WebSocket URL. If this fails (e.g. 404 or feature not enabled), fall
+     * back to legacy hyper-event URL with tenant_access_token auth.
+     */
+    char ws_url[256];
+    const char *ws_token = NULL;
+    err = feishu_get_ws_url(ws_url, sizeof(ws_url));
+    if (err == MIMI_OK) {
+        ws_token = NULL; /* auth embedded in URL */
+    } else {
+        MIMI_LOGW(TAG, "Feishu endpoints not available, falling back to hyper-event URL");
+        snprintf(ws_url, sizeof(ws_url),
+                 "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
+                 s_priv.app_id);
+        if (s_priv.tenant_access_token[0] != '\0') {
+            ws_token = s_priv.tenant_access_token;
+        } else {
+            ws_token = NULL;
+        }
+    }
+
+    /* Configure WebSocket Client Gateway */
+    err = ws_client_gateway_configure(ws_url, ws_token, 30000, 30000);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to configure WebSocket Client Gateway: %d", err);
+        gateway_stop(s_priv.http_gateway);
         return err;
     }
 

@@ -10,7 +10,7 @@
 #include "log.h"
 #include "os/os.h"
 #include "mimi_time.h"
-#include "platform/runtime.h"
+#include "runtime.h"
 #include "memory/session_mgr.h"
 
 #include <ctype.h>

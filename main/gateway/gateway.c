@@ -5,7 +5,7 @@
  */
 
 #include "gateway/gateway.h"
-#include "platform/log.h"
+#include "log.h"
 #include <string.h>
 
 static const char *TAG = "gateway";

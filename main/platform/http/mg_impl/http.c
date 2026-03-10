@@ -1,5 +1,9 @@
 #include "../http.h"
 #include "../../log.h"
+#include "../../runtime.h"
+#include "../../os/os.h"
+#include "../../event/event_bus.h"
+#include "../../event/event_dispatcher.h"
 
 #include "mongoose.h"
 
@@ -29,14 +33,13 @@ typedef struct {
     mimi_http_response_t *resp;
     mimi_err_t result;
     bool done;
-    /* Mongoose URL host is mg_str (not NUL-terminated). Keep a persistent copy for TLS/SNI. */
     char host_name[128];
-    /* Proxy support */
     bool use_proxy;
     http_phase_t phase;
+    mimi_mutex_t *mutex;
+    mimi_cond_t *cond;
 } http_ctx_t;
 
-/* Common helper: send HTTP request (after TCP/TLS is ready). */
 static void http_send_request(struct mg_connection *c, http_ctx_t *ctx)
 {
     struct mg_str host = mg_url_host(ctx->req->url);
@@ -46,12 +49,11 @@ static void http_send_request(struct mg_connection *c, http_ctx_t *ctx)
     snprintf(ctx->host_name, sizeof(ctx->host_name), "%.*s",
              (int) host.len, host.buf ? host.buf : "");
 
-    /* Enable TLS when URL is https:// (requires MG_TLS != NONE at build time) */
     if (mg_url_is_ssl(ctx->req->url)) {
         struct mg_tls_opts opts;
         memset(&opts, 0, sizeof(opts));
-        opts.name = mg_str(ctx->host_name);  // enable hostname verification / SNI
-        opts.skip_verification = 1;          // POSIX dev: skip CA verification
+        opts.name = mg_str(ctx->host_name);
+        opts.skip_verification = 1;
         mg_tls_init(c, &opts);
     }
 
@@ -77,7 +79,15 @@ static void http_send_request(struct mg_connection *c, http_ctx_t *ctx)
     }
 }
 
-/* Direct connection event handler (no proxy). */
+static void http_signal_done(http_ctx_t *ctx, mimi_err_t result)
+{
+    mimi_mutex_lock(ctx->mutex);
+    ctx->result = result;
+    ctx->done = true;
+    mimi_cond_signal(ctx->cond);
+    mimi_mutex_unlock(ctx->mutex);
+}
+
 static void http_ev_direct(struct mg_connection *c, int ev, void *ev_data)
 {
     http_ctx_t *ctx = (http_ctx_t *)c->fn_data;
@@ -89,8 +99,7 @@ static void http_ev_direct(struct mg_connection *c, int ev, void *ev_data)
         if (status != 0) {
             MIMI_LOGE("http_posix", "Connect failed (status=%d) url=%s", status,
                       ctx->req && ctx->req->url ? ctx->req->url : "(null)");
-            ctx->result = MIMI_ERR_IO;
-            ctx->done = true;
+            http_signal_done(ctx, MIMI_ERR_IO);
             c->is_closing = 1;
             return;
         }
@@ -104,32 +113,28 @@ static void http_ev_direct(struct mg_connection *c, int ev, void *ev_data)
         size_t n = hm->body.len;
         uint8_t *buf = (uint8_t *)malloc(n + 1);
         if (!buf) {
-            ctx->result = MIMI_ERR_NO_MEM;
+            http_signal_done(ctx, MIMI_ERR_NO_MEM);
         } else {
             memcpy(buf, hm->body.buf, n);
             buf[n] = '\0';
             ctx->resp->body = buf;
             ctx->resp->body_len = n;
-            ctx->result = MIMI_OK;
+            http_signal_done(ctx, MIMI_OK);
         }
-        ctx->done = true;
         c->is_closing = 1;
     } else if (ev == MG_EV_ERROR) {
         const char *err = (const char *) ev_data;
         MIMI_LOGE("http_posix", "Mongoose HTTP error: %s", err ? err : "(unknown)");
-        ctx->result = MIMI_ERR_IO;
-        ctx->done = true;
+        http_signal_done(ctx, MIMI_ERR_IO);
     } else if (ev == MG_EV_CLOSE) {
         if (!ctx->done) {
             MIMI_LOGE("http_posix", "Connection closed before response (host=%s)",
                       ctx->host_name[0] ? ctx->host_name : "(unset)");
-            ctx->result = MIMI_ERR_IO;
-            ctx->done = true;
+            http_signal_done(ctx, MIMI_ERR_IO);
         }
     }
 }
 
-/* Proxy-enabled event handler: first CONNECT to proxy, then normal HTTP. */
 static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
 {
     http_ctx_t *ctx = (http_ctx_t *)c->fn_data;
@@ -140,15 +145,13 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
         if (ev_data != NULL) status = *(int *) ev_data;
         if (status != 0) {
             MIMI_LOGE("http_posix", "Proxy connect failed (status=%d)", status);
-            ctx->result = MIMI_ERR_IO;
-            ctx->done = true;
+            http_signal_done(ctx, MIMI_ERR_IO);
             c->is_closing = 1;
             return;
         }
 
         ctx->phase = HTTP_PHASE_PROXY_HANDSHAKE;
 
-        /* Build CONNECT request to target host:port */
         struct mg_str host = mg_url_host(ctx->req->url);
         int port = mg_url_port(ctx->req->url);
         if (port == 0) {
@@ -168,7 +171,6 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
                   "\r\n",
                   hostbuf, port, hostbuf, port);
     } else if (ev == MG_EV_READ && ctx->phase == HTTP_PHASE_PROXY_HANDSHAKE) {
-        /* Wait until we have full proxy response headers (\r\n\r\n). */
         size_t len = c->recv.len;
         char *buf = (char *) c->recv.buf;
         size_t header_end = 0;
@@ -182,11 +184,9 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
         }
 
         if (header_end == 0) {
-            /* Not yet full response, keep waiting */
             return;
         }
 
-        /* Parse status line: HTTP/1.1 200 ... */
         char line[128];
         size_t line_len = 0;
         for (size_t i = 0; i < len && i < sizeof(line) - 1; i++) {
@@ -197,8 +197,7 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
         }
         if (line_len == 0 || line_len >= sizeof(line)) {
             MIMI_LOGE("http_posix", "Proxy response malformed");
-            ctx->result = MIMI_ERR_IO;
-            ctx->done = true;
+            http_signal_done(ctx, MIMI_ERR_IO);
             c->is_closing = 1;
             return;
         }
@@ -209,21 +208,17 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
         int code = 0;
         if (sscanf(line, "HTTP/%*s %d", &code) != 1 || code != 200) {
             MIMI_LOGE("http_posix", "Proxy CONNECT failed: %s", line);
-            ctx->result = MIMI_ERR_IO;
-            ctx->done = true;
+            http_signal_done(ctx, MIMI_ERR_IO);
             c->is_closing = 1;
             return;
         }
 
         MIMI_LOGI("http_posix", "Proxy CONNECT OK");
 
-        /* Drop proxy response from receive buffer */
         mg_iobuf_del(&c->recv, 0, header_end);
 
-        /* Now tunnel is established: switch to HTTP phase */
         ctx->phase = HTTP_PHASE_HTTP_ACTIVE;
 
-        /* Send real HTTP request over the tunnel (with TLS if needed) */
         http_send_request(c, ctx);
     } else if (ev == MG_EV_HTTP_MSG) {
         struct mg_http_message *hm = (struct mg_http_message *)ev_data;
@@ -233,31 +228,27 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
         size_t n = hm->body.len;
         uint8_t *buf = (uint8_t *)malloc(n + 1);
         if (!buf) {
-            ctx->result = MIMI_ERR_NO_MEM;
+            http_signal_done(ctx, MIMI_ERR_NO_MEM);
         } else {
             memcpy(buf, hm->body.buf, n);
             buf[n] = '\0';
             ctx->resp->body = buf;
             ctx->resp->body_len = n;
-            ctx->result = MIMI_OK;
+            http_signal_done(ctx, MIMI_OK);
         }
-        ctx->done = true;
         c->is_closing = 1;
     } else if (ev == MG_EV_ERROR) {
         const char *err = (const char *) ev_data;
         MIMI_LOGE("http_posix", "Mongoose HTTP error (proxy): %s", err ? err : "(unknown)");
-        ctx->result = MIMI_ERR_IO;
-        ctx->done = true;
+        http_signal_done(ctx, MIMI_ERR_IO);
     } else if (ev == MG_EV_CLOSE) {
         if (!ctx->done) {
             MIMI_LOGE("http_posix", "Connection closed before response (proxy)");
-            ctx->result = MIMI_ERR_IO;
-            ctx->done = true;
+            http_signal_done(ctx, MIMI_ERR_IO);
         }
     }
 }
 
-/* Internal helper: execute HTTP request without proxy. */
 static mimi_err_t mimi_http_exec_direct(const mimi_http_request_t *req, mimi_http_response_t *resp)
 {
     http_ctx_t ctx;
@@ -268,26 +259,45 @@ static mimi_err_t mimi_http_exec_direct(const mimi_http_request_t *req, mimi_htt
     ctx.use_proxy = false;
     ctx.phase = HTTP_PHASE_DIRECT;
 
-    struct mg_mgr mgr;
-    mg_mgr_init(&mgr);
+    if (mimi_mutex_create(&ctx.mutex) != MIMI_OK) {
+        return MIMI_ERR_FAIL;
+    }
+    if (mimi_cond_create(&ctx.cond) != MIMI_OK) {
+        mimi_mutex_destroy(ctx.mutex);
+        return MIMI_ERR_FAIL;
+    }
 
-    struct mg_connection *c = mg_http_connect(&mgr, req->url, http_ev_direct, &ctx);
+    struct mg_mgr *mgr = (struct mg_mgr *)mimi_runtime_get_event_loop();
+    if (!mgr) {
+        mimi_cond_destroy(ctx.cond);
+        mimi_mutex_destroy(ctx.mutex);
+        MIMI_LOGE("http_posix", "Runtime event loop not available");
+        return MIMI_ERR_INVALID_STATE;
+    }
+
+    struct mg_connection *c = mg_http_connect(mgr, req->url, http_ev_direct, &ctx);
     if (!c) {
-        mg_mgr_free(&mgr);
+        mimi_cond_destroy(ctx.cond);
+        mimi_mutex_destroy(ctx.mutex);
         return MIMI_ERR_IO;
     }
 
     uint64_t start = mg_millis();
     uint32_t timeout = req->timeout_ms ? req->timeout_ms : 30000;
+
+    mimi_mutex_lock(ctx.mutex);
     while (!ctx.done) {
-        mg_mgr_poll(&mgr, 10);
         if ((mg_millis() - start) > timeout) {
             ctx.result = MIMI_ERR_TIMEOUT;
             break;
         }
+        mimi_cond_wait(ctx.cond, ctx.mutex, 100);
     }
+    mimi_mutex_unlock(ctx.mutex);
 
-    mg_mgr_free(&mgr);
+    mimi_cond_destroy(ctx.cond);
+    mimi_mutex_destroy(ctx.mutex);
+
     if (!ctx.done && resp->body) {
         free(resp->body);
         resp->body = NULL;
@@ -296,7 +306,6 @@ static mimi_err_t mimi_http_exec_direct(const mimi_http_request_t *req, mimi_htt
     return ctx.result;
 }
 
-/* Internal helper: execute HTTP request via HTTP proxy (CONNECT). */
 static mimi_err_t mimi_http_exec_via_proxy(const mimi_http_request_t *req, mimi_http_response_t *resp)
 {
     http_proxy_config_t cfg;
@@ -317,31 +326,50 @@ static mimi_err_t mimi_http_exec_via_proxy(const mimi_http_request_t *req, mimi_
     ctx.use_proxy = true;
     ctx.phase = HTTP_PHASE_PROXY_HANDSHAKE;
 
-    struct mg_mgr mgr;
-    mg_mgr_init(&mgr);
+    if (mimi_mutex_create(&ctx.mutex) != MIMI_OK) {
+        return MIMI_ERR_FAIL;
+    }
+    if (mimi_cond_create(&ctx.cond) != MIMI_OK) {
+        mimi_mutex_destroy(ctx.mutex);
+        return MIMI_ERR_FAIL;
+    }
+
+    struct mg_mgr *mgr = (struct mg_mgr *)mimi_runtime_get_event_loop();
+    if (!mgr) {
+        mimi_cond_destroy(ctx.cond);
+        mimi_mutex_destroy(ctx.mutex);
+        MIMI_LOGE("http_posix", "Runtime event loop not available");
+        return MIMI_ERR_INVALID_STATE;
+    }
 
     char proxy_url[128];
     snprintf(proxy_url, sizeof(proxy_url), "http://%s:%u", cfg.host, (unsigned)cfg.port);
 
     MIMI_LOGI("http_posix", "Connecting via HTTP proxy %s", proxy_url);
 
-    struct mg_connection *c = mg_http_connect(&mgr, proxy_url, http_ev_proxy, &ctx);
+    struct mg_connection *c = mg_http_connect(mgr, proxy_url, http_ev_proxy, &ctx);
     if (!c) {
-        mg_mgr_free(&mgr);
+        mimi_cond_destroy(ctx.cond);
+        mimi_mutex_destroy(ctx.mutex);
         return MIMI_ERR_IO;
     }
 
     uint64_t start = mg_millis();
     uint32_t timeout = req->timeout_ms ? req->timeout_ms : 30000;
+
+    mimi_mutex_lock(ctx.mutex);
     while (!ctx.done) {
-        mg_mgr_poll(&mgr, 10);
         if ((mg_millis() - start) > timeout) {
             ctx.result = MIMI_ERR_TIMEOUT;
             break;
         }
+        mimi_cond_wait(ctx.cond, ctx.mutex, 100);
     }
+    mimi_mutex_unlock(ctx.mutex);
 
-    mg_mgr_free(&mgr);
+    mimi_cond_destroy(ctx.cond);
+    mimi_mutex_destroy(ctx.mutex);
+
     if (!ctx.done && resp->body) {
         free(resp->body);
         resp->body = NULL;
@@ -370,4 +398,116 @@ void mimi_http_response_free(mimi_http_response_t *resp)
     resp->body = NULL;
     resp->body_len = 0;
     resp->status = 0;
+}
+
+/* HTTP request context for async execution */
+typedef struct {
+    mimi_http_request_t req;
+    mimi_http_response_t *resp;
+    mimi_http_callback_t callback;
+    void *callback_data;
+} http_async_ctx_t;
+
+/* Worker thread function for async HTTP requests */
+static void http_worker_thread_fn(void *arg)
+{
+    http_async_ctx_t *ctx = (http_async_ctx_t *)arg;
+    
+    if (!ctx) {
+        return;
+    }
+    
+    // Execute HTTP request in worker thread
+    mimi_err_t result = mimi_http_exec(&ctx->req, ctx->resp);
+    
+    // Call callback if provided
+    if (ctx->callback) {
+        ctx->callback(result, ctx->resp, ctx->callback_data);
+    }
+    
+    free(ctx);
+}
+
+mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_response_t *resp,
+                               mimi_http_callback_t callback, void *user_data)
+{
+    if (!req || !resp) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    
+    // Allocate request context
+    http_async_ctx_t *ctx = (http_async_ctx_t *)malloc(sizeof(http_async_ctx_t));
+    if (!ctx) {
+        return MIMI_ERR_NO_MEM;
+    }
+    
+    // Initialize context
+    ctx->req = *req;
+    ctx->resp = resp;
+    ctx->callback = callback;
+    ctx->callback_data = user_data;
+    
+    // Get the global event bus
+    event_bus_t *bus = event_bus_get_global();
+    if (!bus) {
+        free(ctx);
+        return MIMI_ERR_INVALID_STATE;
+    }
+    
+    // Post the request to the event bus for async execution
+    // We'll use EVENT_RECV type since it goes from main thread to worker thread
+    int ret = event_bus_post_recv(bus, EVENT_RECV, 
+                                 CONN_TO_ID(ctx), CONN_HTTP_CLIENT, 
+                                 NULL, (uint64_t)ctx, 0);
+    
+    if (ret != 0) {
+        free(ctx);
+        return MIMI_ERR_FAIL;
+    }
+    
+    return MIMI_OK;
+}
+
+/* HTTP event handler for async responses */
+static void http_event_handler(event_dispatcher_t *disp, event_msg_t *msg, void *user_data)
+{
+    (void)disp;
+    (void)user_data;
+    
+    switch (msg->type) {
+        case EVENT_RECV:
+            // This is where we handle async HTTP requests
+            if (msg->user_data) {
+                http_async_ctx_t *ctx = (http_async_ctx_t *)(uintptr_t)msg->user_data;
+                http_worker_thread_fn(ctx);
+            }
+            break;
+        case EVENT_ERROR:
+            MIMI_LOGE("http_posix", "HTTP error: %d", msg->error_code);
+            break;
+        default:
+            break;
+    }
+    
+    if (msg->buf) {
+        io_buf_unref(msg->buf);
+    }
+}
+
+/* Initialize HTTP module */
+mimi_err_t mimi_http_init(void)
+{
+    // Register HTTP event handler for async requests
+    event_dispatcher_t *disp = event_dispatcher_get_global();
+    if (disp) {
+        event_dispatcher_register_handler(disp, CONN_HTTP_CLIENT, http_event_handler, NULL);
+    }
+    
+    return MIMI_OK;
+}
+
+/* Deinitialize HTTP module */
+void mimi_http_deinit(void)
+{
+    // No specific deinitialization needed
 }

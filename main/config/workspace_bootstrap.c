@@ -3,7 +3,7 @@
 #include "config.h"
 #include "fs/fs.h"
 #include "log.h"
-#include "platform/path_utils.h"
+#include "path_utils.h"
 
 #include <stdio.h>
 #include <string.h>

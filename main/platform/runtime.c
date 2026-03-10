@@ -2,6 +2,8 @@
 #include "os/os.h"
 #include "config.h"
 #include "log.h"
+#include "event/event_bus.h"
+#include "event/event_dispatcher.h"
 #include "mongoose.h"
 
 #include <stdbool.h>
@@ -25,6 +27,9 @@ static mimi_task_handle_t s_runtime_thread = NULL;
 /* Mutex for state synchronization */
 static mimi_mutex_t *s_state_mutex = NULL;
 
+/* Event dispatcher */
+static event_dispatcher_t *s_dispatcher = NULL;
+
 /* Event loop thread function */
 static void runtime_thread_fn(void *arg)
 {
@@ -34,7 +39,12 @@ static void runtime_thread_fn(void *arg)
 
     /* Main event loop */
     while (!s_should_exit) {
-        mg_mgr_poll(&s_mgr, 100);
+        mg_mgr_poll(&s_mgr, 10);
+        
+        /* Process send queue - execute pending sends in event loop thread */
+        if (s_dispatcher) {
+            event_dispatcher_drain_send(s_dispatcher);
+        }
     }
 
     MIMI_LOGI(TAG, "Runtime thread exiting");
@@ -100,6 +110,28 @@ mimi_err_t mimi_runtime_init(void)
     /* Set timer event loop */
     mimi_timer_set_event_loop(&s_mgr);
 
+    /* Create event bus */
+    event_bus_t *event_bus = event_bus_create(64);
+    if (!event_bus) {
+        MIMI_LOGE(TAG, "Failed to create event bus");
+        mg_mgr_free(&s_mgr);
+        return MIMI_ERR_FAIL;
+    }
+    
+    /* Set global event bus */
+    event_bus_set_global(event_bus);
+
+    /* Create event dispatcher with 2 worker threads */
+    s_dispatcher = event_dispatcher_create(2, event_bus);
+    if (!s_dispatcher) {
+        MIMI_LOGE(TAG, "Failed to create event dispatcher");
+        event_bus_destroy(event_bus);
+        mg_mgr_free(&s_mgr);
+        return MIMI_ERR_FAIL;
+    }
+    
+    event_dispatcher_set_global(s_dispatcher);
+
     s_state = RUNTIME_STATE_IDLE;
     s_should_exit = false;
     s_runtime_thread = NULL;
@@ -129,10 +161,21 @@ mimi_err_t mimi_runtime_start(void)
 
     mimi_mutex_unlock(s_state_mutex);
 
+    /* Start event dispatcher workers */
+    mimi_err_t err = event_dispatcher_start(s_dispatcher);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to start event dispatcher");
+        mimi_mutex_lock(s_state_mutex);
+        s_state = RUNTIME_STATE_IDLE;
+        mimi_mutex_unlock(s_state_mutex);
+        return err;
+    }
+
     /* Create runtime thread */
-    mimi_err_t err = mimi_task_create("runtime", runtime_thread_fn, NULL, 0, 0, &s_runtime_thread);
+    err = mimi_task_create("runtime", runtime_thread_fn, NULL, 0, 0, &s_runtime_thread);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to create runtime thread");
+        event_dispatcher_stop(s_dispatcher);
         mimi_mutex_lock(s_state_mutex);
         s_state = RUNTIME_STATE_IDLE;
         mimi_mutex_unlock(s_state_mutex);
@@ -166,6 +209,11 @@ void mimi_runtime_stop(void)
         s_runtime_thread = NULL;
     }
 
+    /* Stop event dispatcher */
+    if (s_dispatcher) {
+        event_dispatcher_stop(s_dispatcher);
+    }
+
     mimi_mutex_lock(s_state_mutex);
     s_state = RUNTIME_STATE_STOPPED;
     mimi_mutex_unlock(s_state_mutex);
@@ -181,6 +229,20 @@ void mimi_runtime_deinit(void)
         mimi_mutex_unlock(s_state_mutex);
         mimi_runtime_stop();
         mimi_mutex_lock(s_state_mutex);
+    }
+
+    /* Cleanup event dispatcher */
+    if (s_dispatcher) {
+        event_dispatcher_destroy(s_dispatcher);
+        s_dispatcher = NULL;
+        event_dispatcher_set_global(NULL);
+    }
+
+    /* Cleanup event bus */
+    event_bus_t *event_bus = event_bus_get_global();
+    if (event_bus) {
+        event_bus_destroy(event_bus);
+        event_bus_set_global(NULL);
     }
 
     /* Cleanup Mongoose */
@@ -229,4 +291,9 @@ bool mimi_runtime_should_exit(void)
 void *mimi_runtime_get_event_loop(void)
 {
     return &s_mgr;
+}
+
+void *mimi_runtime_get_dispatcher(void)
+{
+    return s_dispatcher;
 }

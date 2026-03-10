@@ -8,14 +8,14 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              External Interfaces                                     │
-│                                                                                      │
+│                              External Interfaces                                    │
+│                                                                                     │
 │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
 │   │   Telegram   │    │   WebSocket  │    │     CLI      │    │    Feishu    │      │
 │   │     Bot      │    │    Server    │    │   Terminal   │    │     Bot      │      │
-│   │  (HTTPS API) │    │  (WS Protocol)│    │   (STDIO)    │    │  (WS+HTTP)   │      │
+│   │  (HTTPS API) │    │ (WS Protocol)│    │   (STDIO)    │    │  (WS+HTTP)   │      │
 │   └──────┬───────┘    └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │
-└──────────┼──────────────────┼──────────────────┼──────────────────┼────────────────┘
+└──────────┼──────────────────┼──────────────────┼──────────────────┼─────────────────┘
            │                  │                  │                  │
            ▼                  ▼                  ▼                  ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
@@ -108,6 +108,206 @@
 
 ---
 
+## Event-Driven Architecture
+
+### Overview
+
+The platform layer implements an event-driven architecture that separates I/O handling from business logic processing. This ensures the event loop thread never blocks on heavy operations.
+
+### Core Components
+
+#### 1. Event Loop Thread (`runtime.c`)
+
+The single event loop thread handles all I/O operations:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Event Loop Thread                             │
+│                                                                  │
+│  while (!exit) {                                                 │
+│      mg_mgr_poll(10ms);        // Poll all connections           │
+│      process_send_queue();     // Process pending sends          │
+│  }                                                               │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 2. Worker Thread Pool (`event/event_dispatcher.c`)
+
+Worker threads process business logic:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Worker Thread                                 │
+│                                                                  │
+│  while (running) {                                               │
+│      msg = queue_recv(recv_queue);  // Block until message       │
+│      handler(&msg);                  // Process business logic   │
+│  }                                                               │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 3. Dual Queue System (`event/event_bus.c`)
+
+Two message queues bridge the event loop and worker threads:
+
+| Queue | Direction | Purpose |
+|-------|-----------|---------|
+| `recv_queue` | Event Loop → Workers | Deliver received data to business logic |
+| `send_queue` | Workers → Event Loop | Send data from any thread safely |
+
+### Data Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         EVENT LOOP THREAD                                    │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ mg_mgr_poll()                                                          │  │
+│  │     │                                                                  │  │
+│  │     ├──▶ HTTP Response ──▶ http_ev_handler() ──▶ Signal cond_wait     │  │
+│  │     │                                                                  │  │
+│  │     ├──▶ WS Message ──▶ ws_event_handler()                            │  │
+│  │     │                         │                                        │  │
+│  │     │                         ▼                                        │  │
+│  │     │                   io_buf_from_const(data)                        │  │
+│  │     │                         │                                        │  │
+│  │     │                         ▼                                        │  │
+│  │     │                   event_bus_post_recv() ──────▶ recv_queue       │  │
+│  │     │                                                  (non-blocking)  │  │
+│  │     │                                                                  │  │
+│  │     └──▶ Connection Events (connect/disconnect/error)                 │  │
+│  │                                                                        │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ process_send_queue()                                                   │  │
+│  │     │                                                                  │  │
+│  │     ▼                                                                  │  │
+│  │   while (try_recv(send_queue, &msg)) {                                 │  │
+│  │       switch (msg.type) {                                              │  │
+│  │           case EVENT_MSG_SEND:                                         │  │
+│  │               mg_ws_send(conn, buf);  // Actual send                   │  │
+│  │               io_buf_unref(buf);                                       │  │
+│  │               break;                                                   │  │
+│  │           case EVENT_MSG_CLOSE:                                        │  │
+│  │               mg_close_conn(conn);                                     │  │
+│  │               break;                                                   │  │
+│  │       }                                                                │  │
+│  │   }                                                                    │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                    │                                       ▲
+                    ▼                                       │
+           ┌──────────────┐                        ┌──────────────┐
+           │  recv_queue  │                        │  send_queue  │
+           └──────────────┘                        └──────────────┘
+                    │                                       ▲
+                    ▼                                       │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         WORKER THREAD                                        │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ queue_recv(recv_queue, &msg, timeout)   // Blocking wait              │  │
+│  │     │                                                                  │  │
+│  │     ▼                                                                  │  │
+│  │ handler = find_handler(msg.conn_type)                                  │  │
+│  │     │                                                                  │  │
+│  │     ▼                                                                  │  │
+│  │ handler(&msg, user_data)               // Business logic              │  │
+│  │     │                                                                  │  │
+│  │     ├──▶ Parse JSON                                                    │  │
+│  │     ├──▶ Call LLM API                                                  │  │
+│  │     ├──▶ Execute tools                                                 │  │
+│  │     │                                                                  │  │
+│  │     ▼                                                                  │  │
+│  │ io_buf_unref(msg.buf)                  // Cleanup                     │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ To send response:                                                      │  │
+│  │                                                                        │  │
+│  │   buf = io_buf_from_const(data)                                        │  │
+│  │   event_bus_post_send(conn_id, buf) ──────▶ send_queue                │  │
+│  │   io_buf_unref(buf)                                                    │  │
+│  │                                                                        │  │
+│  │ Returns immediately - actual send happens in event loop                │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Zero-Copy Buffer (`io_buf.h`)
+
+Reference-counted buffer for efficient data transfer:
+
+```c
+typedef struct io_buf {
+    uint8_t *base;          // Data pointer (named for libuv compatibility)
+    size_t len;             // Data length
+    volatile int refcount;  // Reference count
+    size_t capacity;        // Allocated capacity
+} io_buf_t;
+
+// Usage pattern:
+io_buf_t *buf = io_buf_from_const(data, len);  // refcount = 1
+event_bus_post_recv(..., buf);                  // queue holds reference
+io_buf_unref(buf);                              // release our reference
+// Buffer freed when last reference is released
+```
+
+### HTTP Integration
+
+HTTP requests use the shared event loop with condition variable synchronization:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Calling Thread (e.g., Worker)                                   │
+│                                                                  │
+│  mimi_http_exec(req, resp)                                       │
+│      │                                                           │
+│      ├──▶ Create mutex + condition variable                      │
+│      ├──▶ mg_http_connect(mgr, url, handler, ctx)                │
+│      │        │                                                  │
+│      │        └── Connection added to shared event loop          │
+│      │                                                           │
+│      ├──▶ cond_wait(ctx.cond, ctx.mutex, timeout)  // Block      │
+│      │                                                           │
+│      └──▶ Return when signaled by event loop                     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+                    │
+                    ▼ (connection added to shared mgr)
+┌─────────────────────────────────────────────────────────────────┐
+│  Event Loop Thread                                               │
+│                                                                  │
+│  mg_mgr_poll()                                                   │
+│      │                                                           │
+│      ├──▶ HTTP response received                                 │
+│      │                                                           │
+│      └──▶ http_ev_handler()                                      │
+│              │                                                   │
+│              ├──▶ Copy response body                             │
+│              │                                                   │
+│              └──▶ cond_signal(ctx.cond)  // Wake caller          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Principles
+
+| Principle | Implementation |
+|-----------|----------------|
+| **Non-blocking I/O** | Event loop uses 10ms poll timeout |
+| **Thread safety** | All mongoose operations in event loop thread |
+| **Zero-copy** | `io_buf` with reference counting |
+| **Separation of concerns** | I/O in event loop, business logic in workers |
+| **Backward compatible** | HTTP API remains synchronous for callers |
+
+---
+
 ## Layered Architecture
 
 ### 1. Platform Layer (`main/platform/`)
@@ -115,8 +315,10 @@
 The foundation layer providing OS abstraction and basic services.
 
 **Components:**
-- **OS Abstraction** (`os/`): Task/thread management, mutexes, sleep functions
+- **OS Abstraction** (`os/`): Task/thread management, mutexes, condition variables, sleep functions
 - **Runtime** (`runtime.c/h`): Event loop management, cleanup callbacks
+- **Event System** (`event/event_bus.c/h`, `event/event_dispatcher.c/h`): Message queues and worker pool
+- **I/O Buffer** (`io_buf.c/h`): Reference-counted zero-copy buffers
 - **Logging** (`log.h`): Unified logging interface
 - **Time** (`mimi_time.h`): Time and delay functions
 - **File System** (`fs/`): VFS and direct file system operations
@@ -124,7 +326,8 @@ The foundation layer providing OS abstraction and basic services.
 **Key Design:**
 - Platform-agnostic APIs that work on both POSIX and FreeRTOS
 - No business logic dependencies
-- Provides services via callback registration (e.g., cleanup callbacks)
+- Event-driven I/O with worker thread pool
+- Provides services via callback registration
 
 ### 2. Gateway Layer (`main/gateway/`)
 
@@ -138,10 +341,10 @@ Transport protocol abstraction layer. Each gateway handles a specific communicat
 - **WebSocket Gateway** (`websocket/`): WebSocket server and client
 
 **Key Design:**
-- Each gateway owns its own thread(s) for I/O operations
-- Thread creation happens in gateway's `start()` implementation
+- Gateways use shared event loop (no separate threads for I/O)
+- Events posted to queues for worker thread processing
+- Thread-safe send operations via send queue
 - Gateways are protocol-agnostic and don't know about business logic
-- Channel layer uses gateways via the unified interface
 
 **Gateway Interface:**
 ```c
@@ -184,27 +387,39 @@ Business logic layer handling protocol-specific message processing.
 
 **Key Design:**
 - Each channel uses one or more gateways for transport
-- Channels register callbacks with gateways to receive messages
+- Channels register event handlers with dispatcher
 - Channels handle protocol-specific message formatting
-- Thread management is delegated to gateways
+- Business logic runs in worker threads
 
 **Channel-Gateway Relationship:**
 ```
 Channel (Business Logic)
     │
-    │ 1. Find gateway
-    │ 2. Register callback
-    │ 3. Call gateway_start()
+    │ 1. Register handler with dispatcher
+    │ 2. Configure gateway
+    │ 3. Start gateway (uses shared event loop)
     │
     ▼
-Gateway (Transport)
+Event Loop (I/O)
     │
-    │ 1. Create thread(s)
-    │ 2. Handle I/O
-    │ 3. Call channel callback
+    │ 1. Receive data
+    │ 2. Post to recv_queue
     │
     ▼
-Channel (Process message)
+Worker Thread
+    │
+    │ 1. Call channel handler
+    │ 2. Process business logic
+    │ 3. Post send to send_queue
+    │
+    ▼
+Event Loop
+    │
+    │ 1. Process send_queue
+    │ 2. Actual network send
+    │
+    ▼
+External
 ```
 
 ### 4. Command System (`main/commands/`)
@@ -248,92 +463,33 @@ Shared command system used by all channels.
 
 ---
 
-## Data Flow
-
-### Inbound Message Flow
-
-```
-1. External input received
-   (Telegram HTTPS / WebSocket / STDIO / Feishu)
-   
-2. Gateway layer processes transport
-   - Gateway thread receives raw data
-   - Protocol-specific parsing
-   
-3. Gateway calls channel callback
-   - on_message(gateway, session_id, content, channel_data)
-   
-4. Channel processes business logic
-   - Parse commands or chat messages
-   - Wrap in mimi_msg_t
-   
-5. Message pushed to Inbound Queue
-   
-6. Agent Loop processes message
-   - Load session history
-   - Build context (SOUL.md + USER.md + memory)
-   - Call LLM API with ReAct loop
-   - Push response to Outbound Queue
-```
-
-### Outbound Message Flow
-
-```
-7. Outbound Dispatch receives message
-   - Routes by channel field
-   
-8. Channel sends via gateway
-   - channel_send() → gateway_send()
-   
-9. Gateway transmits to external
-   - HTTP POST / WebSocket frame / STDIO output
-```
-
----
-
 ## Thread Model
 
 ### Thread Ownership
 
 | Component | Thread Ownership | Notes |
 |-----------|-----------------|-------|
-| **Platform Layer** | None | Provides thread creation API only |
-| **Gateway Layer** | Each gateway owns its thread(s) | Created in gateway_start() |
-| **Channel Layer** | None | Uses gateway threads via callbacks |
+| **Platform Layer** | Event Loop Thread | Single shared event loop |
+| **Event Dispatcher** | Worker Pool (2 threads) | Process business logic |
+| **Gateway Layer** | Uses shared event loop | No separate threads |
+| **Channel Layer** | Uses worker pool | Handlers run in workers |
 | **Agent Loop** | Owns one thread | Message processing |
 | **Outbound Dispatch** | Owns one thread | Message routing |
 | **Heartbeat** | Owns one thread | Periodic tasks |
 | **Cron Service** | Owns one thread | Scheduled jobs |
 
-### Thread Creation Pattern
+### Thread Interaction
 
-```c
-// Gateway implementation example
-static void gateway_task(void *arg)
-{
-    while (s_running) {
-        // Poll for I/O
-        poll_io();
-        mimi_sleep_ms(100);
-    }
-}
-
-mimi_err_t gateway_start(gateway_t *gw)
-{
-    // Initialize resources
-    
-    // Create thread for I/O
-    s_running = true;
-    return mimi_task_create_detached("gateway_name", gateway_task, NULL);
-}
-
-mimi_err_t gateway_stop(gateway_t *gw)
-{
-    // Signal thread to stop
-    s_running = false;
-    
-    // Cleanup resources
-}
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Event Loop     │     │  Worker Pool    │     │  Agent Loop     │
+│  (runtime.c)    │     │  (dispatcher)   │     │  (agent_loop)   │
+├─────────────────┤     ├─────────────────┤     ├─────────────────┤
+│ mg_mgr_poll()   │────▶│ recv_queue      │     │                 │
+│                 │     │                 │────▶│ inbound_queue   │
+│ process_send()  │◀────│ send_queue      │     │                 │
+│                 │     │                 │◀────│ outbound_queue  │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
 ---
@@ -348,9 +504,14 @@ main/
 │
 ├── platform/                   # Platform Layer
 │   ├── os/                     # OS Abstraction
-│   │   ├── os.h                # OS interface
+│   │   ├── os.h                # OS interface (task, mutex, cond)
 │   │   └── posix_impl/         # POSIX implementation
-│   ├── runtime.c/h             # Runtime management
+│   ├── runtime.c/h             # Event loop management
+│   ├── event/
+│   │   ├── event_bus.c/h       # Event bus (cross-thread message transport)
+│   │   ├── event_dispatcher.c/h # Worker thread pool
+│   │   └── io_buf.c/h          # Reference-counted I/O buffer
+│   ├── queue.c/h               # Thread-safe queue
 │   ├── log.h                   # Logging interface
 │   ├── mimi_time.h             # Time functions
 │   ├── mimi_err.h              # Error codes
@@ -360,34 +521,22 @@ main/
 │
 ├── gateway/                    # Gateway Layer
 │   ├── gateway.h               # Gateway interface
-│   ├── gateway.c               # Gateway base implementation
-│   ├── gateway_manager.c/h     # Gateway lifecycle management
-│   ├── stdio/                  # STDIO Gateway
-│   │   ├── stdio_gateway.c/h
-│   │   └── stdio_transport.c/h
-│   ├── http/                   # HTTP Gateway
-│   │   └── http_gateway.c/h
-│   └── websocket/              # WebSocket Gateway
-│       ├── ws_gateway.c/h      # WebSocket Server
-│       └── ws_client_gateway.c/h  # WebSocket Client
+│   ├── gateway_manager.c/h     # Gateway registry
+│   ├── stdio/                  # STDIO transport
+│   ├── http/                   # HTTP client
+│   └── websocket/              # WebSocket server/client
 │
 ├── channels/                   # Channel Layer
 │   ├── channel.h               # Channel interface
-│   ├── channel_manager.c/h     # Channel lifecycle management
-│   ├── cli/                    # CLI Channel
-│   │   └── cli_channel.c/h
-│   ├── telegram/               # Telegram Channel
-│   │   └── telegram_channel.c/h
-│   ├── feishu/                 # Feishu Channel
-│   │   └── feishu_channel.c/h
-│   ├── websocket/              # WebSocket Channel
-│   │   └── ws_channel.c/h
-│   └── qq/                     # QQ Channel
-│       └── qq_channel.c/h
+│   ├── channel_manager.c/h     # Channel registry
+│   ├── cli/                    # CLI channel
+│   ├── telegram/               # Telegram channel
+│   ├── feishu/                 # Feishu channel
+│   ├── websocket/              # WebSocket channel
+│   └── qq/                     # QQ channel
 │
 ├── commands/                   # Command System
-│   ├── command.h               # Command interface
-│   ├── command_registry.c/h    # Command registration
+│   ├── command_registry.c/h    # Command registry
 │   ├── cmd_help.c              # /help command
 │   ├── cmd_session.c           # /session command
 │   ├── cmd_set.c               # /set command
@@ -395,233 +544,53 @@ main/
 │   ├── cmd_memory.c            # /memory_read command
 │   └── cmd_exit.c              # /exit command
 │
-├── cli/                        # CLI Framework
-│   ├── cli_terminal.c/h        # Terminal abstraction
-│   ├── editor.c/h              # Line editor
-│   └── cli.md                  # Documentation
-│
 ├── bus/                        # Message Bus
-│   ├── message_bus.h           # Message format
-│   └── message_bus.c           # Queue implementation
+│   └── message_bus.c/h         # Inbound/outbound queues
 │
 ├── agent/                      # Agent System
-│   ├── agent_loop.c/h          # Main agent task
-│   ├── context_builder.c/h     # Context building
-│   └── agent.h                 # Agent interface
+│   ├── agent_loop.c/h          # Main agent loop
+│   └── context_builder.c/h     # Context building
 │
 ├── llm/                        # LLM Integration
-│   ├── llm_proxy.c/h           # LLM API client
-│   └── llm_provider.h          # Provider interface
+│   └── llm_proxy.c/h           # LLM API client
 │
 ├── tools/                      # Tool System
-│   ├── tool_registry.c/h       # Tool registration
-│   ├── tool_web_search.c/h     # Web search tool
-│   └── tool_execute.c/h        # Tool execution
+│   ├── tool_registry.c/h       # Tool registry
+│   ├── tool_web_search.c       # Web search tool
+│   ├── tool_get_time.c         # Time tool
+│   ├── tool_files.c            # File operations
+│   └── tool_cron.c             # Cron tool
 │
 ├── memory/                     # Memory System
 │   ├── memory_store.c/h        # Long-term memory
-│   ├── session_mgr.c/h         # Session management
-│   └── memory.h                # Memory interface
-│
-├── router/                     # Message Router
-│   └── router.c/h              # Message routing
-│
-├── heartbeat/                  # Heartbeat Service
-│   └── heartbeat.c/h           # Periodic status updates
-│
-├── cron/                       # Cron Service
-│   └── cron_service.c/h        # Scheduled tasks
+│   └── session_mgr.c/h         # Session management
 │
 ├── skills/                     # Skills System
-│   └── skills.c/h              # Skill management
+│   └── skill_loader.c/h        # Dynamic skill loading
+│
+├── router/                     # Router Layer
+│   └── router.c/h              # Message routing
 │
 ├── config/                     # Configuration
-│   └── config.c/h              # Runtime configuration
+│   ├── config.c/h              # Config loading
+│   └── workspace_bootstrap.c   # Workspace setup
 │
-├── app/                        # Application Layer
-│   └── app.c/h                 # Application initialization
+├── cli/                        # CLI Framework
+│   ├── cli_terminal.c/h        # Terminal handling
+│   └── editor.c/h              # Line editor
 │
-└── utils/                      # Utilities
-    ├── json_utils.c/h          # JSON helpers
-    └── string_utils.c/h        # String helpers
+├── cron/                       # Cron Service
+│   └── cron_service.c/h        # Scheduled jobs
+│
+├── heartbeat/                  # Heartbeat Service
+│   └── heartbeat.c/h           # Periodic heartbeat
+│
+├── proxy/                      # HTTP Proxy
+│   └── http_proxy.c/h          # Proxy configuration
+│
+└── wifi/                       # WiFi Manager (ESP32)
+    └── wifi_manager.c/h        # WiFi management
 ```
-
----
-
-## Key Design Principles
-
-### 1. Layer Isolation
-
-- **Platform Layer**: No dependencies on upper layers
-- **Gateway Layer**: Only depends on Platform Layer
-- **Channel Layer**: Depends on Gateway and Platform Layers
-- **Application Layer**: Orchestrates all layers
-
-### 2. Thread Ownership
-
-- Each component that needs concurrent execution owns its thread(s)
-- No shared threads between components
-- Communication via queues and callbacks
-
-### 3. Callback-Based Communication
-
-- Gateways notify channels via callbacks
-- Channels don't poll gateways
-- Platform layer uses cleanup callbacks for business logic
-
-### 4. Protocol Abstraction
-
-- Gateway layer abstracts transport protocols
-- Channel layer abstracts business logic
-- Easy to add new protocols or channels
-
----
-
-## Configuration
-
-### Build-time Configuration (`mimi_secrets.h`)
-
-| Define | Description |
-|--------|-------------|
-| `MIMI_SECRET_WIFI_SSID` | WiFi SSID (ESP32) |
-| `MIMI_SECRET_WIFI_PASS` | WiFi password (ESP32) |
-| `MIMI_SECRET_API_KEY` | LLM API key |
-| `MIMI_SECRET_MODEL` | Model ID |
-
-### Runtime Configuration (`~/.mimiclaw/config.json`)
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "claude-3-opus-20240229",
-      "provider": "anthropic",
-      "maxTokens": 4096
-    }
-  },
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "token": "YOUR_TOKEN"
-    }
-  },
-  "providers": {
-    "anthropic": {
-      "apiKey": "YOUR_KEY",
-      "apiBase": "https://api.anthropic.com/v1"
-    }
-  }
-}
-```
-
----
-
-## Storage Layout (VFS)
-
-```
-~/.mimiclaw/
-├── config.json                 # Runtime configuration (real path)
-└── workspace/                  # VFS base directory
-    ├── config/
-    │   ├── SOUL.md            # AI personality
-    │   └── USER.md            # User profile
-    ├── memory/
-    │   ├── MEMORY.md          # Long-term memory
-    │   └── daily/             # Daily notes
-    │       └── 2024-01-01.md
-    ├── sessions/              # Session files
-    │   ├── cli_default.jsonl
-    │   ├── tg_12345.jsonl
-    │   └── ws_client1.jsonl
-    └── skills/                # Skill files
-        └── weather.md
-```
-
----
-
-## Startup Sequence
-
-### Initialization Phase (app_init)
-
-```
-app_init()
-  ├── mimi_fs_init()              # Initialize VFS
-  ├── posix_fs_register()         # Register POSIX filesystem
-  ├── mimi_workspace_bootstrap()  # Setup workspace
-  ├── mimi_kv_init()              # Initialize KV store
-  ├── http_proxy_init()           # Initialize HTTP proxy
-  ├── message_bus_init()          # Create inbound/outbound queues
-  ├── mimi_runtime_init()         # Initialize runtime
-  ├── command_system_auto_init()  # Initialize command system
-  ├── gateway_system_init()       # Initialize gateway system
-  │   ├── gateway_manager_init()  # Init gateway manager
-  │   ├── Register all gateways   # STDIO, WS, HTTP, WS Client
-  │   └── Initialize gateways     # Call gateway_init() for each
-  ├── channel_system_init()       # Initialize channel system
-  │   ├── router_init()           # Initialize message router
-  │   ├── channel_manager_init()  # Init channel manager
-  │   └── Register all channels   # CLI, Telegram, Feishu, QQ, WS
-  ├── memory_store_init()         # Initialize memory system
-  ├── skill_loader_init()         # Initialize skill loader
-  ├── session_mgr_init()          # Initialize session manager
-  ├── tool_registry_init()        # Initialize tool registry
-  ├── llm_proxy_init()            # Initialize LLM proxy
-  └── agent_loop_init()           # Initialize agent loop
-```
-
-### Startup Phase (app_start)
-
-```
-app_start()
-  ├── agent_loop_start()          # Start agent processing
-  ├── Create outbound_dispatch task  # Message routing task
-  ├── cron_service_init/start()   # Start cron service
-  ├── heartbeat_init/start()      # Start heartbeat service
-  ├── Register cleanup callbacks  # Register app_cleanup()
-  ├── gateway_system_start()      # Start all gateways
-  │   └── Each gateway creates its thread(s)
-  ├── channel_system_start()      # Start all channels
-  │   └── Each channel starts its gateway(s)
-  └── Application ready
-```
-
-### Runtime Phase (app_run)
-
-```
-app_run()
-  └── mimi_runtime_run()          # Main event loop
-      └── Cleanup on exit
-          ├── Execute cleanup callbacks
-          ├── Stop all channels
-          └── Stop all gateways
-```
-
-### Key Functions
-
-| Function | Phase | Description |
-|----------|-------|-------------|
-| `gateway_system_init()` | Init | Register and initialize all gateways |
-| `gateway_system_start()` | Start | Start all gateways (create threads) |
-| `gateway_system_stop()` | Stop | Stop all gateways |
-| `channel_system_init()` | Init | Register and initialize all channels |
-| `channel_system_start()` | Start | Start all channels |
-| `channel_system_stop()` | Stop | Stop all channels |
-
----
-
-## Migration Status
-
-| Component | Status | Location |
-|-----------|--------|----------|
-| Platform Layer | ✅ Completed | `platform/` |
-| Gateway Layer | ✅ Completed | `gateway/` |
-| Channel Layer | ✅ Completed | `channels/` |
-| Command System | ✅ Completed | `commands/` |
-| Message Bus | ✅ Completed | `bus/` |
-| Agent System | ✅ Completed | `agent/` |
-| Tool System | ✅ Completed | `tools/` |
-| Memory System | ✅ Completed | `memory/` |
-| VFS Layer | ✅ Completed | `platform/fs/` |
 
 ---
 
@@ -629,7 +598,7 @@ app_run()
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux (POSIX) | ✅ Supported | Full feature set |
-| macOS (POSIX) | ✅ Supported | Full feature set |
-| ESP32 (FreeRTOS) | 🔄 In Progress | WiFi, OTA, SPIFFS |
+| Linux | ✅ Supported | Primary development platform |
+| macOS | ✅ Supported | POSIX compatible |
+| ESP32 | 🔄 In Progress | FreeRTOS-based |
 | Windows | 🔄 In Progress | Basic support |

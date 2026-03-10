@@ -7,7 +7,7 @@
  */
 
 #include "commands/command.h"
-#include "platform/fs/fs.h"
+#include "fs/fs.h"
 #include "config/config.h"
 #include "log.h"
 #include <string.h>

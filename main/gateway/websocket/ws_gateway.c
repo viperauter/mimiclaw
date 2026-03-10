@@ -7,8 +7,10 @@
 
 #include "gateway/websocket/ws_gateway.h"
 #include "router/router.h"
-#include "platform/log.h"
-#include "platform/runtime.h"
+#include "log.h"
+#include "runtime.h"
+#include "event/event_bus.h"
+#include "event/event_dispatcher.h"
 
 #include "mongoose.h"
 #include "cJSON.h"
@@ -94,10 +96,10 @@ static void remove_client(struct mg_connection *c)
 
             MIMI_LOGI(TAG, "Client disconnected: %s", tmp->session_id);
 
-            /* Call gateway disconnect callback */
-            gateway_t *gw = &g_ws_gateway;
-            if (gw->on_disconnect_cb) {
-                gw->on_disconnect_cb(gw, tmp->session_id, gw->callback_user_data);
+            /* Post disconnect event to recv queue */
+            event_bus_t *bus = event_bus_get_global();
+            if (bus) {
+                event_bus_post_recv(bus, EVENT_DISCONNECT, (uint64_t)c, CONN_WS_SERVER, NULL, (uint64_t)tmp->session_id, 0);
             }
 
             free(tmp);
@@ -108,11 +110,11 @@ static void remove_client(struct mg_connection *c)
 }
 
 /**
- * WebSocket event handler
+ * WebSocket event handler - runs in event loop thread
  */
 static void ws_ev(struct mg_connection *c, int ev, void *ev_data)
 {
-    gateway_t *gw = &g_ws_gateway;
+    (void)c;
 
     if (ev == MG_EV_HTTP_MSG) {
         struct mg_http_message *hm = (struct mg_http_message *)ev_data;
@@ -121,61 +123,111 @@ static void ws_ev(struct mg_connection *c, int ev, void *ev_data)
             mg_ws_upgrade(c, hm, NULL);
             ws_client_t *cl = add_client(c);
 
-            /* Call connect callback */
-            if (cl && gw->on_connect_cb) {
-                gw->on_connect_cb(gw, cl->session_id, gw->callback_user_data);
+            /* Post connect event to recv queue */
+            if (cl) {
+                event_bus_t *bus = event_bus_get_global();
+                if (bus) {
+                    event_bus_post_recv(bus, EVENT_CONNECT, (uint64_t)c, CONN_WS_SERVER, NULL, (uint64_t)cl->session_id, 0);
+                }
             }
         }
     } else if (ev == MG_EV_WS_MSG) {
         struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
 
-        char *payload = (char *)malloc((size_t)wm->data.len + 1);
-        if (!payload) return;
-        memcpy(payload, wm->data.buf, (size_t)wm->data.len);
-        payload[wm->data.len] = '\0';
-
         ws_client_t *client = find_client_by_conn(c);
         if (!client) {
-            free(payload);
             return;
         }
 
-        cJSON *root = cJSON_Parse(payload);
-        free(payload);
-        if (!root) {
-            MIMI_LOGW(TAG, "Invalid JSON from WS client %s", client->session_id);
+        /* Create io_buf from message data */
+        io_buf_t *buf = io_buf_from_const(wm->data.buf, wm->data.len);
+        if (!buf) {
             return;
         }
 
-        cJSON *type = cJSON_GetObjectItem(root, "type");
-        cJSON *content = cJSON_GetObjectItem(root, "content");
-
-        if (type && cJSON_IsString(type) &&
-            content && cJSON_IsString(content)) {
-
-            /* Update session_id if provided */
-            cJSON *sid = cJSON_GetObjectItem(root, "session_id");
-            if (sid && cJSON_IsString(sid)) {
-                strncpy(client->session_id, sid->valuestring,
-                        sizeof(client->session_id) - 1);
-            }
-
-            MIMI_LOGI(TAG, "WS message from %s: %.40s...",
-                      client->session_id, content->valuestring);
-
-            /* Call message callback */
-            if (gw->on_message_cb) {
-                gw->on_message_cb(gw, client->session_id,
-                                  content->valuestring,
-                                  gw->callback_user_data);
-            }
+        /* Post recv event to queue - NON-BLOCKING */
+        event_bus_t *bus = event_bus_get_global();
+        if (bus) {
+            event_bus_post_recv(bus, EVENT_RECV, (uint64_t)c, CONN_WS_SERVER, buf, (uint64_t)client->session_id, 0);
         }
 
-        cJSON_Delete(root);
+        /* Unref our reference - queue holds one */
+        io_buf_unref(buf);
     } else if (ev == MG_EV_CLOSE) {
         if (c->is_websocket) {
             remove_client(c);
         }
+    }
+}
+
+/* Event handler - runs in worker thread */
+static void ws_server_event_handler(event_dispatcher_t *disp, event_msg_t *msg, void *user_data)
+{
+    (void)disp;
+    (void)user_data;
+    gateway_t *gw = &g_ws_gateway;
+    
+    char *session_id = (char *)msg->user_data;
+    
+    switch (msg->type) {
+        case EVENT_CONNECT:
+            if (session_id && gw->on_connect_cb) {
+                gw->on_connect_cb(gw, session_id, gw->callback_user_data);
+            }
+            break;
+            
+        case EVENT_RECV: {
+            if (!msg->buf || !session_id) {
+                break;
+            }
+            
+            char *payload = (char *)malloc(msg->buf->len + 1);
+            if (!payload) {
+                break;
+            }
+            memcpy(payload, msg->buf->base, msg->buf->len);
+            payload[msg->buf->len] = '\0';
+
+            cJSON *root = cJSON_Parse(payload);
+            free(payload);
+            if (!root) {
+                MIMI_LOGW(TAG, "Invalid JSON from WS client %s", session_id);
+                break;
+            }
+
+            cJSON *type = cJSON_GetObjectItem(root, "type");
+            cJSON *content = cJSON_GetObjectItem(root, "content");
+
+            if (type && cJSON_IsString(type) &&
+                content && cJSON_IsString(content)) {
+
+                MIMI_LOGI(TAG, "WS message from %s: %.40s...",
+                          session_id, content->valuestring);
+
+                /* Call message callback */
+                if (gw->on_message_cb) {
+                    gw->on_message_cb(gw, session_id,
+                                      content->valuestring,
+                                      gw->callback_user_data);
+                }
+            }
+
+            cJSON_Delete(root);
+            break;
+        }
+            
+        case EVENT_DISCONNECT:
+            if (session_id && gw->on_disconnect_cb) {
+                gw->on_disconnect_cb(gw, session_id, gw->callback_user_data);
+            }
+            break;
+            
+        default:
+            break;
+    }
+    
+    if (msg->buf) {
+        io_buf_unref(msg->buf);
     }
 }
 
@@ -288,9 +340,23 @@ static mimi_err_t ws_gateway_send_impl(gateway_t *gw, const char *session_id,
     cJSON_Delete(resp);
     if (!json_str) return MIMI_ERR_NO_MEM;
 
-    mg_ws_send(client->c, json_str, strlen(json_str), WEBSOCKET_OP_TEXT);
+    /* Create io_buf and post to send queue */
+    io_buf_t *buf = io_buf_from_const(json_str, strlen(json_str));
     free(json_str);
-    return MIMI_OK;
+    
+    if (!buf) {
+        return MIMI_ERR_NO_MEM;
+    }
+
+    /* Post to send queue - will be processed in event loop */
+    event_bus_t *bus = event_bus_get_global();
+    int ret = -1;
+    if (bus) {
+        ret = event_bus_post_send(bus, (uint64_t)client->c, CONN_WS_SERVER, buf, 0);
+    }
+    io_buf_unref(buf);
+
+    return (ret == 0) ? MIMI_OK : MIMI_ERR_IO;
 }
 
 /* Global WebSocket Gateway instance */
@@ -316,6 +382,12 @@ gateway_t g_ws_gateway = {
 
 mimi_err_t ws_gateway_module_init(void)
 {
+    /* Register event handler with dispatcher */
+    event_dispatcher_t *disp = (event_dispatcher_t *)mimi_runtime_get_dispatcher();
+    if (disp) {
+        event_dispatcher_register_handler(disp, CONN_WS_SERVER, ws_server_event_handler, NULL);
+    }
+    
     return MIMI_OK;
 }
 

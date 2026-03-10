@@ -14,7 +14,7 @@
 #include "mimi_err.h"
 #include "mimi_time.h"
 #include "runtime.h"
-#include "platform/path_utils.h"
+#include "path_utils.h"
 
 #include "config.h"
 #include "workspace_bootstrap.h"
@@ -236,6 +236,14 @@ mimi_err_t app_start(void)
         }
     }
 
+    /* Start Runtime (event loop in separate thread) FIRST
+     * HTTP and WebSocket need the event loop running */
+    if (mimi_runtime_start() != MIMI_OK) {
+        MIMI_LOGE("app", "Failed to start runtime");
+        return MIMI_ERR_FAIL;
+    }
+    MIMI_LOGI("app", "Runtime started");
+
     /* Start Gateway System */
     if (gateway_system_start() != MIMI_OK) {
         MIMI_LOGE("app", "Failed to start gateway system");
@@ -249,13 +257,6 @@ mimi_err_t app_start(void)
         return MIMI_ERR_FAIL;
     }
     MIMI_LOGI("app", "Channel system started");
-
-    /* Start Runtime (event loop in separate thread) */
-    if (mimi_runtime_start() != MIMI_OK) {
-        MIMI_LOGE("app", "Failed to start runtime");
-        return MIMI_ERR_FAIL;
-    }
-    MIMI_LOGI("app", "Runtime started");
 
     s_app_started = true;
     MIMI_LOGI("app", "Application started");

@@ -19,6 +19,7 @@ enum {
     MIMI_ERR_PERMISSION_DENIED = -9,
     MIMI_ERR_ALREADY_EXISTS = -10,
     MIMI_ERR_EXIT = -11,  /* Request to exit the application */
+    MIMI_ERR_WOULD_BLOCK = -12,  /* Non-blocking operation would block */
 };
 
 const char *mimi_err_to_name(mimi_err_t err);

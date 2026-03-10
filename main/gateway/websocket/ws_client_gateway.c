@@ -5,11 +5,13 @@
  */
 
 #include "gateway/websocket/ws_client_gateway.h"
-#include "platform/log.h"
-#include "platform/runtime.h"
-#include "platform/websocket/websocket.h"
-#include "platform/os/os.h"
-#include "platform/mimi_time.h"
+#include "log.h"
+#include "runtime.h"
+#include "websocket/websocket.h"
+#include "os/os.h"
+#include "mimi_time.h"
+#include "event/event_bus.h"
+#include "event/event_dispatcher.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -21,16 +23,32 @@ static const char *TAG = "gw_ws_client";
 static ws_client_gateway_priv_t s_ws_client_priv = {0};
 static gateway_t g_ws_client_gateway = {0};
 
-/* WebSocket event handler */
-static void ws_client_event_handler(mimi_websocket_t *ws, mimi_ws_event_t event, 
-                                   const uint8_t *data, size_t data_len, 
-                                   void *user_data)
+/* Find priv by conn_id (user_data in event_msg) */
+static ws_client_gateway_priv_t *find_priv_by_user_data(uint64_t user_data)
 {
     ws_client_gateway_priv_t *priv = (ws_client_gateway_priv_t *)user_data;
+    if (priv == &s_ws_client_priv) {
+        return priv;
+    }
+    return NULL;
+}
+
+/* Event handler - runs in worker thread */
+static void ws_client_event_handler(event_dispatcher_t *disp, event_msg_t *msg, void *user_data)
+{
+    (void)disp;
+    (void)user_data;
     
-    switch (event) {
-        case MIMI_WS_EVENT_CONNECTED:
-        {
+    ws_client_gateway_priv_t *priv = find_priv_by_user_data(msg->user_data);
+    if (!priv) {
+        if (msg->buf) {
+            io_buf_unref(msg->buf);
+        }
+        return;
+    }
+    
+    switch (msg->type) {
+        case EVENT_CONNECT:
             MIMI_LOGI(TAG, "WebSocket client connected to %s", priv->url);
             priv->connected = true;
             priv->reconnecting = false;
@@ -39,7 +57,7 @@ static void ws_client_event_handler(mimi_websocket_t *ws, mimi_ws_event_t event,
             if (priv->api_token[0] != '\0') {
                 char auth_msg[256];
                 snprintf(auth_msg, sizeof(auth_msg), "{\"type\":\"auth\",\"token\":\"%s\"}", priv->api_token);
-                mimi_ws_send(ws, (const uint8_t *)auth_msg, strlen(auth_msg));
+                mimi_ws_send(priv->ws, (const uint8_t *)auth_msg, strlen(auth_msg));
             }
             
             /* Call connect callback if set */
@@ -48,26 +66,18 @@ static void ws_client_event_handler(mimi_websocket_t *ws, mimi_ws_event_t event,
                                            priv->gateway->callback_user_data);
             }
             break;
-        }
-        
-        case MIMI_WS_EVENT_MESSAGE:
-        {
-            MIMI_LOGI(TAG, "Received WebSocket message: %.*s", (int)data_len, (const char *)data);
             
-            /* Call gateway message callback if set */
-            if (priv->gateway && priv->gateway->on_message_cb) {
-                MIMI_LOGI(TAG, "Calling message callback");
+        case EVENT_RECV:
+            if (msg->buf && priv->gateway && priv->gateway->on_message_cb) {
+                MIMI_LOGI(TAG, "Received WebSocket message: %.*s", 
+                         (int)msg->buf->len, (const char *)msg->buf->base);
                 priv->gateway->on_message_cb(priv->gateway, "default", 
-                                           (const char *)data, 
+                                           (const char *)msg->buf->base, 
                                            priv->gateway->callback_user_data);
-            } else {
-                MIMI_LOGW(TAG, "No message callback set");
             }
             break;
-        }
-        
-        case MIMI_WS_EVENT_DISCONNECTED:
-        {
+            
+        case EVENT_DISCONNECT:
             MIMI_LOGI(TAG, "WebSocket client disconnected");
             priv->connected = false;
             
@@ -76,19 +86,22 @@ static void ws_client_event_handler(mimi_websocket_t *ws, mimi_ws_event_t event,
                 priv->gateway->on_disconnect_cb(priv->gateway, "default", 
                                            priv->gateway->callback_user_data);
             }
+            break;
             
-            /* Auto reconnect is disabled here to avoid recursive reconnect
-             * inside the event handler, which can conflict with connection
-             * teardown and cause crashes. Reconnect, if needed, should be
-             * handled by higher-level logic. */
+        case EVENT_ERROR:
+            MIMI_LOGE(TAG, "WebSocket client error: %d", msg->error_code);
+            if (msg->buf) {
+                MIMI_LOGE(TAG, "Error details: %.*s", 
+                         (int)msg->buf->len, (const char *)msg->buf->base);
+            }
             break;
-        }
-        
-        case MIMI_WS_EVENT_ERROR:
-        {
-            MIMI_LOGE(TAG, "WebSocket client error: %.*s", (int)data_len, (const char *)data);
+            
+        default:
             break;
-        }
+    }
+    
+    if (msg->buf) {
+        io_buf_unref(msg->buf);
     }
 }
 
@@ -209,7 +222,7 @@ static mimi_err_t ws_client_gateway_send_impl(gateway_t *gw, const char *session
         return MIMI_ERR_INVALID_ARG;
     }
     
-    /* Send WebSocket message */
+    /* Send WebSocket message - will use send queue internally */
     mimi_err_t err = mimi_ws_send(priv->ws, (const uint8_t *)content, strlen(content));
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to send WebSocket message: %d", err);
@@ -239,6 +252,12 @@ mimi_err_t ws_client_gateway_module_init(void)
     g_ws_client_gateway.priv_data = &s_ws_client_priv;
     g_ws_client_gateway.is_initialized = false;
     g_ws_client_gateway.is_started = false;
+    
+    /* Register event handler with dispatcher */
+    event_dispatcher_t *disp = (event_dispatcher_t *)mimi_runtime_get_dispatcher();
+    if (disp) {
+        event_dispatcher_register_handler(disp, CONN_WS_CLIENT, ws_client_event_handler, NULL);
+    }
     
     MIMI_LOGI(TAG, "WebSocket Client Gateway module initialized");
     return MIMI_OK;
@@ -287,7 +306,7 @@ mimi_err_t ws_client_gateway_connect(gateway_t *gw)
         .headers = priv->auth_header[0] ? priv->auth_header : NULL,
         .timeout_ms = priv->timeout_ms,
         .ping_interval_ms = priv->ping_interval_ms,
-        .event_cb = ws_client_event_handler,
+        .event_cb = NULL,  /* Not used anymore - events go through queue */
         .user_data = priv
     };
     
@@ -297,6 +316,9 @@ mimi_err_t ws_client_gateway_connect(gateway_t *gw)
         MIMI_LOGE(TAG, "Failed to create WebSocket client");
         return MIMI_ERR_IO;
     }
+    
+    /* Set connection type for event messages */
+    mimi_ws_set_conn_type(priv->ws, CONN_WS_CLIENT);
     
     /* Connect to WebSocket server */
     mimi_err_t err = mimi_ws_connect(priv->ws);

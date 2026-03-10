@@ -6,7 +6,7 @@
 #include "log.h"
 #include "mimi_time.h"
 #include "fs/fs.h"
-#include "platform/path_utils.h"
+#include "path_utils.h"
 
 static const char *TAG = "memory";
 

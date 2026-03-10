@@ -14,6 +14,7 @@ const char *mimi_err_to_name(mimi_err_t err)
         case MIMI_ERR_NOT_SUPPORTED: return "MIMI_ERR_NOT_SUPPORTED";
         case MIMI_ERR_PERMISSION_DENIED: return "MIMI_ERR_PERMISSION_DENIED";
         case MIMI_ERR_EXIT: return "MIMI_ERR_EXIT";
+        case MIMI_ERR_WOULD_BLOCK: return "MIMI_ERR_WOULD_BLOCK";
         default: return "MIMI_ERR_UNKNOWN";
     }
 }

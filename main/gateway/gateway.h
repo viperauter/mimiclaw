@@ -8,7 +8,7 @@
 #ifndef GATEWAY_H
 #define GATEWAY_H
 
-#include "platform/mimi_err.h"
+#include "mimi_err.h"
 #include <stdbool.h>
 #include <stddef.h>
 

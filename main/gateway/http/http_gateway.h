@@ -10,6 +10,7 @@
 
 #include "gateway/gateway.h"
 #include "mimi_err.h"
+#include "http/http.h"
 
 #ifdef __cplusplus
 extern "C" {

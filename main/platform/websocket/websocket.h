@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "mimi_err.h"
+#include "event/event_bus.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,6 +84,27 @@ bool mimi_ws_is_connected(mimi_websocket_t *ws);
  * @param timeout_ms Poll timeout in milliseconds
  */
 void mimi_ws_poll(mimi_websocket_t *ws, uint32_t timeout_ms);
+
+/**
+ * Set connection type for event messages
+ * @param ws WebSocket handle
+ * @param conn_type Connection type
+ */
+void mimi_ws_set_conn_type(mimi_websocket_t *ws, conn_type_t conn_type);
+
+/**
+ * Get connection type
+ * @param ws WebSocket handle
+ * @return Connection type
+ */
+conn_type_t mimi_ws_get_conn_type(mimi_websocket_t *ws);
+
+/**
+ * Get connection ID (mg_connection pointer as uint64_t)
+ * @param ws WebSocket handle
+ * @return Connection ID
+ */
+uint64_t mimi_ws_get_conn_id(mimi_websocket_t *ws);
 
 #ifdef __cplusplus
 }

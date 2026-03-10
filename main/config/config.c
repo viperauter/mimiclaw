@@ -6,7 +6,7 @@
 #include "log.h"
 #include "cJSON.h"
 #include "fs/fs.h"
-#include "platform/path_utils.h"
+#include "path_utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>

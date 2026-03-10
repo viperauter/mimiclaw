@@ -36,6 +36,9 @@ file(GLOB_RECURSE APP_SRC
     main/platform/os/posix_impl/os_posix.c
     main/platform/runtime.c
     main/platform/queue.c
+    main/platform/event/io_buf.c
+    main/platform/event/event_bus.c
+    main/platform/event/event_dispatcher.c
     main/platform/fs/fs.c
     main/platform/fs/posix_impl/fs_posix.c
     main/platform/kv.c

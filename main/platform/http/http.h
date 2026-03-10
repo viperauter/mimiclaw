@@ -24,8 +24,15 @@ typedef struct {
     size_t body_len;
 } mimi_http_response_t;
 
+/* HTTP callback for async operations */
+typedef void (*mimi_http_callback_t)(mimi_err_t err, mimi_http_response_t *resp, void *user_data);
+
 mimi_err_t mimi_http_exec(const mimi_http_request_t *req, mimi_http_response_t *resp);
+mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_response_t *resp,
+                               mimi_http_callback_t callback, void *user_data);
 void mimi_http_response_free(mimi_http_response_t *resp);
+mimi_err_t mimi_http_init(void);
+void mimi_http_deinit(void);
 
 #ifdef __cplusplus
 }

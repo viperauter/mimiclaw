@@ -8,7 +8,7 @@
 #include "commands/command.h"
 #include "bus/message_bus.h"
 #include "channels/channel_manager.h"
-#include "platform/log.h"
+#include "log.h"
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>

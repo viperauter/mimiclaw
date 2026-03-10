@@ -2,6 +2,8 @@
 #include "../../log.h"
 #include "../../runtime.h"
 #include "../../mimi_time.h"
+#include "../../event/event_bus.h"
+#include "../../event/event_dispatcher.h"
 #include "mongoose.h"
 
 #include <stdlib.h>
@@ -19,13 +21,16 @@ typedef struct {
     
     uint64_t last_ping_time;
     uint32_t ping_interval_ms;
+    
+    /* Connection type for event messages */
+    conn_type_t conn_type;
 } mimi_ws_ctx_t;
 
 struct mimi_websocket {
     mimi_ws_ctx_t ctx;
 };
 
-/* WebSocket event handler */
+/* WebSocket event handler - runs in event loop thread */
 static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
 {
     mimi_ws_ctx_t *ctx = (mimi_ws_ctx_t *)c->fn_data;
@@ -38,10 +43,9 @@ static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
             if (ev_data != NULL) status = *(int *)ev_data;
             if (status != 0) {
                 MIMI_LOGE("ws_mg", "WebSocket connect failed (status=%d)", status);
-                if (ctx->event_cb) {
-                    ctx->event_cb((mimi_websocket_t *)ctx, MIMI_WS_EVENT_ERROR, 
-                                (const uint8_t *)"Connection failed", 17, 
-                                ctx->user_data);
+                event_bus_t *bus = event_bus_get_global();
+                if (bus) {
+                    event_bus_post_error(bus, (uint64_t)c, ctx->conn_type, status, (uint64_t)ctx->user_data, 0);
                 }
                 ctx->connected = false;
                 return;
@@ -49,11 +53,11 @@ static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
             
             MIMI_LOGI("ws_mg", "WebSocket connected");
             ctx->connected = true;
-            ctx->last_ping_time = mg_millis();
             
-            if (ctx->event_cb) {
-                ctx->event_cb((mimi_websocket_t *)ctx, MIMI_WS_EVENT_CONNECTED, 
-                            NULL, 0, ctx->user_data);
+            /* Post connect event to worker thread */
+            event_bus_t *bus = event_bus_get_global();
+            if (bus) {
+                event_bus_post_recv(bus, EVENT_CONNECT, (uint64_t)c, ctx->conn_type, NULL, (uint64_t)ctx->user_data, 0);
             }
             break;
         }
@@ -61,11 +65,22 @@ static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
         case MG_EV_WS_MSG:
         {
             struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
-            if (ctx->event_cb) {
-                ctx->event_cb((mimi_websocket_t *)ctx, MIMI_WS_EVENT_MESSAGE, 
-                            (const uint8_t *)wm->data.buf, wm->data.len, 
-                            ctx->user_data);
+            
+            /* Create io_buf from message data */
+            io_buf_t *buf = io_buf_from_const(wm->data.buf, wm->data.len);
+            if (!buf) {
+                MIMI_LOGW("ws_mg", "Failed to create io_buf for WS message");
+                return;
             }
+            
+            /* Post recv event to queue - NON-BLOCKING */
+            event_bus_t *bus = event_bus_get_global();
+            if (bus) {
+                event_bus_post_recv(bus, EVENT_RECV, (uint64_t)c, ctx->conn_type, buf, (uint64_t)ctx->user_data, 0);
+            }
+            
+            /* Unref our reference - queue holds one */
+            io_buf_unref(buf);
             break;
         }
         
@@ -73,11 +88,14 @@ static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
         {
             const char *err = (const char *)ev_data;
             MIMI_LOGE("ws_mg", "WebSocket error: %s", err ? err : "(unknown)");
-            if (ctx->event_cb) {
-                ctx->event_cb((mimi_websocket_t *)ctx, MIMI_WS_EVENT_ERROR, 
-                            (const uint8_t *)err, err ? strlen(err) : 0, 
-                            ctx->user_data);
+            
+            /* Post error event */
+            io_buf_t *buf = io_buf_from_const(err, err ? strlen(err) : 0);
+            event_bus_t *bus = event_bus_get_global();
+            if (bus) {
+                event_bus_post_recv(bus, EVENT_ERROR, (uint64_t)c, ctx->conn_type, buf, (uint64_t)ctx->user_data, 0);
             }
+            if (buf) io_buf_unref(buf);
             break;
         }
         
@@ -85,9 +103,11 @@ static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
         {
             MIMI_LOGI("ws_mg", "WebSocket disconnected");
             ctx->connected = false;
-            if (ctx->event_cb) {
-                ctx->event_cb((mimi_websocket_t *)ctx, MIMI_WS_EVENT_DISCONNECTED, 
-                            NULL, 0, ctx->user_data);
+            
+            /* Post disconnect event */
+            event_bus_t *bus = event_bus_get_global();
+            if (bus) {
+                event_bus_post_recv(bus, EVENT_DISCONNECT, (uint64_t)c, ctx->conn_type, NULL, (uint64_t)ctx->user_data, 0);
             }
             break;
         }
@@ -115,6 +135,9 @@ mimi_websocket_t *mimi_ws_create(const mimi_ws_config_t *config)
     
     ctx->ping_interval_ms = config->ping_interval_ms > 0 ? 
                            config->ping_interval_ms : 30000;
+    
+    /* Default connection type */
+    ctx->conn_type = CONN_WS_CLIENT;
     
     return ws;
 }
@@ -191,7 +214,11 @@ void mimi_ws_disconnect(mimi_websocket_t *ws)
     mimi_ws_ctx_t *ctx = &ws->ctx;
     
     if (ctx->conn) {
-        mg_close_conn(ctx->conn);
+        /* Post close request to send queue */
+        event_bus_t *bus = event_bus_get_global();
+        if (bus) {
+            event_bus_post_close(bus, (uint64_t)ctx->conn, ctx->conn_type, 0);
+        }
         ctx->conn = NULL;
         ctx->connected = false;
     }
@@ -209,8 +236,23 @@ mimi_err_t mimi_ws_send(mimi_websocket_t *ws, const uint8_t *data, size_t data_l
         return MIMI_ERR_INVALID_STATE;
     }
     
-    mg_ws_send(ctx->conn, (const char *)data, data_len, WEBSOCKET_OP_TEXT);
-    return MIMI_OK;
+    /* Create io_buf from data */
+    io_buf_t *buf = io_buf_from_const(data, data_len);
+    if (!buf) {
+        return MIMI_ERR_NO_MEM;
+    }
+    
+    /* Post send request to send queue - will be processed in event loop */
+    event_bus_t *bus = event_bus_get_global();
+    int ret = -1;
+    if (bus) {
+        ret = event_bus_post_send(bus, (uint64_t)ctx->conn, ctx->conn_type, buf, 0);
+    }
+    
+    /* Unref our reference - queue holds one */
+    io_buf_unref(buf);
+    
+    return (ret == 0) ? MIMI_OK : MIMI_ERR_IO;
 }
 
 bool mimi_ws_is_connected(mimi_websocket_t *ws)
@@ -231,7 +273,11 @@ void mimi_ws_poll(mimi_websocket_t *ws, uint32_t timeout_ms)
     if (ctx->connected && ctx->ping_interval_ms > 0) {
         uint64_t now = mg_millis();
         if (now - ctx->last_ping_time > ctx->ping_interval_ms) {
-            mg_ws_send(ctx->conn, NULL, 0, WEBSOCKET_OP_PING);
+            /* Post ping as send request */
+            event_bus_t *bus = event_bus_get_global();
+            if (bus) {
+                event_bus_post_send(bus, (uint64_t)ctx->conn, ctx->conn_type, NULL, 0);
+            }
             ctx->last_ping_time = now;
         }
     }
@@ -241,4 +287,21 @@ void mimi_ws_poll(mimi_websocket_t *ws, uint32_t timeout_ms)
     if (timeout_ms > 0) {
         mimi_sleep_ms(timeout_ms);
     }
+}
+
+void mimi_ws_set_conn_type(mimi_websocket_t *ws, conn_type_t conn_type)
+{
+    if (ws) {
+        ws->ctx.conn_type = conn_type;
+    }
+}
+
+conn_type_t mimi_ws_get_conn_type(mimi_websocket_t *ws)
+{
+    return ws ? ws->ctx.conn_type : CONN_UNKNOWN;
+}
+
+uint64_t mimi_ws_get_conn_id(mimi_websocket_t *ws)
+{
+    return ws ? (uint64_t)ws->ctx.conn : 0;
 }
