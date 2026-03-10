@@ -1,11 +1,11 @@
 /**
- * WebSocket Gateway - WebSocket transport implementation
+ * WebSocket Server Gateway - WebSocket server transport implementation
  *
- * Provides WebSocket server transport for channels
+ * Provides WebSocket server transport for channels.
  */
 
-#ifndef WS_GATEWAY_H
-#define WS_GATEWAY_H
+#ifndef WS_SERVER_GATEWAY_H
+#define WS_SERVER_GATEWAY_H
 
 #include "gateway/gateway.h"
 
@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 /**
- * WebSocket Gateway configuration
+ * WebSocket Server Gateway configuration
  */
 typedef struct {
     int port;
@@ -22,24 +22,24 @@ typedef struct {
 } ws_gateway_config_t;
 
 /**
- * WebSocket Gateway instance
+ * WebSocket Server Gateway instance
  */
 extern gateway_t g_ws_gateway;
 
 /**
- * Initialize WebSocket Gateway module
+ * Initialize WebSocket Server Gateway module
  * @return MIMI_OK on success
  */
 mimi_err_t ws_gateway_module_init(void);
 
 /**
- * Get WebSocket Gateway instance
+ * Get WebSocket Server Gateway instance
  * @return Gateway instance or NULL if not initialized
  */
 gateway_t* ws_gateway_get(void);
 
 /**
- * Configure WebSocket Gateway before starting
+ * Configure WebSocket Server Gateway before starting
  * @param port Server port
  * @param path WebSocket path (e.g., "/")
  * @return MIMI_OK on success
@@ -50,4 +50,5 @@ mimi_err_t ws_gateway_configure(int port, const char *path);
 }
 #endif
 
-#endif /* WS_GATEWAY_H */
+#endif /* WS_SERVER_GATEWAY_H */
+

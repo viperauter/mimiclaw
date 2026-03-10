@@ -44,6 +44,7 @@ typedef enum {
 #define EVENT_FLAG_INTERNAL    (1 << 1)  /* Internal message */
 #define EVENT_FLAG_RETRY       (1 << 2)  /* Retryable message */
 #define EVENT_FLAG_NO_COPY     (1 << 3)  /* No copy needed */
+#define EVENT_FLAG_BINARY      (1 << 4)  /* WebSocket binary frame */
 
 /* Connection ID conversion macros */
 #define CONN_TO_ID(ptr) ((uint64_t)(uintptr_t)(ptr))

@@ -196,8 +196,8 @@ void gateway_manager_foreach(void (*callback)(gateway_t *gw, void *user_data),
 extern gateway_t g_stdio_gateway;
 extern gateway_t g_ws_gateway;
 extern gateway_t* ws_client_gateway_get_instance(void);
-extern gateway_t* http_gateway_get_instance(void);
-extern mimi_err_t http_gateway_module_init(void);
+extern gateway_t* http_client_gateway_get_instance(void);
+extern mimi_err_t http_client_gateway_module_init(void);
 extern mimi_err_t ws_client_gateway_module_init(void);
 
 mimi_err_t gateway_system_init(void)
@@ -211,7 +211,7 @@ mimi_err_t gateway_system_init(void)
     }
     
     /* Initialize HTTP Gateway module */
-    if (http_gateway_module_init() != MIMI_OK) {
+    if (http_client_gateway_module_init() != MIMI_OK) {
         MIMI_LOGW(TAG, "Failed to initialize HTTP gateway module");
     }
     
@@ -239,7 +239,7 @@ mimi_err_t gateway_system_init(void)
     }
     
     /* Get and register HTTP Gateway instance */
-    gateway_t *http_gw = http_gateway_get_instance();
+    gateway_t *http_gw = http_client_gateway_get_instance();
     if (http_gw) {
         if (gateway_manager_register(http_gw) != MIMI_OK) {
             MIMI_LOGW(TAG, "Failed to register HTTP gateway");

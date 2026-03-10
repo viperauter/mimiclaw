@@ -60,7 +60,8 @@ typedef struct {
 /* Callback function types */
 typedef void (*gateway_on_message_cb_t)(gateway_t *gw, 
                                         const char *session_id, 
-                                        const char *content, 
+                                        const char *content,
+                                        size_t content_len,
                                         void *user_data);
 
 typedef void (*gateway_on_connect_cb_t)(gateway_t *gw, 

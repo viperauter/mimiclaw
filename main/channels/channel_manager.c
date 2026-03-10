@@ -302,14 +302,14 @@ void channel_poll_all(void)
 /* External channel init functions */
 extern mimi_err_t cli_channel_init(void);
 extern mimi_err_t telegram_channel_init(void);
-extern mimi_err_t ws_channel_init(void);
+extern mimi_err_t ws_server_channel_init(void);
 extern mimi_err_t feishu_channel_init(void);
 extern mimi_err_t qq_channel_init(void);
 
 /* External channel instances */
 extern channel_t g_cli_channel;
 extern channel_t g_telegram_channel;
-extern channel_t g_websocket_channel;
+extern channel_t g_ws_server_channel;
 extern channel_t g_feishu_channel;
 extern channel_t g_qq_channel;
 
@@ -351,12 +351,12 @@ mimi_err_t channel_system_init(void)
         }
     }
 
-    /* Initialize and register WebSocket Channel */
-    if (ws_channel_init() != MIMI_OK) {
-        MIMI_LOGW(TAG, "ws_channel_init failed");
+    /* Initialize and register WebSocket Server Channel */
+    if (ws_server_channel_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "ws_server_channel_init failed");
     } else {
-        if (channel_register(&g_websocket_channel) != MIMI_OK) {
-            MIMI_LOGW(TAG, "Failed to register WebSocket channel");
+        if (channel_register(&g_ws_server_channel) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register WebSocket server channel");
         }
     }
 

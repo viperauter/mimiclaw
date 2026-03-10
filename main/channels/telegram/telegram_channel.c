@@ -11,7 +11,7 @@
 #include "commands/command.h"
 #include "config.h"
 #include "bus/message_bus.h"
-#include "gateway/http/http_gateway.h"
+#include "gateway/http/http_client_gateway.h"
 #include "gateway/gateway_manager.h"
 #include "log.h"
 #include "os/os.h"
@@ -52,10 +52,10 @@ static mimi_err_t tg_http_call(const char *method, const char *json_body,
     }
     
     if (json_body) {
-        return http_gateway_post(s_priv.http_gateway, method, json_body, 
-                              strlen(json_body), response, response_len);
+        return http_client_gateway_post(s_priv.http_gateway, method, json_body, 
+                                        strlen(json_body), response, response_len);
     } else {
-        return http_gateway_get(s_priv.http_gateway, method, response, response_len);
+        return http_client_gateway_get(s_priv.http_gateway, method, response, response_len);
     }
 }
 
@@ -184,7 +184,7 @@ mimi_err_t telegram_channel_init_impl(channel_t *ch, const channel_config_t *cfg
     }
 
     /* Configure HTTP Gateway for Telegram */
-    mimi_err_t err = http_gateway_configure("https://api.telegram.org/bot", 
+    mimi_err_t err = http_client_gateway_configure("https://api.telegram.org/bot", 
                                           s_priv.bot_token, 35000);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
@@ -422,7 +422,7 @@ mimi_err_t telegram_channel_set_token(const char *token)
     
     /* Reconfigure HTTP Gateway with new token */
     if (s_priv.http_gateway) {
-        http_gateway_configure("https://api.telegram.org/bot", s_priv.bot_token, 35000);
+        http_client_gateway_configure("https://api.telegram.org/bot", s_priv.bot_token, 35000);
     }
     
     MIMI_LOGI(TAG, "Telegram bot token updated");

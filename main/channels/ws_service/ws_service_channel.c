@@ -1,14 +1,14 @@
 /**
- * WebSocket Channel Implementation
+ * WebSocket Server Channel Implementation
  *
- * Uses WebSocket Gateway for transport.
- * Routes messages through Input Processor for command/chat routing.
+ * Uses the WebSocket Server Gateway for transport.
+ * Routes incoming WebSocket messages through the Input Processor.
  */
 
-#include "channels/websocket/ws_channel.h"
+#include "channels/ws_service/ws_service_channel.h"
 #include "channels/channel_manager.h"
 #include "gateway/gateway_manager.h"
-#include "gateway/websocket/ws_gateway.h"
+#include "gateway/websocket/ws_server_gateway.h"
 #include "router/router.h"
 #include "commands/command.h"
 #include "config.h"
@@ -20,7 +20,7 @@
 
 static const char *TAG = "ws_ch";
 
-/* WebSocket Channel private data */
+/* WebSocket Server Channel private data */
 typedef struct {
     gateway_t *gateway;
     bool initialized;
@@ -33,7 +33,7 @@ static ws_channel_priv_t s_priv = {0};
  * Gateway message callback - routes to Input Processor
  */
 static void on_gateway_message(gateway_t *gw, const char *session_id,
-                                const char *content, void *user_data)
+                                const char *content, size_t content_len, void *user_data)
 {
     (void)gw;
     (void)user_data;
@@ -43,14 +43,14 @@ static void on_gateway_message(gateway_t *gw, const char *session_id,
 }
 
 /**
- * Initialize WebSocket Channel
+ * Initialize WebSocket Server Channel
  */
-mimi_err_t ws_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
+mimi_err_t ws_server_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
 {
     (void)cfg;
 
     if (s_priv.initialized) {
-        MIMI_LOGW(TAG, "WebSocket Channel already initialized");
+        MIMI_LOGW(TAG, "WebSocket Server Channel already initialized");
         return MIMI_OK;
     }
 
@@ -80,24 +80,24 @@ mimi_err_t ws_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     ch->priv_data = &s_priv;
     s_priv.initialized = true;
 
-    MIMI_LOGI(TAG, "WebSocket Channel initialized");
+    MIMI_LOGI(TAG, "WebSocket Server Channel initialized");
     return MIMI_OK;
 }
 
 /**
- * Start WebSocket Channel
+ * Start WebSocket Server Channel
  */
-mimi_err_t ws_channel_start_impl(channel_t *ch)
+mimi_err_t ws_server_channel_start_impl(channel_t *ch)
 {
     (void)ch;
 
     if (!s_priv.initialized) {
-        MIMI_LOGE(TAG, "WebSocket Channel not initialized");
+        MIMI_LOGE(TAG, "WebSocket Server Channel not initialized");
         return MIMI_ERR_INVALID_STATE;
     }
 
     if (s_priv.started) {
-        MIMI_LOGW(TAG, "WebSocket Channel already started");
+        MIMI_LOGW(TAG, "WebSocket Server Channel already started");
         return MIMI_OK;
     }
 
@@ -112,14 +112,14 @@ mimi_err_t ws_channel_start_impl(channel_t *ch)
     }
 
     s_priv.started = true;
-    MIMI_LOGI(TAG, "WebSocket Channel started");
+    MIMI_LOGI(TAG, "WebSocket Server Channel started");
     return MIMI_OK;
 }
 
 /**
- * Stop WebSocket Channel
+ * Stop WebSocket Server Channel
  */
-mimi_err_t ws_channel_stop_impl(channel_t *ch)
+mimi_err_t ws_server_channel_stop_impl(channel_t *ch)
 {
     (void)ch;
 
@@ -133,14 +133,14 @@ mimi_err_t ws_channel_stop_impl(channel_t *ch)
     }
 
     s_priv.started = false;
-    MIMI_LOGI(TAG, "WebSocket Channel stopped");
+    MIMI_LOGI(TAG, "WebSocket Server Channel stopped");
     return MIMI_OK;
 }
 
 /**
- * Destroy WebSocket Channel
+ * Destroy WebSocket Server Channel
  */
-void ws_channel_destroy_impl(channel_t *ch)
+void ws_server_channel_destroy_impl(channel_t *ch)
 {
     (void)ch;
 
@@ -148,7 +148,7 @@ void ws_channel_destroy_impl(channel_t *ch)
         return;
     }
 
-    ws_channel_stop_impl(ch);
+    ws_server_channel_stop_impl(ch);
 
     /* Unregister mapping */
     router_unregister_mapping("websocket");
@@ -157,13 +157,13 @@ void ws_channel_destroy_impl(channel_t *ch)
     s_priv.initialized = false;
     s_priv.started = false;
 
-    MIMI_LOGI(TAG, "WebSocket Channel destroyed");
+    MIMI_LOGI(TAG, "WebSocket Server Channel destroyed");
 }
 
 /**
- * Send message through WebSocket Channel
+ * Send message through WebSocket Server Channel
  */
-mimi_err_t ws_channel_send_impl(channel_t *ch, const char *session_id,
+mimi_err_t ws_server_channel_send_impl(channel_t *ch, const char *session_id,
                                  const char *content)
 {
     (void)ch;
@@ -183,7 +183,7 @@ mimi_err_t ws_channel_send_impl(channel_t *ch, const char *session_id,
 /**
  * Check if channel is running
  */
-static bool ws_is_running_impl(channel_t *ch)
+static bool ws_server_is_running_impl(channel_t *ch)
 {
     (void)ch;
     return s_priv.initialized && s_priv.started;
@@ -192,7 +192,7 @@ static bool ws_is_running_impl(channel_t *ch)
 /**
  * Set message callback (not used - handled via Input Processor)
  */
-static void ws_set_on_message_impl(channel_t *ch,
+static void ws_server_set_on_message_impl(channel_t *ch,
                                     void (*cb)(channel_t *, const char *,
                                                const char *, void *),
                                     void *user_data)
@@ -206,7 +206,7 @@ static void ws_set_on_message_impl(channel_t *ch,
 /**
  * Set connect callback (not used)
  */
-static void ws_set_on_connect_impl(channel_t *ch,
+static void ws_server_set_on_connect_impl(channel_t *ch,
                                     void (*cb)(channel_t *, const char *,
                                                void *),
                                     void *user_data)
@@ -219,7 +219,7 @@ static void ws_set_on_connect_impl(channel_t *ch,
 /**
  * Set disconnect callback (not used)
  */
-static void ws_set_on_disconnect_impl(channel_t *ch,
+static void ws_server_set_on_disconnect_impl(channel_t *ch,
                                        void (*cb)(channel_t *, const char *,
                                                   void *),
                                        void *user_data)
@@ -230,28 +230,28 @@ static void ws_set_on_disconnect_impl(channel_t *ch,
 }
 
 /**
- * Initialize WebSocket Channel module
+ * Initialize WebSocket Server Channel module
  */
-mimi_err_t ws_channel_init(void)
+mimi_err_t ws_server_channel_init(void)
 {
     return MIMI_OK;
 }
 
-/* Global WebSocket channel instance */
-channel_t g_websocket_channel = {
+/* Global WebSocket server channel instance */
+channel_t g_ws_server_channel = {
     .name = "websocket",
     .description = "WebSocket Server Channel",
     .require_auth = false,
     .max_sessions = -1,
-    .init = ws_channel_init_impl,
-    .start = ws_channel_start_impl,
-    .stop = ws_channel_stop_impl,
-    .destroy = ws_channel_destroy_impl,
-    .send = ws_channel_send_impl,
-    .is_running = ws_is_running_impl,
-    .set_on_message = ws_set_on_message_impl,
-    .set_on_connect = ws_set_on_connect_impl,
-    .set_on_disconnect = ws_set_on_disconnect_impl,
+    .init = ws_server_channel_init_impl,
+    .start = ws_server_channel_start_impl,
+    .stop = ws_server_channel_stop_impl,
+    .destroy = ws_server_channel_destroy_impl,
+    .send = ws_server_channel_send_impl,
+    .is_running = ws_server_is_running_impl,
+    .set_on_message = ws_server_set_on_message_impl,
+    .set_on_connect = ws_server_set_on_connect_impl,
+    .set_on_disconnect = ws_server_set_on_disconnect_impl,
     .priv_data = NULL,
     .is_initialized = false,
     .is_started = false

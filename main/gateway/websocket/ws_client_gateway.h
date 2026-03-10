@@ -38,8 +38,8 @@ typedef struct {
     bool reconnecting;
     bool stopping;                 /* Set when gateway is being stopped */
     
-    /* Platform WebSocket */
-    mimi_websocket_t *ws;
+    /* Platform WebSocket client */
+    mimi_ws_client_t *ws;
     
     /* Gateway reference */
     gateway_t *gateway;
@@ -123,6 +123,12 @@ gateway_t* ws_client_gateway_get_instance(void);
  */
 mimi_err_t ws_client_gateway_configure(const char *url, const char *api_token,
                                      int timeout_ms, int ping_interval_ms);
+
+/**
+ * Low-level helper used by Feishu channel to send raw binary frames
+ * over the underlying WebSocket client connection.
+ */
+mimi_err_t ws_client_gateway_send_raw(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

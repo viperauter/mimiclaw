@@ -237,7 +237,11 @@ void event_dispatcher_drain_send(event_dispatcher_t *disp)
                 struct mg_connection *c = (struct mg_connection *)msg.conn_id;
                 
                 if (c && msg.buf) {
-                    mg_ws_send(c, (const char *)msg.buf->base, msg.buf->len, WEBSOCKET_OP_TEXT);
+                    int op = WEBSOCKET_OP_TEXT;
+                    if ((msg.flags & EVENT_FLAG_BINARY) != 0) {
+                        op = WEBSOCKET_OP_BINARY;
+                    }
+                    mg_ws_send(c, (const char *)msg.buf->base, msg.buf->len, op);
                 }
                 
                 if (msg.buf) {

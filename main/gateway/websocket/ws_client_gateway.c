@@ -69,10 +69,10 @@ static void ws_client_event_handler(event_dispatcher_t *disp, event_msg_t *msg, 
             
         case EVENT_RECV:
             if (msg->buf && priv->gateway && priv->gateway->on_message_cb) {
-                MIMI_LOGI(TAG, "Received WebSocket message: %.*s", 
-                         (int)msg->buf->len, (const char *)msg->buf->base);
+                MIMI_LOGI(TAG, "Received WebSocket message");
                 priv->gateway->on_message_cb(priv->gateway, "default", 
-                                           (const char *)msg->buf->base, 
+                                           (const char *)msg->buf->base,
+                                           msg->buf->len,
                                            priv->gateway->callback_user_data);
             }
             break;
@@ -279,6 +279,31 @@ mimi_err_t ws_client_gateway_configure(const char *url, const char *api_token,
     };
     
     return ws_client_gateway_init_impl(&g_ws_client_gateway, (const gateway_config_t *)&cfg);
+}
+
+mimi_err_t ws_client_gateway_send_raw(const uint8_t *data, size_t len)
+{
+    ws_client_gateway_priv_t *priv = &s_ws_client_priv;
+    
+    if (!priv->initialized || !priv->connected || !priv->ws) {
+        return MIMI_ERR_INVALID_STATE;
+    }
+    if (!data || len == 0) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    /* Feishu expects protobuf Frame bytes as WS binary frames. */
+    event_bus_t *bus = event_bus_get_global();
+    if (!bus) return MIMI_ERR_INVALID_STATE;
+
+    io_buf_t *buf = io_buf_from_const(data, len);
+    if (!buf) return MIMI_ERR_NO_MEM;
+
+    uint64_t conn_id = mimi_ws_get_conn_id(priv->ws);
+    int ret = event_bus_post_send(bus, conn_id, CONN_WS_CLIENT, buf, EVENT_FLAG_BINARY);
+    io_buf_unref(buf);
+
+    return (ret == 0) ? MIMI_OK : MIMI_ERR_IO;
 }
 
 mimi_err_t ws_client_gateway_connect(gateway_t *gw)

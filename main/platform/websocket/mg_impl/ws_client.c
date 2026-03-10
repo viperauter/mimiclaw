@@ -26,7 +26,7 @@ typedef struct {
     conn_type_t conn_type;
 } mimi_ws_ctx_t;
 
-struct mimi_websocket {
+struct mimi_ws_client {
     mimi_ws_ctx_t ctx;
 };
 
@@ -114,13 +114,13 @@ static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
     }
 }
 
-mimi_websocket_t *mimi_ws_create(const mimi_ws_config_t *config)
+mimi_ws_client_t *mimi_ws_create(const mimi_ws_config_t *config)
 {
     if (!config || !config->url) {
         return NULL;
     }
     
-    mimi_websocket_t *ws = (mimi_websocket_t *)malloc(sizeof(mimi_websocket_t));
+    mimi_ws_client_t *ws = (mimi_ws_client_t *)malloc(sizeof(mimi_ws_client_t));
     if (!ws) {
         return NULL;
     }
@@ -142,7 +142,7 @@ mimi_websocket_t *mimi_ws_create(const mimi_ws_config_t *config)
     return ws;
 }
 
-void mimi_ws_destroy(mimi_websocket_t *ws)
+void mimi_ws_destroy(mimi_ws_client_t *ws)
 {
     if (!ws) return;
     
@@ -157,7 +157,7 @@ void mimi_ws_destroy(mimi_websocket_t *ws)
     free(ws);
 }
 
-mimi_err_t mimi_ws_connect(mimi_websocket_t *ws)
+mimi_err_t mimi_ws_connect(mimi_ws_client_t *ws)
 {
     if (!ws) {
         return MIMI_ERR_INVALID_ARG;
@@ -207,7 +207,7 @@ mimi_err_t mimi_ws_connect(mimi_websocket_t *ws)
     return MIMI_OK;
 }
 
-void mimi_ws_disconnect(mimi_websocket_t *ws)
+void mimi_ws_disconnect(mimi_ws_client_t *ws)
 {
     if (!ws) return;
     
@@ -224,7 +224,7 @@ void mimi_ws_disconnect(mimi_websocket_t *ws)
     }
 }
 
-mimi_err_t mimi_ws_send(mimi_websocket_t *ws, const uint8_t *data, size_t data_len)
+mimi_err_t mimi_ws_send(mimi_ws_client_t *ws, const uint8_t *data, size_t data_len)
 {
     if (!ws || !data || data_len == 0) {
         return MIMI_ERR_INVALID_ARG;
@@ -255,7 +255,7 @@ mimi_err_t mimi_ws_send(mimi_websocket_t *ws, const uint8_t *data, size_t data_l
     return (ret == 0) ? MIMI_OK : MIMI_ERR_IO;
 }
 
-bool mimi_ws_is_connected(mimi_websocket_t *ws)
+bool mimi_ws_is_connected(mimi_ws_client_t *ws)
 {
     if (!ws) return false;
     
@@ -263,7 +263,7 @@ bool mimi_ws_is_connected(mimi_websocket_t *ws)
     return ctx->connected;
 }
 
-void mimi_ws_poll(mimi_websocket_t *ws, uint32_t timeout_ms)
+void mimi_ws_poll(mimi_ws_client_t *ws, uint32_t timeout_ms)
 {
     if (!ws) return;
     
@@ -289,19 +289,19 @@ void mimi_ws_poll(mimi_websocket_t *ws, uint32_t timeout_ms)
     }
 }
 
-void mimi_ws_set_conn_type(mimi_websocket_t *ws, conn_type_t conn_type)
+void mimi_ws_set_conn_type(mimi_ws_client_t *ws, conn_type_t conn_type)
 {
     if (ws) {
         ws->ctx.conn_type = conn_type;
     }
 }
 
-conn_type_t mimi_ws_get_conn_type(mimi_websocket_t *ws)
+conn_type_t mimi_ws_get_conn_type(mimi_ws_client_t *ws)
 {
     return ws ? ws->ctx.conn_type : CONN_UNKNOWN;
 }
 
-uint64_t mimi_ws_get_conn_id(mimi_websocket_t *ws)
+uint64_t mimi_ws_get_conn_id(mimi_ws_client_t *ws)
 {
     return ws ? (uint64_t)ws->ctx.conn : 0;
 }

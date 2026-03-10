@@ -6,24 +6,31 @@
  */
 
 #include "channels/feishu/feishu_channel.h"
+#include "channels/feishu/feishu_media.h"
 #include "channels/channel_manager.h"
 #include "router/router.h"
 #include "commands/command.h"
 #include "config.h"
 #include "bus/message_bus.h"
 #include "gateway/websocket/ws_client_gateway.h"
-#include "gateway/http/http_gateway.h"
+#include "gateway/http/http_client_gateway.h"
 #include "gateway/gateway_manager.h"
 #include "log.h"
 #include "os/os.h"
 #include "mimi_time.h"
+#include "fs/fs.h"
 
 #include "cJSON.h"
+
+#include "channels/feishu/pb/pbbp2.pb.h"
+#include "pb_decode.h"
+#include "pb_encode.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <ctype.h>
 
 static const char *TAG = "feishu";
 
@@ -36,162 +43,234 @@ typedef struct {
     char app_id[64];
     char app_secret[128];
     char tenant_access_token[512];
+    char ws_url[256];
+    const char *ws_token; /* points to tenant_access_token or NULL */
     volatile bool running;
+    volatile bool stopping;
+
+    /* Startup state machine */
+    enum {
+        FEISHU_SM_IDLE = 0,
+        FEISHU_SM_GET_TENANT_TOKEN,
+        FEISHU_SM_GET_WS_URL,
+        FEISHU_SM_START_WS,
+        FEISHU_SM_RUNNING,
+        FEISHU_SM_FAILED,
+    } sm_state;
 } feishu_channel_priv_t;
 
 static feishu_channel_priv_t s_priv = {0};
 
 /* Forward declarations */
 static bool feishu_is_running_impl(channel_t *ch);
-static mimi_err_t feishu_get_ws_url(char *ws_url, size_t ws_url_size);
 
-/**
- * Get tenant access token from Feishu
- */
-static mimi_err_t feishu_get_tenant_token(void)
+typedef void (*feishu_http_async_cb)(mimi_err_t err, mimi_http_response_t *resp, void *user_data);
+static mimi_err_t feishu_http_post_json_async(const char *path, const char *json_body,
+                                             feishu_http_async_cb cb, void *user_data);
+static void feishu_sm_start(channel_t *ch);
+static void feishu_sm_fail(mimi_err_t err, const char *why);
+static void feishu_sm_on_tenant_token(mimi_err_t err, mimi_http_response_t *resp, void *user_data);
+static void feishu_sm_on_ws_url(mimi_err_t err, mimi_http_response_t *resp, void *user_data);
+
+static mimi_err_t feishu_http_post_json_async(const char *path, const char *json_body,
+                                             feishu_http_async_cb cb, void *user_data)
 {
-    if (!s_priv.app_id[0] || !s_priv.app_secret[0]) {
-        return MIMI_ERR_INVALID_STATE;
-    }
+    if (!path || !path[0] || !cb) return MIMI_ERR_INVALID_ARG;
 
-    cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "app_id", s_priv.app_id);
-    cJSON_AddStringToObject(body, "app_secret", s_priv.app_secret);
-    char *json = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (!json) return MIMI_ERR_NO_MEM;
+    char url[512];
+    snprintf(url, sizeof(url), "%s%s", "https://open.feishu.cn", path);
 
-    char response[4096];
-    mimi_err_t err = http_gateway_post(s_priv.http_gateway, 
-                                          "/open-apis/auth/v3/tenant_access_token/internal",
-                                          json, strlen(json),
-                                          response, sizeof(response));
-    free(json);
-    
+    const char *headers = "Content-Type: application/json\r\n";
+    mimi_http_request_t req = {
+        .method = "POST",
+        .url = url,
+        .headers = headers,
+        .body = (const uint8_t *)json_body,
+        .body_len = json_body ? strlen(json_body) : 0,
+        .timeout_ms = 30000,
+    };
+
+    mimi_http_response_t *resp = (mimi_http_response_t *)calloc(1, sizeof(*resp));
+    if (!resp) return MIMI_ERR_NO_MEM;
+
+    mimi_err_t err = mimi_http_exec_async(&req, resp, cb, user_data);
     if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to get tenant token: %d", err);
+        free(resp);
         return err;
     }
-
-    if (response[0] == '\0') {
-        MIMI_LOGE(TAG, "Empty tenant token response");
-        return MIMI_ERR_FAIL;
-    }
-
-    cJSON *root = cJSON_Parse(response);
-    if (!root) {
-        MIMI_LOGE(TAG, "Invalid tenant token response");
-        return MIMI_ERR_FAIL;
-    }
-
-    cJSON *token = cJSON_GetObjectItem(root, "tenant_access_token");
-    if (token && cJSON_IsString(token)) {
-        strncpy(s_priv.tenant_access_token, token->valuestring,
-                sizeof(s_priv.tenant_access_token) - 1);
-        MIMI_LOGI(TAG, "Tenant token acquired");
-        err = MIMI_OK;
-    } else {
-        MIMI_LOGE(TAG, "Failed to get tenant token");
-        err = MIMI_ERR_FAIL;
-    }
-
-    cJSON_Delete(root);
-    return err;
+    return MIMI_OK;
 }
 
-/**
- * Get Feishu WebSocket connection URL via /callback/ws/endpoint
- * This follows the official Feishu SDK flow using AppID/AppSecret.
- */
-static mimi_err_t feishu_get_ws_url(char *ws_url, size_t ws_url_size)
+static void feishu_sm_fail(mimi_err_t err, const char *why)
 {
-    if (!ws_url || ws_url_size == 0) {
-        return MIMI_ERR_INVALID_ARG;
+    if (s_priv.stopping) return;
+    s_priv.sm_state = FEISHU_SM_FAILED;
+    MIMI_LOGE(TAG, "Feishu startup failed (%s): %d", why ? why : "unknown", err);
+}
+
+static void feishu_sm_on_tenant_token(mimi_err_t err, mimi_http_response_t *resp, void *user_data)
+{
+    (void)user_data;
+
+    if (s_priv.stopping) {
+        if (resp) { mimi_http_response_free(resp); free(resp); }
+        return;
     }
 
-    if (!s_priv.app_id[0] || !s_priv.app_secret[0]) {
-        MIMI_LOGE(TAG, "Feishu AppID/AppSecret not configured");
-        return MIMI_ERR_INVALID_STATE;
+    if (err != MIMI_OK || !resp || !resp->body || resp->body_len == 0) {
+        if (resp) { mimi_http_response_free(resp); free(resp); }
+        feishu_sm_fail(err != MIMI_OK ? err : MIMI_ERR_FAIL, "tenant_token");
+        /* still allow fallback ws url without token */
+        s_priv.tenant_access_token[0] = '\0';
+    } else {
+        cJSON *root = cJSON_Parse((const char *)resp->body);
+        if (!root) {
+            feishu_sm_fail(MIMI_ERR_FAIL, "tenant_token_parse");
+        } else {
+            cJSON *token = cJSON_GetObjectItem(root, "tenant_access_token");
+            if (token && cJSON_IsString(token)) {
+                strncpy(s_priv.tenant_access_token, token->valuestring,
+                        sizeof(s_priv.tenant_access_token) - 1);
+                s_priv.tenant_access_token[sizeof(s_priv.tenant_access_token) - 1] = '\0';
+                MIMI_LOGI(TAG, "Tenant token acquired");
+            } else {
+                feishu_sm_fail(MIMI_ERR_FAIL, "tenant_token_missing");
+            }
+            cJSON_Delete(root);
+        }
     }
 
-    if (!s_priv.http_gateway) {
-        MIMI_LOGE(TAG, "HTTP Gateway not initialized for Feishu");
-        return MIMI_ERR_INVALID_STATE;
-    }
+    if (resp) { mimi_http_response_free(resp); free(resp); }
 
-    /* Build request body: {"AppID": "...", "AppSecret": "..."} */
+    /* Next: request WS URL (official endpoint). */
+    s_priv.sm_state = FEISHU_SM_GET_WS_URL;
     cJSON *body = cJSON_CreateObject();
     if (!body) {
-        return MIMI_ERR_NO_MEM;
+        feishu_sm_fail(MIMI_ERR_NO_MEM, "ws_url_body");
+        return;
     }
-
     cJSON_AddStringToObject(body, "AppID", s_priv.app_id);
     cJSON_AddStringToObject(body, "AppSecret", s_priv.app_secret);
     char *json = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
     if (!json) {
-        return MIMI_ERR_NO_MEM;
+        feishu_sm_fail(MIMI_ERR_NO_MEM, "ws_url_json");
+        return;
     }
 
-    char response[4096];
-    mimi_err_t err = http_gateway_post(s_priv.http_gateway,
-                                       "/callback/ws/endpoint",
-                                       json, strlen(json),
-                                       response, sizeof(response));
+    mimi_err_t e2 = feishu_http_post_json_async("/callback/ws/endpoint", json, feishu_sm_on_ws_url, NULL);
     free(json);
+    if (e2 != MIMI_OK) {
+        feishu_sm_fail(e2, "ws_url_request");
+    }
+}
 
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to get Feishu WS endpoint: %d", err);
-        return err;
+static void feishu_sm_on_ws_url(mimi_err_t err, mimi_http_response_t *resp, void *user_data)
+{
+    (void)user_data;
+
+    if (s_priv.stopping) {
+        if (resp) { mimi_http_response_free(resp); free(resp); }
+        return;
     }
 
-    if (response[0] == '\0') {
-        MIMI_LOGE(TAG, "Empty Feishu WS endpoint response");
-        return MIMI_ERR_FAIL;
+    s_priv.ws_url[0] = '\0';
+    s_priv.ws_token = NULL;
+
+    bool ok = (err == MIMI_OK && resp && resp->body && resp->body_len > 0);
+    if (ok) {
+        cJSON *root = cJSON_Parse((const char *)resp->body);
+        if (root) {
+            cJSON *data = cJSON_GetObjectItem(root, "data");
+            cJSON *url = data ? cJSON_GetObjectItem(data, "URL") : NULL;
+            if (url && cJSON_IsString(url) && url->valuestring && url->valuestring[0]) {
+                strncpy(s_priv.ws_url, url->valuestring, sizeof(s_priv.ws_url) - 1);
+                s_priv.ws_url[sizeof(s_priv.ws_url) - 1] = '\0';
+                s_priv.ws_token = NULL; /* auth embedded */
+                ok = true;
+            } else {
+                ok = false;
+            }
+            cJSON_Delete(root);
+        } else {
+            ok = false;
+        }
     }
 
-    cJSON *root = cJSON_Parse(response);
-    if (!root) {
-        MIMI_LOGE(TAG, "Invalid Feishu WS endpoint response: %s", response);
-        return MIMI_ERR_FAIL;
+    if (!ok) {
+        MIMI_LOGW(TAG, "Feishu endpoints not available, falling back to hyper-event URL");
+        snprintf(s_priv.ws_url, sizeof(s_priv.ws_url),
+                 "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
+                 s_priv.app_id);
+        s_priv.ws_token = (s_priv.tenant_access_token[0] != '\0') ? s_priv.tenant_access_token : NULL;
     }
 
-    /* According to Feishu SDK, URL field is in data.URL */
-    cJSON *data = cJSON_GetObjectItem(root, "data");
-    cJSON *url = data ? cJSON_GetObjectItem(data, "URL") : NULL;
-    if (url && cJSON_IsString(url)) {
-        strncpy(ws_url, url->valuestring, ws_url_size - 1);
-        ws_url[ws_url_size - 1] = '\0';
-        MIMI_LOGI(TAG, "Feishu WS URL acquired: %.64s...", ws_url);
-        cJSON_Delete(root);
-        return MIMI_OK;
+    if (resp) { mimi_http_response_free(resp); free(resp); }
+
+    /* Configure + start WS gateway (non-blocking). */
+    s_priv.sm_state = FEISHU_SM_START_WS;
+    mimi_err_t cfg_err = ws_client_gateway_configure(s_priv.ws_url, s_priv.ws_token, 30000, 30000);
+    if (cfg_err != MIMI_OK) {
+        feishu_sm_fail(cfg_err, "ws_configure");
+        return;
     }
 
-    /* Log full response for debugging if URL not found */
-    cJSON *code = cJSON_GetObjectItem(root, "code");
-    cJSON *msg = cJSON_GetObjectItem(root, "msg");
-    if (code && cJSON_IsNumber(code)) {
-        MIMI_LOGE(TAG, "Feishu endpoints returned error, code=%d, msg=%s, resp=%s",
-                  code->valueint,
-                  (msg && cJSON_IsString(msg)) ? msg->valuestring : "(null)",
-                  response);
-    } else {
-        MIMI_LOGE(TAG, "Failed to parse Feishu WS URL from endpoints response: %s", response);
+    mimi_err_t start_err = gateway_start(s_priv.ws_gateway);
+    if (start_err != MIMI_OK) {
+        feishu_sm_fail(start_err, "ws_start");
+        return;
     }
-    cJSON_Delete(root);
-    return MIMI_ERR_FAIL;
+
+    s_priv.running = true;
+    s_priv.started = true;
+    s_priv.sm_state = FEISHU_SM_RUNNING;
+    MIMI_LOGI(TAG, "Feishu Channel started (async state machine)");
+}
+
+static void feishu_sm_start(channel_t *ch)
+{
+    (void)ch;
+
+    if (s_priv.stopping) return;
+    if (!s_priv.app_id[0] || !s_priv.app_secret[0]) {
+        feishu_sm_fail(MIMI_ERR_INVALID_STATE, "credentials");
+        return;
+    }
+
+    s_priv.sm_state = FEISHU_SM_GET_TENANT_TOKEN;
+
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        feishu_sm_fail(MIMI_ERR_NO_MEM, "tenant_body");
+        return;
+    }
+    cJSON_AddStringToObject(body, "app_id", s_priv.app_id);
+    cJSON_AddStringToObject(body, "app_secret", s_priv.app_secret);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        feishu_sm_fail(MIMI_ERR_NO_MEM, "tenant_json");
+        return;
+    }
+
+    mimi_err_t e = feishu_http_post_json_async("/open-apis/auth/v3/tenant_access_token/internal",
+                                              json, feishu_sm_on_tenant_token, NULL);
+    free(json);
+    if (e != MIMI_OK) {
+        feishu_sm_fail(e, "tenant_request");
+        return;
+    }
 }
 
 /**
  * Send message to Feishu user
+ * user_id should be chat_id for p2p messages (following Python SDK pattern)
  */
 static mimi_err_t feishu_send_message(const char *user_id, const char *content)
 {
     if (!s_priv.tenant_access_token[0]) {
-        mimi_err_t err = feishu_get_tenant_token();
-        if (err != MIMI_OK) {
-            return err;
-        }
+        /* Avoid long blocking waits in normal send path. */
+        return MIMI_ERR_INVALID_STATE;
     }
 
     cJSON *body = cJSON_CreateObject();
@@ -210,16 +289,52 @@ static mimi_err_t feishu_send_message(const char *user_id, const char *content)
     cJSON_Delete(body);
     if (!json) return MIMI_ERR_NO_MEM;
 
-    char response[4096];
-    mimi_err_t err = http_gateway_post(s_priv.http_gateway,
-                                          "/im/v1/messages?receive_id_type=open_id",
-                                          json, strlen(json),
-                                          response, sizeof(response));
+    /* Build full URL */
+    char url[512];
+    snprintf(url, sizeof(url), "%s/open-apis/im/v1/messages?receive_id_type=chat_id", 
+             "https://open.feishu.cn");
+
+    /* Add Authorization header with current tenant token */
+    char headers[1024];
+    snprintf(headers, sizeof(headers), 
+             "Authorization: Bearer %s\r\n" 
+             "Content-Type: application/json\r\n", 
+             s_priv.tenant_access_token);
+
+    /* Prepare HTTP request */
+    mimi_http_request_t req = {
+        .method = "POST",
+        .url = url,
+        .headers = headers,
+        .body = (const uint8_t *)json,
+        .body_len = strlen(json),
+        .timeout_ms = 30000
+    };
+
+    /* Execute HTTP request */
+    mimi_http_response_t resp;
+    memset(&resp, 0, sizeof(resp));
+    mimi_err_t err = mimi_http_exec(&req, &resp);
     free(json);
 
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to send message: %d", err);
+        mimi_http_response_free(&resp);
         return err;
+    }
+
+    /* Copy response */
+    char response[4096];
+    if (resp.body) {
+        size_t copy_len = resp.body_len;
+        if (copy_len > sizeof(response) - 1) copy_len = sizeof(response) - 1;
+        memcpy(response, resp.body, copy_len);
+        response[copy_len] = '\0';
+        mimi_http_response_free(&resp);
+    } else {
+        response[0] = '\0';
+        mimi_http_response_free(&resp);
+        return MIMI_ERR_IO;
     }
 
     return MIMI_OK;
@@ -232,29 +347,246 @@ static void handle_message(const char *user_id, const char *content)
 {
     MIMI_LOGI(TAG, "Incoming message from %s: %.40s...", user_id, content);
 
+#ifdef FEISHU_TEST_REPLY
+    /* Optional: send a simple echo reply for debugging */
+    MIMI_LOGI(TAG, "Sending test reply to user %s", user_id);
+    mimi_err_t err = feishu_send_message(user_id, "收到你的消息: ");
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to send test reply: %d", err);
+    } else {
+        MIMI_LOGI(TAG, "Test reply sent successfully");
+    }
+#endif
+
     /* Route through Input Processor */
     router_handle_feishu(user_id, content);
 }
 
+typedef struct {
+    char *buf;
+    size_t capacity;
+    size_t len;
+} feishu_payload_buf_t;
+
+typedef struct {
+    const uint8_t *buf;
+    size_t len;
+} feishu_bytes_t;
+
+typedef struct {
+    char key[64];
+    char value[256];
+} feishu_hdr_kv_t;
+
+typedef struct {
+    /* Extracted well-known fields (also stored in kvs) */
+    char type[16];        /* "event", "card", "ping", "pong" */
+    char message_id[128];
+    char trace_id[128];
+    int sum;
+    int seq;
+
+    /* Full header set for ACK echo */
+    feishu_hdr_kv_t kvs[48];
+    size_t kv_count;
+} feishu_frame_meta_t;
+
+static bool feishu_payload_encode_cb(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+{
+    const feishu_bytes_t *src = (const feishu_bytes_t *)(*arg);
+    if (!pb_encode_tag_for_field(stream, field)) {
+        return false;
+    }
+    return pb_encode_string(stream, src->buf, src->len);
+}
+
+static bool feishu_str_decode_cb(pb_istream_t *stream, const pb_field_t *field, void **arg)
+{
+    (void)field;
+    feishu_payload_buf_t *dst = (feishu_payload_buf_t *)(*arg);
+    size_t to_read = stream->bytes_left;
+    if (to_read > dst->capacity - 1) {
+        to_read = dst->capacity - 1;
+    }
+    if (!pb_read(stream, (pb_byte_t *)dst->buf, to_read)) {
+        return false;
+    }
+    dst->len = to_read;
+    dst->buf[to_read] = '\0';
+    return true;
+}
+
+static bool feishu_headers_decode_cb(pb_istream_t *stream, const pb_field_t *field, void **arg)
+{
+    (void)field;
+    feishu_frame_meta_t *out = (feishu_frame_meta_t *)(*arg);
+    if (!out) return false;
+
+    char key_buf[64] = {0};
+    feishu_payload_buf_t key = {.buf = key_buf, .capacity = sizeof(key_buf), .len = 0};
+    char val_buf[256] = {0};
+    feishu_payload_buf_t val = {.buf = val_buf, .capacity = sizeof(val_buf), .len = 0};
+
+    pbbp2_Header h = pbbp2_Header_init_zero;
+    h.key.funcs.decode = feishu_str_decode_cb;
+    h.key.arg = &key;
+    h.value.funcs.decode = feishu_str_decode_cb;
+    h.value.arg = &val;
+
+    if (!pb_decode(stream, pbbp2_Header_fields, &h)) {
+        return false;
+    }
+
+    /* Save full header list for ACK echo */
+    if (out->kv_count < (sizeof(out->kvs) / sizeof(out->kvs[0]))) {
+        feishu_hdr_kv_t *kv = &out->kvs[out->kv_count++];
+        strncpy(kv->key, key_buf, sizeof(kv->key) - 1);
+        kv->key[sizeof(kv->key) - 1] = '\0';
+        strncpy(kv->value, val_buf, sizeof(kv->value) - 1);
+        kv->value[sizeof(kv->value) - 1] = '\0';
+    }
+
+    if (strcmp(key_buf, "type") == 0) {
+        strncpy(out->type, val_buf, sizeof(out->type) - 1);
+        out->type[sizeof(out->type) - 1] = '\0';
+    } else if (strcmp(key_buf, "message_id") == 0) {
+        strncpy(out->message_id, val_buf, sizeof(out->message_id) - 1);
+        out->message_id[sizeof(out->message_id) - 1] = '\0';
+    } else if (strcmp(key_buf, "trace_id") == 0) {
+        strncpy(out->trace_id, val_buf, sizeof(out->trace_id) - 1);
+        out->trace_id[sizeof(out->trace_id) - 1] = '\0';
+    } else if (strcmp(key_buf, "sum") == 0) {
+        out->sum = atoi(val_buf);
+    } else if (strcmp(key_buf, "seq") == 0) {
+        out->seq = atoi(val_buf);
+    }
+
+    return true;
+}
+
+static bool feishu_headers_encode_cb(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+{
+    const feishu_frame_meta_t *m = (const feishu_frame_meta_t *)(*arg);
+    if (!m) return true;
+
+    for (size_t i = 0; i < m->kv_count; i++) {
+        const feishu_hdr_kv_t *kv = &m->kvs[i];
+        if (!kv->key[0]) continue;
+
+        pbbp2_Header sub = pbbp2_Header_init_zero;
+        feishu_bytes_t kb = {.buf = (const uint8_t *)kv->key, .len = strlen(kv->key)};
+        feishu_bytes_t vb = {.buf = (const uint8_t *)kv->value, .len = strlen(kv->value)};
+        sub.key.funcs.encode = feishu_payload_encode_cb;
+        sub.key.arg = &kb;
+        sub.value.funcs.encode = feishu_payload_encode_cb;
+        sub.value.arg = &vb;
+
+        if (!pb_encode_tag_for_field(stream, field)) return false;
+        if (!pb_encode_submessage(stream, pbbp2_Header_fields, &sub)) return false;
+    }
+
+    /* Append biz_rt if missing */
+    bool has_biz_rt = false;
+    for (size_t i = 0; i < m->kv_count; i++) {
+        if (strcmp(m->kvs[i].key, "biz_rt") == 0) { has_biz_rt = true; break; }
+    }
+    if (!has_biz_rt) {
+        pbbp2_Header sub = pbbp2_Header_init_zero;
+        feishu_bytes_t kb = {.buf = (const uint8_t *)"biz_rt", .len = 6};
+        feishu_bytes_t vb = {.buf = (const uint8_t *)"0", .len = 1};
+        sub.key.funcs.encode = feishu_payload_encode_cb; sub.key.arg = &kb;
+        sub.value.funcs.encode = feishu_payload_encode_cb; sub.value.arg = &vb;
+        if (!pb_encode_tag_for_field(stream, field)) return false;
+        if (!pb_encode_submessage(stream, pbbp2_Header_fields, &sub)) return false;
+    }
+
+    return true;
+}
+
+static bool feishu_payload_decode_cb(pb_istream_t *stream, const pb_field_t *field, void **arg)
+{
+    (void)field;
+    feishu_payload_buf_t *dst = (feishu_payload_buf_t *)(*arg);
+    size_t to_read = stream->bytes_left;
+    if (to_read > dst->capacity - 1) {
+        to_read = dst->capacity - 1;
+    }
+    if (!pb_read(stream, (pb_byte_t *)dst->buf, to_read)) {
+        return false;
+    }
+    dst->len = to_read;
+    dst->buf[to_read] = '\0';
+    return true;
+}
+
 /**
  * WebSocket message handler for Feishu
+ * Receives raw protobuf Frame bytes, decodes payload JSON, then reuses existing logic.
  */
 static void on_ws_message(gateway_t *gw, const char *session_id,
-                         const char *content, void *user_data)
+                         const char *content, size_t content_len, void *user_data)
 {
+    (void)gw;
     (void)session_id;
     (void)user_data;
     
-    if (!content) {
+    if (!content || content_len == 0) {
         return;
     }
 
-    MIMI_LOGI(TAG, "Received WebSocket message: %s", content);
+    const uint8_t *data = (const uint8_t *)content;
+    pb_istream_t stream = pb_istream_from_buffer(data, content_len);
+    pbbp2_Frame frame = pbbp2_Frame_init_zero;
+    feishu_frame_meta_t hdr = {0};
+    hdr.sum = 0;
+    hdr.seq = -1;
+    hdr.kv_count = 0;
 
-    cJSON *root = cJSON_Parse(content);
-    if (!root) {
-        MIMI_LOGW(TAG, "Invalid WebSocket message format");
+    char payload_buf[4096];
+    feishu_payload_buf_t payload = {
+        .buf = payload_buf,
+        .capacity = sizeof(payload_buf),
+        .len = 0
+    };
+
+    frame.payload.funcs.decode = feishu_payload_decode_cb;
+    frame.payload.arg = &payload;
+    frame.headers.funcs.decode = feishu_headers_decode_cb;
+    frame.headers.arg = &hdr;
+
+    if (!pb_decode(&stream, pbbp2_Frame_fields, &frame)) {
+        MIMI_LOGW(TAG, "Failed to decode Feishu Frame: %s", PB_GET_ERROR(&stream));
         return;
+    }
+
+    if (payload.len == 0) {
+        MIMI_LOGW(TAG, "Feishu Frame has empty payload");
+        return;
+    }
+
+    /* Only handle + ACK event/card frames. Ignore control/unknown frames to avoid ACK loops. */
+    if (hdr.type[0] && strcmp(hdr.type, "event") != 0 && strcmp(hdr.type, "card") != 0) {
+        MIMI_LOGD(TAG, "Feishu WS frame type=%s ignored", hdr.type);
+        return;
+    }
+
+    MIMI_LOGI(TAG, "Feishu WS payload JSON: %.200s", payload.buf);
+
+    cJSON *root = cJSON_Parse(payload.buf);
+    if (!root) {
+        MIMI_LOGW(TAG, "Invalid Feishu payload JSON");
+        return;
+    }
+
+    /* If we receive an ACK/response payload (e.g. {"code":200}), do not ACK it again. */
+    {
+        cJSON *schema = cJSON_GetObjectItem(root, "schema");
+        cJSON *code = cJSON_GetObjectItem(root, "code");
+        if (!schema && code && cJSON_IsNumber(code)) {
+            MIMI_LOGD(TAG, "Feishu WS response payload received (code=%d), ignore", code->valueint);
+            cJSON_Delete(root);
+            return;
+        }
     }
 
     cJSON *header = cJSON_GetObjectItem(root, "header");
@@ -269,21 +601,213 @@ static void on_ws_message(gateway_t *gw, const char *session_id,
             cJSON *message = cJSON_GetObjectItem(event, "message");
             
             if (sender && message) {
-                cJSON *sender_id = cJSON_GetObjectItem(sender, "sender_id");
-                cJSON *content = cJSON_GetObjectItem(message, "content");
+                /* Get sender_id from sender.sender_id.open_id */
+                cJSON *sender_id_obj = cJSON_GetObjectItem(sender, "sender_id");
+                cJSON *sender_id = NULL;
+                if (sender_id_obj) {
+                    sender_id = cJSON_GetObjectItem(sender_id_obj, "open_id");
+                }
                 
-                if (sender_id && content && cJSON_IsString(content)) {
-                    cJSON *content_obj = cJSON_Parse(content->valuestring);
-                    if (content_obj) {
+                /* Get chat_id from message.chat_id for p2p reply */
+                cJSON *chat_id = cJSON_GetObjectItem(message, "chat_id");
+                cJSON *chat_type = cJSON_GetObjectItem(message, "chat_type");
+                cJSON *message_type = cJSON_GetObjectItem(message, "message_type");
+                cJSON *message_id = cJSON_GetObjectItem(message, "message_id");
+                cJSON *msg_content = cJSON_GetObjectItem(message, "content");
+                
+                MIMI_LOGI(TAG, "Parsed: sender_id=%s, chat_id=%s, chat_type=%s",
+                          sender_id ? sender_id->valuestring : "(null)",
+                          chat_id ? chat_id->valuestring : "(null)",
+                          chat_type && cJSON_IsString(chat_type) ? chat_type->valuestring : "(null)");
+                
+                /* Use chat_id as user_id for reply (following Python SDK pattern) */
+                const char *reply_id = chat_id ? chat_id->valuestring : NULL;
+                
+                if (reply_id && msg_content && cJSON_IsString(msg_content)) {
+                    const char *mt = (message_type && cJSON_IsString(message_type)) ? message_type->valuestring : "unknown";
+                    const char *route_text = NULL;
+                    char route_buf[512] = {0};
+
+                    cJSON *content_obj = cJSON_Parse(msg_content->valuestring);
+                    if (!content_obj) {
+                        snprintf(route_buf, sizeof(route_buf), "[feishu:%s] (content parse failed)", mt);
+                        route_text = route_buf;
+                    } else if (strcmp(mt, "text") == 0) {
                         cJSON *text = cJSON_GetObjectItem(content_obj, "text");
                         if (text && cJSON_IsString(text)) {
-                            handle_message(sender_id->valuestring, text->valuestring);
+                            route_text = text->valuestring;
+                        } else {
+                            snprintf(route_buf, sizeof(route_buf), "[feishu:text] (missing text field)");
+                            route_text = route_buf;
                         }
-                        cJSON_Delete(content_obj);
+                    } else if (strcmp(mt, "image") == 0) {
+                        cJSON *image_key = cJSON_GetObjectItem(content_obj, "image_key");
+                        if (image_key && cJSON_IsString(image_key)) {
+                            char dl_url[512];
+                            if (message_id && cJSON_IsString(message_id) && message_id->valuestring && message_id->valuestring[0]) {
+                                /* Prefer message resource API for media from messages */
+                                snprintf(dl_url, sizeof(dl_url),
+                                         "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s?type=image",
+                                         message_id->valuestring, image_key->valuestring);
+                            } else {
+                                snprintf(dl_url, sizeof(dl_url),
+                                         "https://open.feishu.cn/open-apis/im/v1/images/%s",
+                                         image_key->valuestring);
+                            }
+                            char out_base[512];
+                            snprintf(out_base, sizeof(out_base), "downloads/feishu/images/%s", image_key->valuestring);
+                            char saved_path[512];
+                            mimi_err_t derr = feishu_download_to_file(dl_url, out_base, s_priv.tenant_access_token,
+                                                                      saved_path, sizeof(saved_path));
+                            if (derr == MIMI_OK) {
+                                snprintf(route_buf, sizeof(route_buf),
+                                         "[feishu:image] saved=%.192s image_key=%.192s",
+                                         saved_path, image_key->valuestring);
+                            } else {
+                                snprintf(route_buf, sizeof(route_buf),
+                                         "[feishu:image] download_failed=%d image_key=%.192s",
+                                         derr, image_key->valuestring);
+                            }
+                        } else {
+                            snprintf(route_buf, sizeof(route_buf), "[feishu:image] (missing image_key)");
+                        }
+                        route_text = route_buf;
+                    } else if (strcmp(mt, "audio") == 0) {
+                        cJSON *file_key = cJSON_GetObjectItem(content_obj, "file_key");
+                        cJSON *duration = cJSON_GetObjectItem(content_obj, "duration");
+                        if (file_key && cJSON_IsString(file_key)) {
+                            char dl_url[512];
+                            if (message_id && cJSON_IsString(message_id) && message_id->valuestring && message_id->valuestring[0]) {
+                                snprintf(dl_url, sizeof(dl_url),
+                                         "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s?type=file",
+                                         message_id->valuestring, file_key->valuestring);
+                            } else {
+                                snprintf(dl_url, sizeof(dl_url),
+                                         "https://open.feishu.cn/open-apis/im/v1/files/%s",
+                                         file_key->valuestring);
+                            }
+                            char out_base[512];
+                            snprintf(out_base, sizeof(out_base), "downloads/feishu/audio/%s", file_key->valuestring);
+                            char saved_path[512];
+                            mimi_err_t derr = feishu_download_to_file(dl_url, out_base, s_priv.tenant_access_token,
+                                                                      saved_path, sizeof(saved_path));
+                            if (derr == MIMI_OK) {
+                                if (duration && cJSON_IsNumber(duration)) {
+                                    snprintf(route_buf, sizeof(route_buf),
+                                             "[feishu:audio] saved=%.192s duration=%d file_key=%.96s",
+                                             saved_path, duration->valueint, file_key->valuestring);
+                                } else {
+                                    snprintf(route_buf, sizeof(route_buf),
+                                             "[feishu:audio] saved=%.192s file_key=%.192s",
+                                             saved_path, file_key->valuestring);
+                                }
+                            } else {
+                                snprintf(route_buf, sizeof(route_buf),
+                                         "[feishu:audio] download_failed=%d file_key=%.192s",
+                                         derr, file_key->valuestring);
+                            }
+                        } else {
+                            snprintf(route_buf, sizeof(route_buf), "[feishu:audio] (missing file_key)");
+                        }
+                        route_text = route_buf;
+                    } else if (strcmp(mt, "file") == 0) {
+                        cJSON *file_key = cJSON_GetObjectItem(content_obj, "file_key");
+                        cJSON *file_name = cJSON_GetObjectItem(content_obj, "file_name");
+                        if (file_key && cJSON_IsString(file_key)) {
+                            char dl_url[512];
+                            if (message_id && cJSON_IsString(message_id) && message_id->valuestring && message_id->valuestring[0]) {
+                                snprintf(dl_url, sizeof(dl_url),
+                                         "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s?type=file",
+                                         message_id->valuestring, file_key->valuestring);
+                            } else {
+                                snprintf(dl_url, sizeof(dl_url),
+                                         "https://open.feishu.cn/open-apis/im/v1/files/%s",
+                                         file_key->valuestring);
+                            }
+                            char out_base[512];
+                            snprintf(out_base, sizeof(out_base), "downloads/feishu/files/%s", file_key->valuestring);
+                            char saved_path[512];
+                            mimi_err_t derr = feishu_download_to_file(dl_url, out_base, s_priv.tenant_access_token,
+                                                                      saved_path, sizeof(saved_path));
+                            if (derr == MIMI_OK) {
+                                if (file_name && cJSON_IsString(file_name)) {
+                                    snprintf(route_buf, sizeof(route_buf),
+                                             "[feishu:file] saved=%.192s file_name=%.96s file_key=%.96s",
+                                             saved_path, file_name->valuestring, file_key->valuestring);
+                                } else {
+                                    snprintf(route_buf, sizeof(route_buf),
+                                             "[feishu:file] saved=%.192s file_key=%.192s",
+                                             saved_path, file_key->valuestring);
+                                }
+                            } else {
+                                if (file_name && cJSON_IsString(file_name)) {
+                                    snprintf(route_buf, sizeof(route_buf),
+                                             "[feishu:file] download_failed=%d file_name=%.96s file_key=%.96s",
+                                             derr, file_name->valuestring, file_key->valuestring);
+                                } else {
+                                    snprintf(route_buf, sizeof(route_buf),
+                                             "[feishu:file] download_failed=%d file_key=%.192s",
+                                             derr, file_key->valuestring);
+                                }
+                            }
+                        } else {
+                            snprintf(route_buf, sizeof(route_buf), "[feishu:file] (missing file_key)");
+                        }
+                        route_text = route_buf;
                     } else {
-                        MIMI_LOGW(TAG, "Failed to parse content JSON: %s", content->valuestring);
+                        snprintf(route_buf, sizeof(route_buf), "[feishu:%s] %s", mt, msg_content->valuestring);
+                        route_text = route_buf;
                     }
+
+                    if (route_text) {
+                        MIMI_LOGI(TAG, "Feishu routed content for chat_id=%s: %s",
+                                  reply_id, route_text);
+                        handle_message(reply_id, route_text);
+                    }
+
+                    cJSON_Delete(content_obj);
+                } else {
+                    MIMI_LOGW(TAG, "Missing reply_id or msg_content");
                 }
+            } else {
+                MIMI_LOGW(TAG, "Missing sender or message in event");
+            }
+        }
+    }
+
+    /* Build minimal Response JSON and ACK frame back to Feishu for real events/cards. */
+    {
+        cJSON *resp = cJSON_CreateObject();
+        if (resp) {
+            cJSON_AddNumberToObject(resp, "code", 200);
+            char *resp_json = cJSON_PrintUnformatted(resp);
+            cJSON_Delete(resp);
+
+            if (resp_json) {
+                feishu_bytes_t resp_bytes = {
+                    .buf = (const uint8_t *)resp_json,
+                    .len = strlen(resp_json),
+                };
+
+                pbbp2_Frame ack = pbbp2_Frame_init_zero;
+                ack.SeqID = frame.SeqID;
+                ack.LogID = frame.LogID;
+                ack.service = frame.service;
+                ack.method = frame.method;
+                ack.headers.funcs.encode = feishu_headers_encode_cb;
+                ack.headers.arg = &hdr;
+                ack.payload.funcs.encode = feishu_payload_encode_cb;
+                ack.payload.arg = &resp_bytes;
+
+                uint8_t out_buf[1024];
+                pb_ostream_t out = pb_ostream_from_buffer(out_buf, sizeof(out_buf));
+                if (pb_encode(&out, pbbp2_Frame_fields, &ack)) {
+                    ws_client_gateway_send_raw(out_buf, out.bytes_written);
+                } else {
+                    MIMI_LOGW(TAG, "Failed to encode Feishu ACK Frame: %s", PB_GET_ERROR(&out));
+                }
+
+                free(resp_json);
             }
         }
     }
@@ -343,7 +867,7 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     }
 
     /* Configure HTTP Gateway for Feishu (base domain only) */
-    mimi_err_t err = http_gateway_configure("https://open.feishu.cn",
+    mimi_err_t err = http_client_gateway_configure("https://open.feishu.cn",
                                             NULL, 30000);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
@@ -393,55 +917,13 @@ mimi_err_t feishu_channel_start_impl(channel_t *ch)
         return err;
     }
 
-    /* Prepare tenant access token for legacy hyper-event fallback */
-    if (s_priv.tenant_access_token[0] == '\0') {
-        err = feishu_get_tenant_token();
-        if (err != MIMI_OK) {
-            MIMI_LOGE(TAG, "Failed to get tenant access token: %d", err);
-        }
-    }
+    /* Kick off async startup state machine (non-blocking) */
+    s_priv.stopping = false;
+    s_priv.running = false;
+    s_priv.started = false;
+    feishu_sm_start(ch);
 
-    /*
-     * Preferred: use Feishu official /open-apis/bot/v3/endpoints to get dynamic
-     * WebSocket URL. If this fails (e.g. 404 or feature not enabled), fall
-     * back to legacy hyper-event URL with tenant_access_token auth.
-     */
-    char ws_url[256];
-    const char *ws_token = NULL;
-    err = feishu_get_ws_url(ws_url, sizeof(ws_url));
-    if (err == MIMI_OK) {
-        ws_token = NULL; /* auth embedded in URL */
-    } else {
-        MIMI_LOGW(TAG, "Feishu endpoints not available, falling back to hyper-event URL");
-        snprintf(ws_url, sizeof(ws_url),
-                 "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
-                 s_priv.app_id);
-        if (s_priv.tenant_access_token[0] != '\0') {
-            ws_token = s_priv.tenant_access_token;
-        } else {
-            ws_token = NULL;
-        }
-    }
-
-    /* Configure WebSocket Client Gateway */
-    err = ws_client_gateway_configure(ws_url, ws_token, 30000, 30000);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to configure WebSocket Client Gateway: %d", err);
-        gateway_stop(s_priv.http_gateway);
-        return err;
-    }
-
-    /* Start WebSocket Gateway */
-    err = gateway_start(s_priv.ws_gateway);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to start WebSocket Gateway: %d", err);
-        gateway_stop(s_priv.http_gateway);
-        return err;
-    }
-
-    s_priv.running = true;
-    s_priv.started = true;
-    MIMI_LOGI(TAG, "Feishu Channel started");
+    /* Return immediately; subsequent steps run on dispatcher worker callbacks. */
     return MIMI_OK;
 }
 
@@ -456,8 +938,10 @@ mimi_err_t feishu_channel_stop_impl(channel_t *ch)
         return MIMI_OK;
     }
 
+    s_priv.stopping = true;
     s_priv.running = false;
     s_priv.started = false;
+    s_priv.sm_state = FEISHU_SM_IDLE;
 
     /* Stop WebSocket Gateway */
     if (s_priv.ws_gateway) {

@@ -1,8 +1,8 @@
 /**
- * WebSocket Channel Interface
+ * WebSocket Server Channel Interface
  *
- * Wraps the existing ws_server implementation to conform to the Channel interface.
- * This allows WebSocket to be managed by the Channel Manager alongside other channels.
+ * Wraps the WebSocket server gateway so it can be managed as a standard Channel.
+ * This allows inbound WebSocket connections to be handled alongside other channels.
  */
 
 #pragma once
@@ -14,18 +14,18 @@ extern "C" {
 #endif
 
 /**
- * Global WebSocket channel instance.
+ * Global WebSocket server channel instance.
  * Register this with channel_register() after initialization.
  */
-extern channel_t g_websocket_channel;
+extern channel_t g_ws_server_channel;
 
 /**
- * Initialize WebSocket Channel module.
+ * Initialize WebSocket Server Channel module.
  * Must be called before registering with Channel Manager.
  *
  * @return MIMI_OK on success, error code on failure
  */
-mimi_err_t ws_channel_init(void);
+mimi_err_t ws_server_channel_init(void);
 
 /**
  * Set callback for incoming messages.

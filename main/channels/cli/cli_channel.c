@@ -36,7 +36,7 @@ static cli_channel_priv_t s_priv = {0};
 
 /* Forward declarations */
 static void on_gateway_message(gateway_t *gw, const char *session_id,
-                                const char *content, void *user_data);
+                                const char *content, size_t content_len, void *user_data);
 
 /*
  * Channel Interface Implementation
@@ -185,9 +185,10 @@ static void cli_channel_set_on_disconnect(channel_t *ch,
  */
 
 static void on_gateway_message(gateway_t *gw, const char *session_id,
-                                const char *content, void *user_data)
+                                const char *content, size_t content_len, void *user_data)
 {
     (void)gw;
+    (void)content_len;
     channel_t *ch = (channel_t *)user_data;
     cli_channel_priv_t *priv = (cli_channel_priv_t *)ch->priv_data;
 

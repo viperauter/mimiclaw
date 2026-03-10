@@ -11,7 +11,7 @@
  */
 typedef struct mimi_session_ctx {
     char channel[16];
-    char chat_id[32];
+    char chat_id[128];
     char workspace_root[256];  /* e.g. "workspaces/cli_test" - empty if no session */
 } mimi_session_ctx_t;
 

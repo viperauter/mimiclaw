@@ -11,7 +11,8 @@ extern "C" {
 #endif
 
 /* Forward declaration */
-typedef struct mimi_websocket mimi_websocket_t;
+typedef struct mimi_ws_client mimi_ws_client_t;
+typedef struct mimi_ws_server mimi_ws_server_t;
 
 /* WebSocket event types */
 typedef enum {
@@ -22,7 +23,7 @@ typedef enum {
 } mimi_ws_event_t;
 
 /* WebSocket event callback */
-typedef void (*mimi_ws_event_cb)(mimi_websocket_t *ws, mimi_ws_event_t event, 
+typedef void (*mimi_ws_event_cb)(mimi_ws_client_t *ws, mimi_ws_event_t event, 
                                const uint8_t *data, size_t data_len, 
                                void *user_data);
 
@@ -41,26 +42,26 @@ typedef struct {
  * @param config WebSocket configuration
  * @return WebSocket handle on success, NULL on failure
  */
-mimi_websocket_t *mimi_ws_create(const mimi_ws_config_t *config);
+mimi_ws_client_t *mimi_ws_create(const mimi_ws_config_t *config);
 
 /**
  * Destroy WebSocket client
  * @param ws WebSocket handle
  */
-void mimi_ws_destroy(mimi_websocket_t *ws);
+void mimi_ws_destroy(mimi_ws_client_t *ws);
 
 /**
  * Connect to WebSocket server
  * @param ws WebSocket handle
  * @return MIMI_OK on success, error code on failure
  */
-mimi_err_t mimi_ws_connect(mimi_websocket_t *ws);
+mimi_err_t mimi_ws_connect(mimi_ws_client_t *ws);
 
 /**
  * Disconnect from WebSocket server
  * @param ws WebSocket handle
  */
-void mimi_ws_disconnect(mimi_websocket_t *ws);
+void mimi_ws_disconnect(mimi_ws_client_t *ws);
 
 /**
  * Send message over WebSocket
@@ -69,42 +70,67 @@ void mimi_ws_disconnect(mimi_websocket_t *ws);
  * @param data_len Message length
  * @return MIMI_OK on success, error code on failure
  */
-mimi_err_t mimi_ws_send(mimi_websocket_t *ws, const uint8_t *data, size_t data_len);
+mimi_err_t mimi_ws_send(mimi_ws_client_t *ws, const uint8_t *data, size_t data_len);
 
 /**
  * Check if WebSocket is connected
  * @param ws WebSocket handle
  * @return true if connected, false otherwise
  */
-bool mimi_ws_is_connected(mimi_websocket_t *ws);
+bool mimi_ws_is_connected(mimi_ws_client_t *ws);
 
 /**
  * Poll WebSocket for events
  * @param ws WebSocket handle
  * @param timeout_ms Poll timeout in milliseconds
  */
-void mimi_ws_poll(mimi_websocket_t *ws, uint32_t timeout_ms);
+void mimi_ws_poll(mimi_ws_client_t *ws, uint32_t timeout_ms);
 
 /**
  * Set connection type for event messages
  * @param ws WebSocket handle
  * @param conn_type Connection type
  */
-void mimi_ws_set_conn_type(mimi_websocket_t *ws, conn_type_t conn_type);
+void mimi_ws_set_conn_type(mimi_ws_client_t *ws, conn_type_t conn_type);
 
 /**
  * Get connection type
  * @param ws WebSocket handle
  * @return Connection type
  */
-conn_type_t mimi_ws_get_conn_type(mimi_websocket_t *ws);
+conn_type_t mimi_ws_get_conn_type(mimi_ws_client_t *ws);
 
 /**
  * Get connection ID (mg_connection pointer as uint64_t)
  * @param ws WebSocket handle
  * @return Connection ID
  */
-uint64_t mimi_ws_get_conn_id(mimi_websocket_t *ws);
+uint64_t mimi_ws_get_conn_id(mimi_ws_client_t *ws);
+
+/* =========================
+ * WebSocket Server (public)
+ * ========================= */
+
+typedef struct {
+    int port;
+    const char *path; /* e.g. "/" */
+} mimi_ws_server_config_t;
+
+/**
+ * Start a WebSocket server. Incoming connections/messages are posted to event_bus
+ * as EVENT_CONNECT / EVENT_RECV / EVENT_DISCONNECT with conn_type=CONN_WS_SERVER.
+ */
+mimi_err_t mimi_ws_server_start(const mimi_ws_server_config_t *cfg, mimi_ws_server_t **out_server);
+
+/**
+ * Stop the WebSocket server and close listener.
+ */
+void mimi_ws_server_stop(mimi_ws_server_t *server);
+
+/**
+ * Get listener connection id (backend-specific pointer cast to uint64_t).
+ */
+uint64_t mimi_ws_server_get_listener_id(mimi_ws_server_t *server);
 
 #ifdef __cplusplus
 }

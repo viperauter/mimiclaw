@@ -22,6 +22,7 @@ typedef struct {
     int status;
     uint8_t *body;      /* heap-allocated, NUL-terminated for convenience */
     size_t body_len;
+    char *content_type; /* heap-allocated Content-Type (optional) */
 } mimi_http_response_t;
 
 /* HTTP callback for async operations */

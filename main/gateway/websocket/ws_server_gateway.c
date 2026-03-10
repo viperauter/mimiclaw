@@ -1,31 +1,22 @@
 /**
- * WebSocket Gateway Implementation
+ * WebSocket Server Gateway Implementation
  *
- * Provides WebSocket server transport using mongoose
- * Adapted from channels/websocket/ws_channel.c
+ * Provides WebSocket server transport via platform websocket server.
  */
 
-#include "gateway/websocket/ws_gateway.h"
-#include "router/router.h"
+#include "gateway/websocket/ws_server_gateway.h"
 #include "log.h"
 #include "runtime.h"
 #include "event/event_bus.h"
 #include "event/event_dispatcher.h"
-
-#include "mongoose.h"
-#include "cJSON.h"
+#include "platform/websocket/websocket.h"
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include "cJSON.h"
 
 static const char *TAG = "gw_ws";
-
-/* WebSocket client node */
-typedef struct ws_client {
-    struct mg_connection *c;
-    char session_id[32];
-    struct ws_client *next;
-} ws_client_t;
 
 /* WebSocket Gateway private data */
 typedef struct {
@@ -33,8 +24,7 @@ typedef struct {
     bool started;
     int port;
     char path[32];
-    ws_client_t *clients;
-    struct mg_connection *listener;
+    mimi_ws_server_t *server;
 } ws_gateway_priv_t;
 
 static ws_gateway_priv_t s_priv = {
@@ -42,122 +32,20 @@ static ws_gateway_priv_t s_priv = {
     .path = "/"
 };
 
-/* Forward declarations */
-static void ws_ev(struct mg_connection *c, int ev, void *ev_data);
-
-/**
- * Find client by session_id
- */
-static ws_client_t *find_client_by_session_id(const char *session_id)
+static void ws_make_session_id(uint64_t conn_id, char *out, size_t out_len)
 {
-    for (ws_client_t *p = s_priv.clients; p; p = p->next) {
-        if (strcmp(p->session_id, session_id) == 0) return p;
-    }
-    return NULL;
+    snprintf(out, out_len, "ws_%p", (void *)(uintptr_t)conn_id);
 }
 
-/**
- * Find client by connection
- */
-static ws_client_t *find_client_by_conn(struct mg_connection *c)
+static uint64_t ws_parse_session_id(const char *session_id)
 {
-    for (ws_client_t *p = s_priv.clients; p; p = p->next) {
-        if (p->c == c) return p;
+    if (!session_id) return 0;
+    void *p = NULL;
+    /* Accept "ws_%p" */
+    if (sscanf(session_id, "ws_%p", &p) == 1) {
+        return (uint64_t)(uintptr_t)p;
     }
-    return NULL;
-}
-
-/**
- * Add new client
- */
-static ws_client_t *add_client(struct mg_connection *c)
-{
-    ws_client_t *cl = (ws_client_t *)calloc(1, sizeof(ws_client_t));
-    if (!cl) return NULL;
-    cl->c = c;
-    snprintf(cl->session_id, sizeof(cl->session_id), "ws_%p", (void *)c);
-    cl->next = s_priv.clients;
-    s_priv.clients = cl;
-
-    MIMI_LOGI(TAG, "Client connected: %s", cl->session_id);
-    return cl;
-}
-
-/**
- * Remove client
- */
-static void remove_client(struct mg_connection *c)
-{
-    ws_client_t **pp = &s_priv.clients;
-    while (*pp) {
-        if ((*pp)->c == c) {
-            ws_client_t *tmp = *pp;
-            *pp = (*pp)->next;
-
-            MIMI_LOGI(TAG, "Client disconnected: %s", tmp->session_id);
-
-            /* Post disconnect event to recv queue */
-            event_bus_t *bus = event_bus_get_global();
-            if (bus) {
-                event_bus_post_recv(bus, EVENT_DISCONNECT, (uint64_t)c, CONN_WS_SERVER, NULL, (uint64_t)tmp->session_id, 0);
-            }
-
-            free(tmp);
-            return;
-        }
-        pp = &(*pp)->next;
-    }
-}
-
-/**
- * WebSocket event handler - runs in event loop thread
- */
-static void ws_ev(struct mg_connection *c, int ev, void *ev_data)
-{
-    (void)c;
-
-    if (ev == MG_EV_HTTP_MSG) {
-        struct mg_http_message *hm = (struct mg_http_message *)ev_data;
-        struct mg_str root = mg_str(s_priv.path);
-        if (mg_strcmp(hm->uri, root) == 0) {
-            mg_ws_upgrade(c, hm, NULL);
-            ws_client_t *cl = add_client(c);
-
-            /* Post connect event to recv queue */
-            if (cl) {
-                event_bus_t *bus = event_bus_get_global();
-                if (bus) {
-                    event_bus_post_recv(bus, EVENT_CONNECT, (uint64_t)c, CONN_WS_SERVER, NULL, (uint64_t)cl->session_id, 0);
-                }
-            }
-        }
-    } else if (ev == MG_EV_WS_MSG) {
-        struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
-
-        ws_client_t *client = find_client_by_conn(c);
-        if (!client) {
-            return;
-        }
-
-        /* Create io_buf from message data */
-        io_buf_t *buf = io_buf_from_const(wm->data.buf, wm->data.len);
-        if (!buf) {
-            return;
-        }
-
-        /* Post recv event to queue - NON-BLOCKING */
-        event_bus_t *bus = event_bus_get_global();
-        if (bus) {
-            event_bus_post_recv(bus, EVENT_RECV, (uint64_t)c, CONN_WS_SERVER, buf, (uint64_t)client->session_id, 0);
-        }
-
-        /* Unref our reference - queue holds one */
-        io_buf_unref(buf);
-    } else if (ev == MG_EV_CLOSE) {
-        if (c->is_websocket) {
-            remove_client(c);
-        }
-    }
+    return 0;
 }
 
 /* Event handler - runs in worker thread */
@@ -166,25 +54,22 @@ static void ws_server_event_handler(event_dispatcher_t *disp, event_msg_t *msg, 
     (void)disp;
     (void)user_data;
     gateway_t *gw = &g_ws_gateway;
-    
-    char *session_id = (char *)msg->user_data;
+    char session_id[32];
+    ws_make_session_id(msg->conn_id, session_id, sizeof(session_id));
     
     switch (msg->type) {
         case EVENT_CONNECT:
-            if (session_id && gw->on_connect_cb) {
+            if (gw->on_connect_cb) {
                 gw->on_connect_cb(gw, session_id, gw->callback_user_data);
             }
             break;
             
         case EVENT_RECV: {
-            if (!msg->buf || !session_id) {
+            if (!msg->buf) {
                 break;
             }
-            
             char *payload = (char *)malloc(msg->buf->len + 1);
-            if (!payload) {
-                break;
-            }
+            if (!payload) break;
             memcpy(payload, msg->buf->base, msg->buf->len);
             payload[msg->buf->len] = '\0';
 
@@ -200,14 +85,12 @@ static void ws_server_event_handler(event_dispatcher_t *disp, event_msg_t *msg, 
 
             if (type && cJSON_IsString(type) &&
                 content && cJSON_IsString(content)) {
-
-                MIMI_LOGI(TAG, "WS message from %s: %.40s...",
-                          session_id, content->valuestring);
-
-                /* Call message callback */
                 if (gw->on_message_cb) {
+                    const char *msg_str = content->valuestring;
+                    size_t msg_len = msg_str ? strlen(msg_str) : 0;
                     gw->on_message_cb(gw, session_id,
-                                      content->valuestring,
+                                      msg_str,
+                                      msg_len,
                                       gw->callback_user_data);
                 }
             }
@@ -217,7 +100,7 @@ static void ws_server_event_handler(event_dispatcher_t *disp, event_msg_t *msg, 
         }
             
         case EVENT_DISCONNECT:
-            if (session_id && gw->on_disconnect_cb) {
+            if (gw->on_disconnect_cb) {
                 gw->on_disconnect_cb(gw, session_id, gw->callback_user_data);
             }
             break;
@@ -260,22 +143,18 @@ static mimi_err_t ws_gateway_start_impl(gateway_t *gw)
         return MIMI_OK;
     }
 
-    struct mg_mgr *mgr = (struct mg_mgr *)mimi_runtime_get_event_loop();
-    if (!mgr) {
-        MIMI_LOGE(TAG, "Event loop not initialized");
-        return MIMI_ERR_INVALID_STATE;
-    }
-
-    char url[64];
-    snprintf(url, sizeof(url), "http://0.0.0.0:%d", s_priv.port);
-    s_priv.listener = mg_http_listen(mgr, url, ws_ev, NULL);
-    if (!s_priv.listener) {
-        MIMI_LOGE(TAG, "Failed to start WebSocket server on %s", url);
-        return MIMI_ERR_IO;
+    mimi_ws_server_config_t cfg = {
+        .port = s_priv.port,
+        .path = s_priv.path
+    };
+    mimi_err_t err = mimi_ws_server_start(&cfg, &s_priv.server);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to start WS server: %d", err);
+        return err;
     }
 
     s_priv.started = true;
-    MIMI_LOGI(TAG, "WebSocket Gateway started on %s", url);
+    MIMI_LOGI(TAG, "WebSocket Gateway started (port=%d path=%s)", s_priv.port, s_priv.path);
     return MIMI_OK;
 }
 
@@ -287,16 +166,10 @@ static mimi_err_t ws_gateway_stop_impl(gateway_t *gw)
         return MIMI_OK;
     }
 
-    /* Clean up client list */
-    ws_client_t *p = s_priv.clients;
-    while (p) {
-        ws_client_t *next = p->next;
-        free(p);
-        p = next;
+    if (s_priv.server) {
+        mimi_ws_server_stop(s_priv.server);
+        s_priv.server = NULL;
     }
-    s_priv.clients = NULL;
-
-    s_priv.listener = NULL;
     s_priv.started = false;
     MIMI_LOGI(TAG, "WebSocket Gateway stopped");
     return MIMI_OK;
@@ -325,10 +198,10 @@ static mimi_err_t ws_gateway_send_impl(gateway_t *gw, const char *session_id,
         return MIMI_ERR_INVALID_ARG;
     }
 
-    ws_client_t *client = find_client_by_session_id(session_id);
-    if (!client || !client->c) {
-        MIMI_LOGW(TAG, "No WS client with session_id=%s", session_id);
-        return MIMI_ERR_NOT_FOUND;
+    uint64_t conn_id = ws_parse_session_id(session_id);
+    if (!conn_id) {
+        MIMI_LOGW(TAG, "Invalid session_id=%s", session_id);
+        return MIMI_ERR_INVALID_ARG;
     }
 
     cJSON *resp = cJSON_CreateObject();
@@ -340,19 +213,14 @@ static mimi_err_t ws_gateway_send_impl(gateway_t *gw, const char *session_id,
     cJSON_Delete(resp);
     if (!json_str) return MIMI_ERR_NO_MEM;
 
-    /* Create io_buf and post to send queue */
     io_buf_t *buf = io_buf_from_const(json_str, strlen(json_str));
     free(json_str);
-    
-    if (!buf) {
-        return MIMI_ERR_NO_MEM;
-    }
+    if (!buf) return MIMI_ERR_NO_MEM;
 
-    /* Post to send queue - will be processed in event loop */
     event_bus_t *bus = event_bus_get_global();
     int ret = -1;
     if (bus) {
-        ret = event_bus_post_send(bus, (uint64_t)client->c, CONN_WS_SERVER, buf, 0);
+        ret = event_bus_post_send(bus, conn_id, CONN_WS_SERVER, buf, 0);
     }
     io_buf_unref(buf);
 
@@ -410,3 +278,4 @@ mimi_err_t ws_gateway_configure(int port, const char *path)
 
     return MIMI_OK;
 }
+

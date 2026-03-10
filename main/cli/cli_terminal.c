@@ -33,7 +33,7 @@ static int cli_get_completions(const char *prefix, char **out_matches, int max_m
 struct app_terminal {
     char name[64];
     char channel[32];
-    char chat_id[32];
+    char chat_id[128];
     cli_transport_t transport;
     cli_terminal_t *editor_term;  /* Underlying editor terminal */
 };

@@ -166,7 +166,9 @@ Two message queues bridge the event loop and worker threads:
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │ mg_mgr_poll()                                                          │  │
 │  │     │                                                                  │  │
-│  │     ├──▶ HTTP Response ──▶ http_ev_handler() ──▶ Signal cond_wait     │  │
+│  │     ├──▶ HTTP Response ──▶ http_ev_handler()/http_async_ev()          │  │
+│  │     │                         │                                        │  │
+│  │     │                         └──▶ event_bus_post_recv() (internal)   │  │
 │  │     │                                                                  │  │
 │  │     ├──▶ WS Message ──▶ ws_event_handler()                            │  │
 │  │     │                         │                                        │  │
@@ -238,6 +240,42 @@ Two message queues bridge the event loop and worker threads:
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Runtime / Dispatcher / Gateway / Channel Responsibilities
+
+The current implementation follows a clear separation of concerns between I/O, scheduling, and business orchestration:
+
+- **runtime (`runtime.c`, single I/O thread)**  
+  - Starts first in `app_start()` via `mimi_runtime_start()`.  
+  - Owns the single event loop thread that runs `mg_mgr_poll()` in a loop.  
+  - All socket operations (connect/accept/read/write/TLS/DNS/close) are driven from this thread, typically via Mongoose callbacks and `event_bus_post_*` calls.  
+  - Other threads never touch raw `mg_connection` state directly; they only communicate through the event bus.
+
+- **event bus + dispatcher (`event_bus.c`, `event_dispatcher.c`)**  
+  - Created during runtime initialization; dispatcher workers are started from `runtime_start()`.  
+  - Workers pull messages from `recv_queue` and execute short, non-blocking handlers (JSON parsing, routing, LLM calls, etc.).  
+  - Long synchronous waits on network (e.g. 30s HTTP) are avoided here; instead, workers initiate async operations and react to completion events.
+
+- **gateway layer (I/O adaptation)**  
+  - Started from `gateway_system_start()` and registered via `gateway_manager`.  
+  - Bridges between business intent and I/O:
+    - Outbound: channels call gateway APIs, which translate into `event_bus_post_send()` / `event_bus_post_close()` so that runtime performs the actual socket I/O.  
+    - Inbound: Mongoose callbacks in the platform layer post `EVENT_RECV` / `EVENT_CONNECT` / `EVENT_DISCONNECT` into the event bus; gateways register dispatcher handlers (e.g. `CONN_WS_SERVER`, `CONN_WS_CLIENT`, `CONN_HTTP_CLIENT`) that convert those into higher-level callbacks for channels.  
+  - Gateways do not create their own threads; they are pure adapters between runtime and dispatcher.
+
+- **channel layer (business orchestration / state machines)**  
+  - Channels are started from `channel_system_start()` / `channel_start_all()` and call gateway APIs to configure and start transports.  
+  - Complex startup flows (e.g. Feishu: tenant token → endpoints → configure WS → start WS) are implemented as asynchronous state machines:
+    - `channel_start()` triggers the first async step and returns quickly on the main thread.  
+    - HTTP/WS completions arrive as events on dispatcher workers, which advance the channel state (next HTTP call, WebSocket connect, retry, or fallback).  
+  - Channels no longer perform "start + block until HTTP returns" patterns that could freeze the main thread; all long network waits are expressed as "fire request → handle completion event".
+
+Under this model the boundaries are:
+
+- **runtime**: only I/O.  
+- **dispatcher**: only business handlers and state machine steps.  
+- **gateway**: only event bridging (socket ↔ event bus ↔ channel callbacks).  
+- **channel**: only business flow and state management.
 
 ### Zero-Copy Buffer (`io_buf.h`)
 

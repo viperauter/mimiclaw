@@ -12,7 +12,7 @@
 #include "config.h"
 #include "bus/message_bus.h"
 #include "gateway/websocket/ws_client_gateway.h"
-#include "gateway/http/http_gateway.h"
+#include "gateway/http/http_client_gateway.h"
 #include "gateway/gateway_manager.h"
 #include "log.h"
 #include "os/os.h"
@@ -64,7 +64,7 @@ static mimi_err_t qq_send_message(const char *channel_id, const char *content)
     if (!json) return MIMI_ERR_NO_MEM;
 
     char response[4096];
-    mimi_err_t err = http_gateway_post(s_priv.http_gateway, endpoint, 
+    mimi_err_t err = http_client_gateway_post(s_priv.http_gateway, endpoint, 
                                           json, strlen(json),
                                           response, sizeof(response));
     free(json);
@@ -98,7 +98,7 @@ static void handle_message(const char *user_id, const char *channel_id,
  * WebSocket message handler for QQ
  */
 static void on_ws_message(gateway_t *gw, const char *session_id,
-                         const char *content, void *user_data)
+                         const char *content, size_t content_len, void *user_data)
 {
     (void)session_id;
     (void)user_data;
@@ -212,7 +212,7 @@ mimi_err_t qq_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     }
 
     /* Configure HTTP Gateway for QQ */
-    err = http_gateway_configure("https://api.sgroup.qq.com", 
+    err = http_client_gateway_configure("https://api.sgroup.qq.com", 
                                s_priv.token, 30000);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
