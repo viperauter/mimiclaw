@@ -86,6 +86,9 @@ typedef struct mimi_config {
     char wifi_ssid[64];
     char wifi_pass[64];
     
+    /* network */
+    char dns_server[64]; /* DNS server address, e.g., "114.114.114.114" */
+    
     /* logging */
     char log_level[16]; /* "error", "warn", "info", "debug" */
 } mimi_config_t;

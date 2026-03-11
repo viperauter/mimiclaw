@@ -200,7 +200,7 @@ extern gateway_t* http_client_gateway_get_instance(void);
 extern mimi_err_t http_client_gateway_module_init(void);
 extern mimi_err_t ws_client_gateway_module_init(void);
 
-mimi_err_t gateway_system_init(void)
+mimi_err_t gateway_system_init(bool gateway_mode)
 {
     MIMI_LOGI(TAG, "Initializing gateway system...");
     
@@ -220,13 +220,17 @@ mimi_err_t gateway_system_init(void)
         MIMI_LOGW(TAG, "Failed to initialize WebSocket client gateway module");
     }
     
-    /* Register STDIO Gateway */
-    if (gateway_manager_register(&g_stdio_gateway) != MIMI_OK) {
-        MIMI_LOGW(TAG, "Failed to register STDIO gateway");
-    } else {
-        if (gateway_init(&g_stdio_gateway, NULL) != MIMI_OK) {
-            MIMI_LOGW(TAG, "Failed to initialize STDIO gateway");
+    /* Register STDIO Gateway only if not in gateway mode */
+    if (!gateway_mode) {
+        if (gateway_manager_register(&g_stdio_gateway) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register STDIO gateway");
+        } else {
+            if (gateway_init(&g_stdio_gateway, NULL) != MIMI_OK) {
+                MIMI_LOGW(TAG, "Failed to initialize STDIO gateway");
+            }
         }
+    } else {
+        MIMI_LOGI(TAG, "Gateway mode: skipping STDIO gateway");
     }
     
     /* Register WebSocket Server Gateway */

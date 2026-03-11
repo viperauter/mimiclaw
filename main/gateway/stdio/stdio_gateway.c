@@ -11,7 +11,6 @@
 #include "log.h"
 #include "os/os.h"
 #include "runtime.h"
-#include "mimi_time.h"
 
 #include <stdio.h>
 #include <string.h>

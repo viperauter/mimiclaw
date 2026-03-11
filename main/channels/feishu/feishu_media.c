@@ -10,7 +10,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include "mimi_time.h"
 
 static const char *TAG = "feishu";
 

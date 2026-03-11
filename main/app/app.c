@@ -12,7 +12,7 @@
 #include "fs/fs.h"
 #include "kv.h"
 #include "mimi_err.h"
-#include "mimi_time.h"
+#include "os/os.h"
 #include "runtime.h"
 #include "path_utils.h"
 
@@ -41,6 +41,7 @@
 
 static bool s_app_initialized = false;
 static bool s_app_started = false;
+static bool s_gateway_mode = false;
 
 // Cleanup callback function
 static void app_cleanup(void)
@@ -72,11 +73,13 @@ static void outbound_dispatch_task(void *arg)
     }
 }
 
-mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_level)
+mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_level, bool gateway_mode)
 {
     if (s_app_initialized) {
         return MIMI_OK;
     }
+
+    s_gateway_mode = gateway_mode;
 
     const char *cfg_path = config_path;
     if (!cfg_path) {
@@ -112,6 +115,9 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
     if (enable_logs) {
         mimi_log_setup(log_level ? log_level : "info");
     }
+
+    /* Print OS backend version */
+    MIMI_LOGI("app", "OS backend: %s", mimi_os_get_version());
 
     if (mimi_config_load(cfg_path) != MIMI_OK) {
         MIMI_LOGW("app", "config load failed; using defaults");
@@ -159,7 +165,7 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
     MIMI_LOGI("app", "Command system initialized (%d commands)", command_get_count());
 
     /* Initialize Gateway System */
-    if (gateway_system_init() != MIMI_OK) {
+    if (gateway_system_init(s_gateway_mode) != MIMI_OK) {
         MIMI_LOGE("app", "gateway_system_init failed");
         return MIMI_ERR_FAIL;
     }

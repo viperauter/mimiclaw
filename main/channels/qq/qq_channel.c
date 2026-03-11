@@ -16,7 +16,6 @@
 #include "gateway/gateway_manager.h"
 #include "log.h"
 #include "os/os.h"
-#include "mimi_time.h"
 
 #include "cJSON.h"
 

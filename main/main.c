@@ -6,11 +6,12 @@
  * - Command line argument parsing
  * - Platform-specific initialization (Windows console encoding)
  * - Default config path resolution
- * - Calling the platform-agnostic application layer
+ * - Starting the OS scheduler with application logic
  */
 
 #include "app.h"
 #include "log.h"
+#include "os/os.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -27,12 +28,59 @@ static void print_usage(const char *prog)
     printf("Options:\n");
     printf("  -c, --config <path>    Specify config file path\n");
     printf("  -l, --logs [level]     Enable logging (level: error, warn, info, debug)\n");
+    printf("  -g, --gateway          Gateway mode (no STDIO, daemon-like)\n");
     printf("  -h, --help             Show this help message\n");
     printf("\nExamples:\n");
     printf("  %s                      Use default config at ~/.mimiclaw/config.json\n", prog);
     printf("  %s ./myconfig.json      Use specified config file\n", prog);
     printf("  %s -l debug             Enable debug level logging\n", prog);
     printf("  %s --logs=debug         Enable debug level logging (alternative)\n", prog);
+    printf("  %s -g                   Run in gateway mode (no STDIO)\n", prog);
+}
+
+typedef struct {
+    int argc;
+    char **argv;
+    bool enable_logs;
+    bool gateway_mode;
+    const char *config_path;
+    const char *log_level;
+} main_args_t;
+
+/* Application main function - runs in task context for FreeRTOS */
+static void app_main_task(void *arg)
+{
+    main_args_t *args = (main_args_t *)arg;
+    
+    MIMI_LOGI("main", "Starting MimiClaw (%s)...", mimi_os_get_version());
+    MIMI_LOGI("main", "Config path: %s", args->config_path);
+    MIMI_LOGI("main", "Gateway mode: %s", args->gateway_mode ? "enabled" : "disabled");
+
+    mimi_err_t err = mimi_os_init();
+    if (err != MIMI_OK) {
+        MIMI_LOGE("main", "mimi_os_init failed: %s", mimi_err_to_name(err));
+        return;
+    }
+
+    err = app_init(args->config_path, args->enable_logs, args->log_level, args->gateway_mode);
+    if (err != MIMI_OK) {
+        MIMI_LOGE("main", "app_init failed: %s", mimi_err_to_name(err));
+        return;
+    }
+
+    err = app_start();
+    if (err != MIMI_OK) {
+        MIMI_LOGE("main", "app_start failed: %s", mimi_err_to_name(err));
+        app_destroy();
+        return;
+    }
+
+    err = app_run();
+
+    app_stop();
+    app_destroy();
+
+    MIMI_LOGI("main", "MimiClaw exited with code: %s", mimi_err_to_name(err));
 }
 
 int main(int argc, char **argv)
@@ -42,13 +90,19 @@ int main(int argc, char **argv)
     SetConsoleCP(CP_UTF8);
 #endif
 
-    bool enable_logs = false;
-    const char *config_path = NULL;
-    const char *log_level = NULL;
+    main_args_t args = {
+        .argc = argc,
+        .argv = argv,
+        .enable_logs = false,
+        .gateway_mode = false,
+        .config_path = NULL,
+        .log_level = NULL
+    };
 
     static struct option long_options[] = {
         {"logs", optional_argument, 0, 'l'},
         {"config", required_argument, 0, 'c'},
+        {"gateway", no_argument, 0, 'g'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -56,14 +110,20 @@ int main(int argc, char **argv)
     int opt;
     int optidx = 0;
 
-    while ((opt = getopt_long(argc, argv, "c:l::h", long_options, &optidx)) != -1) {
+    optind = 1;
+    opterr = 0;
+
+    while ((opt = getopt_long(argc, argv, "c:l:gh", long_options, &optidx)) != -1) {
         switch (opt) {
             case 'c':
-                config_path = optarg;
+                args.config_path = optarg;
                 break;
             case 'l':
-                enable_logs = true;
-                log_level = optarg;
+                args.enable_logs = true;
+                args.log_level = optarg;
+                break;
+            case 'g':
+                args.gateway_mode = true;
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -75,22 +135,21 @@ int main(int argc, char **argv)
     }
 
     /* Handle remaining non-option arguments as config file */
-    if (optind < argc && config_path == NULL) {
-        /* Skip any arguments that look like option values that got misplaced */
+    if (optind < argc && args.config_path == NULL) {
         while (optind < argc) {
-            if (argv[optind][0] != '-' && 
+            if (argv[optind][0] != '-' &&
                 strcmp(argv[optind], "debug") != 0 &&
                 strcmp(argv[optind], "info") != 0 &&
                 strcmp(argv[optind], "warn") != 0 &&
                 strcmp(argv[optind], "error") != 0) {
-                config_path = argv[optind];
+                args.config_path = argv[optind];
                 break;
             }
             optind++;
         }
     }
 
-    if (!config_path) {
+    if (!args.config_path) {
         char config_buf[512] = {0};
         const char *home = getenv("HOME");
 #ifdef _WIN32
@@ -100,33 +159,14 @@ int main(int argc, char **argv)
 #endif
         if (home && home[0] != '\0') {
             snprintf(config_buf, sizeof(config_buf), "%s/.mimiclaw/config.json", home);
-            config_path = config_buf;
+            args.config_path = config_buf;
         } else {
-            config_path = "./config.json";
+            args.config_path = "./config.json";
         }
     }
 
-    MIMI_LOGI("main", "Starting MimiClaw...");
-    MIMI_LOGI("main", "Config path: %s", config_path);
-
-    mimi_err_t err = app_init(config_path, enable_logs, log_level);
-    if (err != MIMI_OK) {
-        MIMI_LOGE("main", "app_init failed: %s", mimi_err_to_name(err));
-        return 1;
-    }
-
-    err = app_start();
-    if (err != MIMI_OK) {
-        MIMI_LOGE("main", "app_start failed: %s", mimi_err_to_name(err));
-        app_destroy();
-        return 1;
-    }
-
-    err = app_run();
-
-    app_stop();
-    app_destroy();
-
-    MIMI_LOGI("main", "MimiClaw exited with code: %s", mimi_err_to_name(err));
+    /* Start OS scheduler and run application in task context */
+    mimi_err_t err = mimi_os_start_scheduler(app_main_task, &args);
+    
     return (err == MIMI_OK) ? 0 : 1;
 }

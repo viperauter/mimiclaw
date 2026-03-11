@@ -17,7 +17,6 @@
 #include "gateway/gateway_manager.h"
 #include "log.h"
 #include "os/os.h"
-#include "mimi_time.h"
 #include "fs/fs.h"
 
 #include "cJSON.h"
@@ -262,56 +261,37 @@ static void feishu_sm_start(channel_t *ch)
     }
 }
 
-/**
- * Send message to Feishu user
- * user_id should be chat_id for p2p messages (following Python SDK pattern)
- */
-static mimi_err_t feishu_send_message(const char *user_id, const char *content)
+/* Send a message with given msg_type and JSON content body (e.g. {"text":"..."}, {"image_key":"..."}, {"file_key":"..."}). */
+static mimi_err_t feishu_send_raw(const char *user_id, const char *msg_type, const char *content_json)
 {
-    if (!s_priv.tenant_access_token[0]) {
-        /* Avoid long blocking waits in normal send path. */
-        return MIMI_ERR_INVALID_STATE;
-    }
+    if (!s_priv.tenant_access_token[0]) return MIMI_ERR_INVALID_STATE;
+    if (!user_id || !msg_type || !content_json) return MIMI_ERR_INVALID_ARG;
 
     cJSON *body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "receive_id", user_id);
-    cJSON_AddStringToObject(body, "msg_type", "text");
-
-    cJSON *content_obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(content_obj, "text", content);
-    char *content_str = cJSON_PrintUnformatted(content_obj);
-    cJSON_Delete(content_obj);
-
-    cJSON_AddStringToObject(body, "content", content_str);
-    free(content_str);
+    cJSON_AddStringToObject(body, "msg_type", msg_type);
+    cJSON_AddStringToObject(body, "content", content_json);
 
     char *json = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
     if (!json) return MIMI_ERR_NO_MEM;
 
-    /* Build full URL */
     char url[512];
-    snprintf(url, sizeof(url), "%s/open-apis/im/v1/messages?receive_id_type=chat_id", 
-             "https://open.feishu.cn");
-
-    /* Add Authorization header with current tenant token */
+    snprintf(url, sizeof(url), "%s/open-apis/im/v1/messages?receive_id_type=chat_id", "https://open.feishu.cn");
     char headers[1024];
-    snprintf(headers, sizeof(headers), 
-             "Authorization: Bearer %s\r\n" 
-             "Content-Type: application/json\r\n", 
+    snprintf(headers, sizeof(headers),
+             "Authorization: Bearer %s\r\nContent-Type: application/json\r\n",
              s_priv.tenant_access_token);
 
-    /* Prepare HTTP request */
     mimi_http_request_t req = {
         .method = "POST",
         .url = url,
         .headers = headers,
         .body = (const uint8_t *)json,
         .body_len = strlen(json),
-        .timeout_ms = 30000
+        .timeout_ms = 30000,
     };
 
-    /* Execute HTTP request */
     mimi_http_response_t resp;
     memset(&resp, 0, sizeof(resp));
     mimi_err_t err = mimi_http_exec(&req, &resp);
@@ -322,22 +302,52 @@ static mimi_err_t feishu_send_message(const char *user_id, const char *content)
         mimi_http_response_free(&resp);
         return err;
     }
-
-    /* Copy response */
-    char response[4096];
-    if (resp.body) {
-        size_t copy_len = resp.body_len;
-        if (copy_len > sizeof(response) - 1) copy_len = sizeof(response) - 1;
-        memcpy(response, resp.body, copy_len);
-        response[copy_len] = '\0';
-        mimi_http_response_free(&resp);
-    } else {
-        response[0] = '\0';
-        mimi_http_response_free(&resp);
-        return MIMI_ERR_IO;
-    }
-
+    mimi_http_response_free(&resp);
     return MIMI_OK;
+}
+
+/**
+ * Send text message to Feishu user (chat_id for p2p).
+ */
+static mimi_err_t feishu_send_message(const char *user_id, const char *content)
+{
+    if (!user_id || !content) return MIMI_ERR_INVALID_ARG;
+    cJSON *content_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(content_obj, "text", content);
+    char *content_str = cJSON_PrintUnformatted(content_obj);
+    cJSON_Delete(content_obj);
+    if (!content_str) return MIMI_ERR_NO_MEM;
+    mimi_err_t err = feishu_send_raw(user_id, "text", content_str);
+    free(content_str);
+    return err;
+}
+
+/** Send image message using already-uploaded image_key. */
+static mimi_err_t feishu_send_image(const char *user_id, const char *image_key)
+{
+    if (!user_id || !image_key) return MIMI_ERR_INVALID_ARG;
+    cJSON *content_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(content_obj, "image_key", image_key);
+    char *content_str = cJSON_PrintUnformatted(content_obj);
+    cJSON_Delete(content_obj);
+    if (!content_str) return MIMI_ERR_NO_MEM;
+    mimi_err_t err = feishu_send_raw(user_id, "image", content_str);
+    free(content_str);
+    return err;
+}
+
+/** Send audio/voice message using already-uploaded file_key. */
+static mimi_err_t feishu_send_audio(const char *user_id, const char *file_key)
+{
+    if (!user_id || !file_key) return MIMI_ERR_INVALID_ARG;
+    cJSON *content_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(content_obj, "file_key", file_key);
+    char *content_str = cJSON_PrintUnformatted(content_obj);
+    cJSON_Delete(content_obj);
+    if (!content_str) return MIMI_ERR_NO_MEM;
+    mimi_err_t err = feishu_send_raw(user_id, "audio", content_str);
+    free(content_str);
+    return err;
 }
 
 /**
@@ -635,7 +645,18 @@ static void on_ws_message(gateway_t *gw, const char *session_id,
                     } else if (strcmp(mt, "text") == 0) {
                         cJSON *text = cJSON_GetObjectItem(content_obj, "text");
                         if (text && cJSON_IsString(text)) {
-                            route_text = text->valuestring;
+                            /* Trim whitespace from text content */
+                            const char *raw_text = text->valuestring;
+                            /* Skip leading whitespace */
+                            while (*raw_text && isspace((unsigned char)*raw_text)) {
+                                raw_text++;
+                            }
+                            /* Check if it's a command */
+                            if (raw_text[0] == '/') {
+                                route_text = raw_text;
+                            } else {
+                                route_text = text->valuestring;
+                            }
                         } else {
                             snprintf(route_buf, sizeof(route_buf), "[feishu:text] (missing text field)");
                             route_text = route_buf;
@@ -978,20 +999,52 @@ void feishu_channel_destroy_impl(channel_t *ch)
     MIMI_LOGI(TAG, "Feishu Channel destroyed");
 }
 
+#define FEISHU_IMAGE_PREFIX "[feishu:image]path="
+#define FEISHU_AUDIO_PREFIX "[feishu:audio]path="
+
 /**
- * Send message through Feishu Channel
+ * Send message through Feishu Channel.
+ * Content can be:
+ * - Plain text -> send as text message.
+ * - "[feishu:image]path=<path>" -> upload image from file, send as image message.
+ * - "[feishu:audio]path=<path>" -> upload file as voice, send as audio message.
  */
 mimi_err_t feishu_channel_send_impl(channel_t *ch, const char *session_id,
-                                       const char *content)
+                                    const char *content)
 {
     (void)ch;
 
     if (!s_priv.initialized || !s_priv.started) {
         return MIMI_ERR_INVALID_STATE;
     }
-
     if (!session_id || !content) {
         return MIMI_ERR_INVALID_ARG;
+    }
+
+    if (strncmp(content, FEISHU_IMAGE_PREFIX, sizeof(FEISHU_IMAGE_PREFIX) - 1) == 0) {
+        const char *path = content + (sizeof(FEISHU_IMAGE_PREFIX) - 1);
+        char image_key[128];
+        mimi_err_t err = feishu_upload_image_from_file(
+            path, "message", s_priv.tenant_access_token,
+            image_key, sizeof(image_key));
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Feishu image upload failed: %d, falling back to text", err);
+            return feishu_send_message(session_id, content);
+        }
+        return feishu_send_image(session_id, image_key);
+    }
+
+    if (strncmp(content, FEISHU_AUDIO_PREFIX, sizeof(FEISHU_AUDIO_PREFIX) - 1) == 0) {
+        const char *path = content + (sizeof(FEISHU_AUDIO_PREFIX) - 1);
+        char file_key[128];
+        mimi_err_t err = feishu_upload_file_from_file(
+            path, "opus", NULL, 0, s_priv.tenant_access_token,
+            file_key, sizeof(file_key));
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Feishu audio upload failed: %d, falling back to text", err);
+            return feishu_send_message(session_id, content);
+        }
+        return feishu_send_audio(session_id, file_key);
     }
 
     return feishu_send_message(session_id, content);

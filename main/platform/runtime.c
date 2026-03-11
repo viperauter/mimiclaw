@@ -15,7 +15,7 @@ static const char *TAG = "runtime";
 /* Mongoose event loop manager */
 static struct mg_mgr s_mgr;
 /* Optional custom DNS URL, configured via env */
-static char s_dns_url[64];
+static char s_dns_url[128];
 
 /* Runtime state */
 static volatile mimi_runtime_state_t s_state = RUNTIME_STATE_IDLE;
@@ -104,7 +104,17 @@ mimi_err_t mimi_runtime_init(void)
     if (dns && dns[0]) {
         snprintf(s_dns_url, sizeof(s_dns_url), "udp://%s:53", dns);
         s_mgr.dns4.url = s_dns_url;
-        MIMI_LOGI(TAG, "Runtime DNS server set to %s", s_dns_url);
+        MIMI_LOGI(TAG, "Runtime DNS server set to %s (from environment)", s_dns_url);
+    } else {
+        /* Use DNS server from config */
+        const mimi_config_t *config = mimi_config_get();
+        if (config && config->dns_server[0]) {
+            snprintf(s_dns_url, sizeof(s_dns_url), "udp://%s:53", config->dns_server);
+            s_mgr.dns4.url = s_dns_url;
+            MIMI_LOGI(TAG, "Runtime DNS server set to %s (from config)", s_dns_url);
+        } else {
+            MIMI_LOGI(TAG, "Using default DNS server");
+        }
     }
 
     /* Set timer event loop */

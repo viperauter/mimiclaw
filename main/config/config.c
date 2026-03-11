@@ -126,6 +126,9 @@ static void apply_defaults(void)
     s_config.wifi_ssid[0] = '\0';
     s_config.wifi_pass[0] = '\0';
     
+    /* Network */
+    safe_strcpy(s_config.dns_server, sizeof(s_config.dns_server), "114.114.114.114");
+    
     /* Logging */
     safe_strcpy(s_config.log_level, sizeof(s_config.log_level), "info");
 }
@@ -324,6 +327,11 @@ mimi_err_t mimi_config_load(const char *path)
     cJSON *logging = cJSON_GetObjectItem(root, "logging");
     if (cJSON_IsObject(logging))
         json_str_to_buf(cJSON_GetObjectItem(logging, "level"), s_config.log_level, sizeof(s_config.log_level), true);
+    
+    /* network */
+    cJSON *network = cJSON_GetObjectItem(root, "network");
+    if (cJSON_IsObject(network))
+        json_str_to_buf(cJSON_GetObjectItem(network, "dnsServer"), s_config.dns_server, sizeof(s_config.dns_server), true);
 
     cJSON_Delete(root);
     MIMI_LOGI(TAG, "Loaded config from %s (workspace=%s provider=%s model=%s)",
@@ -432,6 +440,13 @@ mimi_err_t mimi_config_save(const char *path)
     if (logging) {
         cJSON_AddStringToObject(logging, "level", s_config.log_level);
         cJSON_AddItemToObject(root, "logging", logging);
+    }
+    
+    /* network */
+    cJSON *network = cJSON_CreateObject();
+    if (network) {
+        cJSON_AddStringToObject(network, "dnsServer", s_config.dns_server);
+        cJSON_AddItemToObject(root, "network", network);
     }
 
     char *json_str = cJSON_Print(root);

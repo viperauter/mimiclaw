@@ -59,3 +59,10 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
                           cJSON *messages,
                           const char *tools_json,
                           llm_response_t *resp);
+
+/**
+ * Get the last error message from the LLM proxy.
+ * 
+ * @return The last error message, or an empty string if no error.
+ */
+const char *llm_get_last_error(void);

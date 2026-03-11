@@ -9,7 +9,6 @@
 #include "bus/message_bus.h"
 #include "log.h"
 #include "os/os.h"
-#include "mimi_time.h"
 #include "runtime.h"
 #include "memory/session_mgr.h"
 

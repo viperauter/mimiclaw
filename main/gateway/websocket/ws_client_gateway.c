@@ -9,7 +9,6 @@
 #include "runtime.h"
 #include "websocket/websocket.h"
 #include "os/os.h"
-#include "mimi_time.h"
 #include "event/event_bus.h"
 #include "event/event_dispatcher.h"
 

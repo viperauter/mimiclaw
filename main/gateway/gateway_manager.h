@@ -76,9 +76,10 @@ void gateway_manager_foreach(void (*callback)(gateway_t *gw, void *user_data),
 /**
  * Initialize gateway system
  * Registers and initializes all built-in gateways
+ * @param gateway_mode If true, skip STDIO gateway (daemon-like mode)
  * @return MIMI_OK on success
  */
-mimi_err_t gateway_system_init(void);
+mimi_err_t gateway_system_init(bool gateway_mode);
 
 /**
  * Start gateway system

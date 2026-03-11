@@ -64,7 +64,39 @@ mimi_err_t mimi_cond_wait(mimi_cond_t *c, mimi_mutex_t *m, uint32_t timeout_ms);
 mimi_err_t mimi_cond_signal(mimi_cond_t *c);
 mimi_err_t mimi_cond_broadcast(mimi_cond_t *c);
 
+/**
+ * Initialize OS backend.
+ * 
+ * @return MIMI_OK on success, error code on failure.
+ */
+mimi_err_t mimi_os_init(void);
+
+/**
+ * Get OS backend version information.
+ *
+ * @return A string containing the OS backend name and version.
+ */
+const char *mimi_os_get_version(void);
+
+/**
+ * Start OS scheduler and run the given function in a task context.
+ * 
+ * For POSIX backends, this directly calls the function.
+ * For FreeRTOS backends, this creates a task, starts the scheduler,
+ * and the function runs in the task context.
+ * 
+ * @param fn Function to run (must match mimi_task_fn_t signature)
+ * @param arg Argument to pass to the function
+ * @return MIMI_OK on success, error code on failure.
+ */
+mimi_err_t mimi_os_start_scheduler(mimi_task_fn_t fn, void *arg);
+
+/* -------------------------------------------------------------------------
+ * Time functions
+ * ------------------------------------------------------------------------- */
+uint64_t mimi_time_ms(void);
+void mimi_sleep_ms(uint32_t ms);
 
 #ifdef __cplusplus
-}
+};
 #endif

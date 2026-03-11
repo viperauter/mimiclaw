@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "log.h"
-#include "mimi_time.h"
+#include "os/os.h"
 #include "cJSON.h"
 #include "fs/fs.h"
 

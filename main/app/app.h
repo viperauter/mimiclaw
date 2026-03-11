@@ -36,7 +36,7 @@ extern "C" {
  * @param log_level Log level string (error, warn, info, debug)
  * @return MIMI_OK on success, error code on failure
  */
-mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_level);
+mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_level, bool gateway_mode);
 
 /**
  * @brief Start the application

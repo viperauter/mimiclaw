@@ -248,3 +248,37 @@ mimi_err_t mimi_cond_broadcast(mimi_cond_t *c)
     return (pthread_cond_broadcast(&c->c) == 0) ? MIMI_OK : MIMI_ERR_FAIL;
 }
 
+mimi_err_t mimi_os_init(void)
+{
+    /* POSIX backend doesn't require initialization */
+    return MIMI_OK;
+}
+
+const char *mimi_os_get_version(void)
+{
+    return "POSIX backend";
+}
+
+uint64_t mimi_time_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000ULL);
+}
+
+void mimi_sleep_ms(uint32_t ms)
+{
+    usleep((useconds_t)ms * 1000U);
+}
+
+/* -------------------------------------------------------------------------
+ * OS startup function
+ * ------------------------------------------------------------------------- */
+
+mimi_err_t mimi_os_start_scheduler(mimi_task_fn_t fn, void *arg)
+{
+    if (!fn) return MIMI_ERR_INVALID_ARG;
+    fn(arg);
+    return MIMI_OK;
+}
+

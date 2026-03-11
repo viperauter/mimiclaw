@@ -2,6 +2,7 @@
 #include "agent/context_builder.h"
 #include "config.h"
 #include "bus/message_bus.h"
+#include "channels/channel.h"
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
@@ -260,6 +261,20 @@ static void agent_loop_task(void *arg)
 
             if (err != MIMI_OK) {
                 MIMI_LOGE(TAG, "LLM call failed: %s", mimi_err_to_name(err));
+                
+                /* Send LLM error message to channel */
+                const char *llm_error = llm_get_last_error();
+                if (llm_error && llm_error[0]) {
+                    char error_msg[1024];
+                    snprintf(error_msg, sizeof(error_msg), "LLM Error: %s\n%s", 
+                             mimi_err_to_name(err), llm_error);
+                    channel_send(msg.channel, msg.chat_id, error_msg);
+                } else {
+                    char error_msg[512];
+                    snprintf(error_msg, sizeof(error_msg), "LLM Error: %s", 
+                             mimi_err_to_name(err));
+                    channel_send(msg.channel, msg.chat_id, error_msg);
+                }
                 break;
             }
 

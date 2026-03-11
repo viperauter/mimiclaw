@@ -27,6 +27,7 @@ static char s_api_key[LLM_API_KEY_MAX_LEN] = {0};
 static char s_model[LLM_MODEL_MAX_LEN] = {0};
 static char s_provider[16] = {0};
 static char s_api_override[256] = {0}; /* cfg.apiUrl or cfg.api_base */
+static char s_last_error[1024] = {0};
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -260,14 +261,16 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
     free(post_data);
 
     if (herr != MIMI_OK) {
-        MIMI_LOGE(TAG, "HTTP request failed: %s", mimi_err_to_name(herr));
+        snprintf(s_last_error, sizeof(s_last_error), "HTTP request failed: %s", mimi_err_to_name(herr));
+        MIMI_LOGE(TAG, "%s", s_last_error);
         return herr;
     }
 
     if (hresp.status != 200 || !hresp.body) {
-        MIMI_LOGE(TAG, "LLM API error %d: %.500s",
+        snprintf(s_last_error, sizeof(s_last_error), "LLM API error %d: %.500s",
                   hresp.status,
                   hresp.body ? (char *) hresp.body : "");
+        MIMI_LOGE(TAG, "%s", s_last_error);
         mimi_http_response_free(&hresp);
         return MIMI_ERR_FAIL;
     }
@@ -277,7 +280,8 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
     cJSON *root = cJSON_Parse((char *) hresp.body);
     mimi_http_response_free(&hresp);
     if (!root) {
-        MIMI_LOGE(TAG, "Failed to parse API response JSON");
+        snprintf(s_last_error, sizeof(s_last_error), "Failed to parse API response JSON");
+        MIMI_LOGE(TAG, "%s", s_last_error);
         return MIMI_ERR_FAIL;
     }
 
@@ -484,3 +488,8 @@ static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages
     return out;
 }
 
+
+const char *llm_get_last_error(void)
+{
+    return s_last_error;
+}
