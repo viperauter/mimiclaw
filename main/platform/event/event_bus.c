@@ -42,7 +42,7 @@ event_bus_t *event_bus_create(size_t queue_capacity)
     bus->wakeup_fn = NULL;
     bus->wakeup_arg = NULL;
     
-    MIMI_LOGI(TAG, "Event bus created (capacity=%zu)", bus->queue_capacity);
+    MIMI_LOGD(TAG, "Event bus created (capacity=%zu)", bus->queue_capacity);
     return bus;
 }
 

@@ -124,7 +124,10 @@ static void http_async_post_complete(http_async_req_t *ctx)
     if (!ctx || ctx->posted) return;
     ctx->posted = true;
 
-    if (!ctx->bus || !ctx->callback) return;
+    if (!ctx->callback) return;
+
+    event_bus_t *bus = event_bus_get_global();
+    if (!bus) return;
 
     http_async_complete_t *c = (http_async_complete_t *)calloc(1, sizeof(*c));
     if (!c) return;
@@ -134,13 +137,17 @@ static void http_async_post_complete(http_async_req_t *ctx)
     c->callback_data = ctx->callback_data;
 
     /* Deliver completion on dispatcher workers via internal recv event */
-    (void)event_bus_post_recv(ctx->bus,
+    int post_rc = event_bus_post_recv(bus,
                               EVENT_RECV,
                               0,
                               CONN_HTTP_CLIENT,
                               NULL,
                               CONN_TO_ID(c),
                               EVENT_FLAG_INTERNAL);
+    if (post_rc != 0) {
+        /* Shutdown or queue full: avoid leaking the completion record. */
+        free(c);
+    }
 }
 
 static void http_async_finish(http_async_req_t *ctx, mimi_err_t result)
@@ -148,6 +155,12 @@ static void http_async_finish(http_async_req_t *ctx, mimi_err_t result)
     if (!ctx || ctx->done) return;
     ctx->done = true;
     ctx->result = result;
+    /* Stop timeout timer as soon as we know the final outcome. */
+    if (ctx->mgr && ctx->timeout_timer) {
+        mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
+        free(ctx->timeout_timer);
+        ctx->timeout_timer = NULL;
+    }
     if (ctx->conn) ctx->conn->is_closing = 1;
 }
 
@@ -270,6 +283,7 @@ static void http_ev_direct_async(struct mg_connection *c, int ev, void *ev_data)
         /* Cancel timeout timer */
         if (ctx->mgr && ctx->timeout_timer) {
             mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
+            free(ctx->timeout_timer);
             ctx->timeout_timer = NULL;
         }
 
@@ -396,6 +410,7 @@ static void http_ev_proxy_async(struct mg_connection *c, int ev, void *ev_data)
     } else if (ev == MG_EV_CLOSE) {
         if (ctx->mgr && ctx->timeout_timer) {
             mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
+            free(ctx->timeout_timer);
             ctx->timeout_timer = NULL;
         }
 
@@ -817,13 +832,21 @@ mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_respon
         http_proxy_config_t cfg;
         mimi_err_t perr = http_proxy_get_config(&cfg);
         if (perr != MIMI_OK) {
-            if (ctx->timeout_timer) mg_timer_free(&mgr->timers, ctx->timeout_timer);
+            if (ctx->timeout_timer) {
+                mg_timer_free(&mgr->timers, ctx->timeout_timer);
+                free(ctx->timeout_timer);
+                ctx->timeout_timer = NULL;
+            }
             http_async_free_owned(ctx);
             free(ctx);
             return perr;
         }
         if (strcmp(cfg.type, "http") != 0) {
-            if (ctx->timeout_timer) mg_timer_free(&mgr->timers, ctx->timeout_timer);
+            if (ctx->timeout_timer) {
+                mg_timer_free(&mgr->timers, ctx->timeout_timer);
+                free(ctx->timeout_timer);
+                ctx->timeout_timer = NULL;
+            }
             http_async_free_owned(ctx);
             free(ctx);
             return MIMI_ERR_NOT_SUPPORTED;
@@ -839,7 +862,11 @@ mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_respon
     }
 
     if (!ctx->conn) {
-        if (ctx->timeout_timer) mg_timer_free(&mgr->timers, ctx->timeout_timer);
+        if (ctx->timeout_timer) {
+            mg_timer_free(&mgr->timers, ctx->timeout_timer);
+            free(ctx->timeout_timer);
+            ctx->timeout_timer = NULL;
+        }
         http_async_free_owned(ctx);
         free(ctx);
         return MIMI_ERR_IO;

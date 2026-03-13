@@ -123,7 +123,7 @@ mimi_err_t mimi_kv_init(const char *persist_path)
     mimi_err_t e = load_file();
     mimi_mutex_unlock(s_mu);
 
-    if (e == MIMI_OK) MIMI_LOGI(TAG, "KV initialized: %s", s_path);
+    if (e == MIMI_OK) MIMI_LOGD(TAG, "KV initialized: %s", s_path);
     return e;
 }
 

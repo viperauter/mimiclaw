@@ -246,7 +246,7 @@ static mimi_err_t stdio_gateway_init_impl(gateway_t *gw, const gateway_config_t 
     }
 
     gw->priv_data = &s_priv;
-    MIMI_LOGI(TAG, "STDIO Gateway initialized");
+    MIMI_LOGD(TAG, "STDIO Gateway initialized");
     return MIMI_OK;
 }
 

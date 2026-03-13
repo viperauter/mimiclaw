@@ -25,7 +25,7 @@ mimi_err_t gateway_manager_init(void)
     memset(&g_manager, 0, sizeof(g_manager));
     g_manager.initialized = true;
     
-    MIMI_LOGI(TAG, "Gateway manager initialized (max=%d)", GATEWAY_MAX_COUNT);
+    MIMI_LOGD(TAG, "Gateway manager initialized (max=%d)", GATEWAY_MAX_COUNT);
     return MIMI_OK;
 }
 
@@ -56,7 +56,7 @@ mimi_err_t gateway_manager_register(gateway_t *gw)
     /* Register */
     g_manager.gateways[g_manager.count++] = gw;
     
-    MIMI_LOGI(TAG, "Gateway '%s' registered (%d/%d)", gw->name, g_manager.count, GATEWAY_MAX_COUNT);
+    MIMI_LOGD(TAG, "Gateway '%s' registered (%d/%d)", gw->name, g_manager.count, GATEWAY_MAX_COUNT);
     return MIMI_OK;
 }
 
@@ -108,7 +108,7 @@ mimi_err_t gateway_manager_start_all(void)
         return MIMI_ERR_INVALID_STATE;
     }
     
-    MIMI_LOGI(TAG, "Starting all gateways (%d)...", g_manager.count);
+    MIMI_LOGD(TAG, "Starting all gateways (%d)...", g_manager.count);
     
     for (int i = 0; i < g_manager.count; i++) {
         gateway_t *gw = g_manager.gateways[i];
@@ -130,7 +130,7 @@ mimi_err_t gateway_manager_start_all(void)
         }
     }
     
-    MIMI_LOGI(TAG, "All gateways started");
+    MIMI_LOGD(TAG, "All gateways started");
     return MIMI_OK;
 }
 
@@ -202,7 +202,7 @@ extern mimi_err_t ws_client_gateway_module_init(void);
 
 mimi_err_t gateway_system_init(bool gateway_mode)
 {
-    MIMI_LOGI(TAG, "Initializing gateway system...");
+    MIMI_LOGD(TAG, "Initializing gateway system...");
     
     /* Initialize gateway manager */
     if (gateway_manager_init() != MIMI_OK) {
@@ -258,13 +258,13 @@ mimi_err_t gateway_system_init(bool gateway_mode)
         }
     }
     
-    MIMI_LOGI(TAG, "Gateway system initialized (%d gateways)", gateway_manager_count());
+    MIMI_LOGD(TAG, "Gateway system initialized (%d gateways)", gateway_manager_count());
     return MIMI_OK;
 }
 
 mimi_err_t gateway_system_start(void)
 {
-    MIMI_LOGI(TAG, "Starting gateway system...");
+    MIMI_LOGD(TAG, "Starting gateway system...");
     return gateway_manager_start_all();
 }
 

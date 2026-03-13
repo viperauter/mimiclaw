@@ -166,7 +166,7 @@ mimi_err_t qq_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     /* Check if QQ is enabled */
     const mimi_config_t *config = mimi_config_get();
     if (!config->qq_enabled) {
-        MIMI_LOGI(TAG, "QQ Channel is disabled");
+        MIMI_LOGD(TAG, "QQ Channel is disabled");
         return MIMI_ERR_NOT_SUPPORTED;
     }
 

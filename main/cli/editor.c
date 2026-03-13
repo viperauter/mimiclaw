@@ -18,6 +18,44 @@
 #include <fcntl.h>
 #endif
 
+/* UTF-8 character handling utilities */
+
+/* Check if a byte is a UTF-8 continuation byte */
+static bool is_utf8_cont_byte(unsigned char c)
+{
+    return (c & 0xC0) == 0x80;
+}
+
+/* Get the length of a UTF-8 character starting at the given position */
+static int get_utf8_char_len(const char *str, int pos)
+{
+    unsigned char c = (unsigned char)str[pos];
+    if (c < 0x80) return 1;    /* ASCII */
+    if (c < 0xE0) return 2;    /* 2-byte UTF-8 */
+    if (c < 0xF0) return 3;    /* 3-byte UTF-8 */
+    if (c < 0xF8) return 4;    /* 4-byte UTF-8 */
+    return 1;                  /* Invalid, treat as 1 byte */
+}
+
+/* Find the start of the previous UTF-8 character before pos */
+static int find_prev_utf8_char(const char *str, int pos)
+{
+    if (pos <= 0) return 0;
+    pos--;
+    while (pos > 0 && is_utf8_cont_byte((unsigned char)str[pos])) {
+        pos--;
+    }
+    return pos;
+}
+
+/* Find the end of the current UTF-8 character at pos */
+static int find_next_utf8_char(const char *str, int pos, int len)
+{
+    if (pos >= len) return len;
+    int char_len = get_utf8_char_len(str, pos);
+    return pos + char_len;
+}
+
 #define CLI_MAX_LINE_LEN 1024
 #define CLI_MAX_HISTORY 100
 #define CLI_MAX_COMPLETIONS 32
@@ -225,9 +263,16 @@ static void cli_delete_char(cli_terminal_t *term)
 {
     if (term->cursor >= term->len) return;
     
-    memmove(&term->line[term->cursor], &term->line[term->cursor + 1],
-            term->len - term->cursor);
-    term->len--;
+    /* Find the end of the current UTF-8 character */
+    int next_char_start = find_next_utf8_char(term->line, term->cursor, term->len);
+    
+    /* Calculate the length of the character to delete */
+    int char_len = next_char_start - term->cursor;
+    
+    /* Delete the entire UTF-8 character */
+    memmove(&term->line[term->cursor], &term->line[next_char_start],
+            term->len - next_char_start);
+    term->len -= char_len;
     term->line[term->len] = '\0';
     
     cli_redraw_current_line(term);
@@ -238,13 +283,20 @@ static void cli_backspace(cli_terminal_t *term)
 {
     if (term->cursor <= 0) return;
     
-    term->cursor--;
+    /* Find the start of the previous UTF-8 character */
+    int prev_char_start = find_prev_utf8_char(term->line, term->cursor);
     
-    /* Delete the character at the new cursor position */
-    memmove(&term->line[term->cursor], &term->line[term->cursor + 1],
+    /* Calculate the length of the character to delete */
+    int char_len = term->cursor - prev_char_start;
+    
+    /* Delete the entire UTF-8 character */
+    memmove(&term->line[prev_char_start], &term->line[term->cursor],
             term->len - term->cursor);
-    term->len--;
+    term->len -= char_len;
     term->line[term->len] = '\0';
+    
+    /* Update cursor position */
+    term->cursor = prev_char_start;
     
     cli_redraw_current_line(term);
 }
@@ -471,15 +523,29 @@ static void cli_process_char(cli_terminal_t *term, char c)
                     
                 case 'C': /* Right */
                     if (term->cursor < term->len) {
-                        term->cursor++;
-                        cli_term_output(term, "\033[C");
+                        /* Move to the end of the current UTF-8 character */
+                        int old_pos = term->cursor;
+                        term->cursor = find_next_utf8_char(term->line, term->cursor, term->len);
+                        /* For UTF-8 characters (non-ASCII), move cursor twice to account for wide characters */
+                        if ((unsigned char)term->line[old_pos] >= 0x80) {
+                            cli_term_output(term, "\033[C\033[C");
+                        } else {
+                            cli_term_output(term, "\033[C");
+                        }
                     }
                     return;
                     
                 case 'D': /* Left */
                     if (term->cursor > 0) {
-                        term->cursor--;
-                        cli_term_output(term, "\033[D");
+                        /* Move to the start of the previous UTF-8 character */
+                        int prev_pos = find_prev_utf8_char(term->line, term->cursor);
+                        /* For UTF-8 characters (non-ASCII), move cursor twice to account for wide characters */
+                        if ((unsigned char)term->line[prev_pos] >= 0x80) {
+                            cli_term_output(term, "\033[D\033[D");
+                        } else {
+                            cli_term_output(term, "\033[D");
+                        }
+                        term->cursor = prev_pos;
                     }
                     return;
                     

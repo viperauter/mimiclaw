@@ -38,7 +38,7 @@ mimi_err_t router_init(void)
     memset(&g_router, 0, sizeof(g_router));
     g_router.initialized = true;
     
-    MIMI_LOGI(TAG, "Router initialized");
+    MIMI_LOGD(TAG, "Router initialized");
     return MIMI_OK;
 }
 
@@ -80,7 +80,7 @@ mimi_err_t router_register_mapping(const char *gateway_name,
     
     mapping->active = true;
     
-    MIMI_LOGI(TAG, "Registered mapping: %s -> %s (%d/%d)", 
+    MIMI_LOGD(TAG, "Registered mapping: %s -> %s (%d/%d)",
               gateway_name, channel_name, g_router.count, ROUTER_MAX_MAPPINGS);
     return MIMI_OK;
 }

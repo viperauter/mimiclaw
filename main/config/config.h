@@ -17,14 +17,15 @@ extern "C" {
 #endif
 
 /* String capacity for config fields (do not exceed in JSON) */
-#define MIMI_CONFIG_API_KEY_LEN   320
-#define MIMI_CONFIG_MODEL_LEN    64
-#define MIMI_CONFIG_PROVIDER_LEN 32
-#define MIMI_CONFIG_URL_LEN      256
-#define MIMI_CONFIG_TOKEN_LEN    128
-#define MIMI_CONFIG_HOST_LEN     128
-#define MIMI_CONFIG_PORT_LEN     16
-#define MIMI_CONFIG_BASE_PATH_LEN 256
+#define MIMI_CONFIG_API_KEY_LEN     320
+#define MIMI_CONFIG_MODEL_LEN       64
+#define MIMI_CONFIG_PROVIDER_LEN    32
+#define MIMI_CONFIG_URL_LEN         256
+#define MIMI_CONFIG_TOKEN_LEN       128
+#define MIMI_CONFIG_HOST_LEN        128
+#define MIMI_CONFIG_PORT_LEN        16
+#define MIMI_CONFIG_BASE_PATH_LEN   256
+#define MIMI_CONFIG_API_PROTOCOL_LEN 16
 #define MIMI_CONFIG_ALLOW_FROM_LEN 256
 
 typedef struct mimi_config {
@@ -42,7 +43,8 @@ typedef struct mimi_config {
     char api_key[MIMI_CONFIG_API_KEY_LEN];
     char provider[MIMI_CONFIG_PROVIDER_LEN];
     char model[MIMI_CONFIG_MODEL_LEN];
-    char api_base[MIMI_CONFIG_URL_LEN];   /* provider apiBase override */
+    char api_base[MIMI_CONFIG_URL_LEN];                /* provider apiBase override */
+    char api_protocol[MIMI_CONFIG_API_PROTOCOL_LEN];   /* "openai" | "anthropic" | "" (auto) */
 
     /* channels.telegram */
     bool telegram_enabled;

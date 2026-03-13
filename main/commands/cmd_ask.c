@@ -94,6 +94,6 @@ void cmd_ask_init(void)
     if (ret != 0) {
         MIMI_LOGW(TAG, "Failed to register ask command: %d", ret);
     } else {
-        MIMI_LOGI(TAG, "Ask command registered");
+        MIMI_LOGD(TAG, "Ask command registered");
     }
 }

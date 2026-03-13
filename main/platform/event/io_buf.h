@@ -9,6 +9,28 @@ extern "C" {
 
 typedef struct io_buf io_buf_t;
 
+typedef void *(*io_alloc_fn)(size_t size, void *ctx);
+typedef void (*io_free_fn)(void *ptr, void *ctx);
+
+typedef struct {
+    io_alloc_fn alloc;
+    io_free_fn free;
+    void *ctx;
+} io_allocator_t;
+
+/**
+ * Set global allocator used by io_buf default implementation.
+ *
+ * - If not set, defaults to malloc/free.
+ * - Intended for RTOS targets that want to route allocations to a specific heap.
+ *
+ * Note: should be called during system init (before heavy concurrent use).
+ */
+void io_set_allocator(const io_allocator_t *a);
+void io_get_allocator(io_allocator_t *out);
+
+typedef void (*io_buf_release_fn)(io_buf_t *buf, void *owner);
+
 struct io_buf {
     uint8_t *base;          /* Pointer to data (named 'base' for libuv compatibility) */
     size_t len;             /* Data length */
@@ -18,6 +40,11 @@ struct io_buf {
     
     /* Capacity for allocated buffers */
     size_t capacity;
+
+    /* Custom release hook (optional).
+     * If set, io_buf_unref() calls release(buf, owner) when refcount reaches 0. */
+    io_buf_release_fn release;
+    void *owner;
 };
 
 /**

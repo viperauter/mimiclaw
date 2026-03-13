@@ -13,7 +13,8 @@ if(WIN32)
         -D_POSIX_C_SOURCE=200809L
     )
 else()
+    # On non-Windows (POSIX) use OpenSSL-backed TLS for Mongoose
     add_compile_definitions(
-        MG_TLS=MG_TLS_BUILTIN
+        MG_TLS=MG_TLS_OPENSSL
     )
 endif()

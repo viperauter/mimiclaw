@@ -9,11 +9,30 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "log.h"
+#include "os/os.h"
 #include "cJSON.h"
 
 static const char *TAG = "tools";
 
 #define MAX_TOOLS 12
+#define MAX_TOOL_THREADS 4
+
+typedef struct {
+    char *name;
+    char *input_json;
+    mimi_session_ctx_t session_ctx;
+    tool_callback_t callback;
+    void *user_data;
+} tool_task_t;
+
+static mimi_mutex_t *s_tool_mutex = NULL;
+static mimi_cond_t *s_tool_cond = NULL;
+static tool_task_t s_tool_queue[16];
+static int s_queue_head = 0;
+static int s_queue_tail = 0;
+static int s_queue_count = 0;
+static bool s_worker_running = false;
+static mimi_task_handle_t s_tool_workers[MAX_TOOL_THREADS] = {0};
 
 static mimi_tool_t s_tools[MAX_TOOLS];
 static int s_tool_count = 0;
@@ -26,7 +45,7 @@ static void register_tool(const mimi_tool_t *tool)
         return;
     }
     s_tools[s_tool_count++] = *tool;
-    MIMI_LOGI(TAG, "Registered tool: %s", tool->name);
+    MIMI_LOGD(TAG, "Registered tool: %s", tool->name);
 }
 
 static void build_tools_json(void)
@@ -50,7 +69,7 @@ static void build_tools_json(void)
     s_tools_json = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
 
-    MIMI_LOGI(TAG, "Tools JSON built (%d tools)", s_tool_count);
+    MIMI_LOGD(TAG, "Tools JSON built (%d tools)", s_tool_count);
 }
 
 mimi_err_t tool_registry_init(void)
@@ -179,7 +198,7 @@ mimi_err_t tool_registry_init(void)
 
     build_tools_json();
 
-    MIMI_LOGI(TAG, "Tool registry initialized");
+    MIMI_LOGD(TAG, "Tool registry initialized");
     return MIMI_OK;
 }
 
@@ -202,4 +221,208 @@ mimi_err_t tool_registry_execute(const char *name, const char *input_json,
     MIMI_LOGW(TAG, "Unknown tool: %s", name);
     snprintf(output, output_size, "Error: unknown tool '%s'", name);
     return MIMI_ERR_NOT_FOUND;
+}
+
+static void tool_worker_thread(void *arg)
+{
+    (void)arg;
+    MIMI_LOGD(TAG, "Tool worker thread started");
+
+    while (s_worker_running) {
+        if (s_tool_mutex) {
+            mimi_mutex_lock(s_tool_mutex);
+        }
+
+        while (s_queue_count == 0 && s_worker_running) {
+            if (s_tool_cond && s_tool_mutex) {
+                mimi_cond_wait(s_tool_cond, s_tool_mutex, 1000);
+            } else {
+                mimi_sleep_ms(100);
+            }
+        }
+
+        if (!s_worker_running) {
+            if (s_tool_mutex) {
+                mimi_mutex_unlock(s_tool_mutex);
+            }
+            break;
+        }
+
+        if (s_queue_count == 0) {
+            if (s_tool_mutex) {
+                mimi_mutex_unlock(s_tool_mutex);
+            }
+            continue;
+        }
+
+        tool_task_t task = s_tool_queue[s_queue_head];
+        s_queue_head = (s_queue_head + 1) % 16;
+        s_queue_count--;
+        if (s_tool_mutex) {
+            mimi_mutex_unlock(s_tool_mutex);
+        }
+
+        char output[8192] = {0};
+        mimi_err_t result = tool_registry_execute(task.name, task.input_json, output, sizeof(output), &task.session_ctx);
+
+        if (task.callback) {
+            task.callback(result, task.name, output, task.user_data);
+        }
+        
+        if (task.input_json) {
+            free((void *)task.input_json);
+        }
+        if (task.name) {
+            free((void *)task.name);
+        }
+    }
+
+    MIMI_LOGI(TAG, "Tool worker thread exiting");
+    return;
+}
+
+static void start_tool_workers(void)
+{
+    if (s_worker_running) {
+        return;
+    }
+
+    /* Initialize mutex and condition variable */
+    if (s_tool_mutex == NULL) {
+        mimi_err_t err = mimi_mutex_create(&s_tool_mutex);
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Failed to create mutex: %s", mimi_err_to_name(err));
+            return;
+        }
+    }
+
+    if (s_tool_cond == NULL) {
+        mimi_err_t err = mimi_cond_create(&s_tool_cond);
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Failed to create condition: %s", mimi_err_to_name(err));
+            mimi_mutex_destroy(s_tool_mutex);
+            s_tool_mutex = NULL;
+            return;
+        }
+    }
+
+    s_worker_running = true;
+    for (int i = 0; i < MAX_TOOL_THREADS; i++) {
+        char thread_name[32];
+        snprintf(thread_name, sizeof(thread_name), "tool_worker_%d", i);
+        mimi_err_t err = mimi_task_create(thread_name, (mimi_task_fn_t)tool_worker_thread, NULL, 4096, 0, &s_tool_workers[i]);
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Failed to create tool worker thread %d: %s", i, mimi_err_to_name(err));
+        }
+    }
+    MIMI_LOGI(TAG, "Started %d tool worker threads", MAX_TOOL_THREADS);
+}
+
+static void stop_tool_workers(void)
+{
+    if (!s_worker_running) {
+        return;
+    }
+
+    s_worker_running = false;
+    if (s_tool_cond) {
+        mimi_cond_broadcast(s_tool_cond);
+    }
+
+    for (int i = 0; i < MAX_TOOL_THREADS; i++) {
+        if (s_tool_workers[i]) {
+            mimi_task_delete(s_tool_workers[i]);
+            s_tool_workers[i] = NULL;
+        }
+    }
+
+    if (s_tool_cond) {
+        mimi_cond_destroy(s_tool_cond);
+        s_tool_cond = NULL;
+    }
+
+    if (s_tool_mutex) {
+        mimi_mutex_destroy(s_tool_mutex);
+        s_tool_mutex = NULL;
+    }
+    MIMI_LOGI(TAG, "Stopped tool worker threads");
+}
+
+mimi_err_t tool_registry_execute_async(const char *name, const char *input_json,
+                                       const mimi_session_ctx_t *session_ctx,
+                                       tool_callback_t callback, void *user_data)
+{
+    static bool workers_started = false;
+    if (!workers_started) {
+        start_tool_workers();
+        workers_started = true;
+    }
+
+    if (s_tool_mutex) {
+        mimi_mutex_lock(s_tool_mutex);
+    }
+
+    if (s_queue_count >= 16) {
+        if (s_tool_mutex) {
+            mimi_mutex_unlock(s_tool_mutex);
+        }
+        MIMI_LOGE(TAG, "Tool queue full");
+        return MIMI_ERR_NO_MEM;
+    }
+
+    // Make copies of name and input_json to avoid memory corruption
+    s_tool_queue[s_queue_tail].name = name ? strdup(name) : NULL;
+    s_tool_queue[s_queue_tail].input_json = input_json ? strdup(input_json) : NULL;
+    MIMI_LOGI(TAG, "tool_registry_execute_async: queued task %s with input_json='%s' (copied: name=%p, input_json=%p)", 
+              s_tool_queue[s_queue_tail].name, s_tool_queue[s_queue_tail].input_json, 
+              s_tool_queue[s_queue_tail].name, s_tool_queue[s_queue_tail].input_json);
+    if (session_ctx) {
+        s_tool_queue[s_queue_tail].session_ctx = *session_ctx;
+    }
+    s_tool_queue[s_queue_tail].callback = callback;
+    s_tool_queue[s_queue_tail].user_data = user_data;
+
+    s_queue_tail = (s_queue_tail + 1) % 16;
+    s_queue_count++;
+
+    if (s_tool_cond) {
+        mimi_cond_signal(s_tool_cond);
+    }
+    if (s_tool_mutex) {
+        mimi_mutex_unlock(s_tool_mutex);
+    }
+
+    return MIMI_OK;
+}
+
+mimi_err_t tool_registry_execute_all_async(const tool_call_t *calls, int call_count,
+                                           const mimi_session_ctx_t *session_ctx,
+                                           tool_callback_t callback, void *user_data)
+{
+    if (!calls || call_count <= 0) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    mimi_err_t result = MIMI_OK;
+    for (int i = 0; i < call_count; i++) {
+        mimi_err_t err = tool_registry_execute_async(calls[i].name, calls[i].input_json,
+                                                     session_ctx, callback, user_data);
+        if (err != MIMI_OK) {
+            result = err;
+        }
+    }
+
+    return result;
+}
+
+mimi_err_t tool_registry_deinit(void)
+{
+    stop_tool_workers();
+    
+    // Cleanup other resources
+    free(s_tools_json);
+    s_tools_json = NULL;
+    
+    MIMI_LOGD(TAG, "Tool registry deinitialized");
+    return MIMI_OK;
 }

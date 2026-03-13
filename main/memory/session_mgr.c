@@ -36,7 +36,7 @@ void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out)
 mimi_err_t session_mgr_init(void)
 {
     const mimi_config_t *cfg = mimi_config_get();
-    MIMI_LOGI(TAG, "Session manager initialized at %s", cfg->session_dir);
+    MIMI_LOGD(TAG, "Session manager initialized at %s", cfg->session_dir);
     return MIMI_OK;
 }
 

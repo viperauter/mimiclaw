@@ -183,6 +183,6 @@ void cmd_session_init(void)
     if (ret != 0) {
         MIMI_LOGW(TAG, "Failed to register session command: %d", ret);
     } else {
-        MIMI_LOGI(TAG, "Session command registered");
+        MIMI_LOGD(TAG, "Session command registered");
     }
 }

@@ -15,10 +15,10 @@ typedef enum {
     MIMI_LOG_DEBUG = 3,
 } mimi_log_level_t;
 
-void mimi_log(mimi_log_level_t level, const char *tag, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
+void mimi_log(mimi_log_level_t level, const char *tag, const char *file, int line, const char *fmt, ...)
+    __attribute__((format(printf, 5, 6)));
 
-void mimi_vlog(mimi_log_level_t level, const char *tag, const char *fmt, va_list ap);
+void mimi_vlog(mimi_log_level_t level, const char *tag, const char *file, int line, const char *fmt, va_list ap);
 
 /* Set log level */
 void mimi_log_set_level(mimi_log_level_t level);
@@ -41,10 +41,10 @@ void mimi_tty_show_prompt(void);
  * interleave with the interactive prompt. */
 void mimi_tty_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
-#define MIMI_LOGE(tag, fmt, ...) mimi_log(MIMI_LOG_ERROR, (tag), (fmt), ##__VA_ARGS__)
-#define MIMI_LOGW(tag, fmt, ...) mimi_log(MIMI_LOG_WARN, (tag), (fmt), ##__VA_ARGS__)
-#define MIMI_LOGI(tag, fmt, ...) mimi_log(MIMI_LOG_INFO, (tag), (fmt), ##__VA_ARGS__)
-#define MIMI_LOGD(tag, fmt, ...) mimi_log(MIMI_LOG_DEBUG, (tag), (fmt), ##__VA_ARGS__)
+#define MIMI_LOGE(tag, fmt, ...) mimi_log(MIMI_LOG_ERROR, (tag), __FILE__, __LINE__, (fmt), ##__VA_ARGS__)
+#define MIMI_LOGW(tag, fmt, ...) mimi_log(MIMI_LOG_WARN, (tag), __FILE__, __LINE__, (fmt), ##__VA_ARGS__)
+#define MIMI_LOGI(tag, fmt, ...) mimi_log(MIMI_LOG_INFO, (tag), __FILE__, __LINE__, (fmt), ##__VA_ARGS__)
+#define MIMI_LOGD(tag, fmt, ...) mimi_log(MIMI_LOG_DEBUG, (tag), __FILE__, __LINE__, (fmt), ##__VA_ARGS__)
 
 #ifdef __cplusplus
 }

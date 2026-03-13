@@ -108,6 +108,29 @@
 
 ---
 
+## OS Abstraction Layer
+
+The OS abstraction layer provides a unified interface for different OS backends, enabling seamless portability across platforms:
+
+### Key Components
+
+- **mimi_os_init()**: Initialize OS backend
+- **mimi_os_get_version()**: Get OS backend version
+- **mimi_os_start_scheduler()**: Start OS scheduler and run application
+  - **POSIX**: Directly calls the provided function
+  - **FreeRTOS**: Creates a task, starts scheduler, and runs the function in task context
+- **Task Management**: `mimi_task_create()`, `mimi_task_delete()`
+- **Synchronization**: `mimi_mutex_*()`, `mimi_cond_*()`
+- **Timers**: `mimi_timer_start()`, `mimi_timer_stop()`
+- **Time Functions**: `mimi_time_ms()`, `mimi_sleep_ms()`
+
+### Architecture Benefits
+
+- **Unified Main Entry**: Single `main.c` for all platforms
+- **Easy Portability**: New RTOS backends only require implementing `os_xxx.c`
+- **Consistent API**: Same interface across all platforms
+- **Minimal Platform-Specific Code**: OS differences isolated in backend implementations
+
 ## Event-Driven Architecture
 
 ### Overview
@@ -298,6 +321,38 @@ io_buf_unref(buf);                              // release our reference
 
 ### HTTP Integration
 
+### LLM Proxy (llm/llm_proxy.c)
+
+The LLM proxy handles communication with various LLM providers (OpenAI, Anthropic, OpenRouter).
+
+#### Current Implementation (Synchronous)
+
+- **Synchronous HTTP Requests**: Uses `mimi_http_exec()` for blocking HTTP calls to LLM APIs
+- **Blocking Behavior**: Worker threads are blocked until LLM responses are received
+- **Limitations**: Cannot handle multiple concurrent LLM requests from different channels
+
+#### Proposed Implementation (Asynchronous)
+
+- **Asynchronous HTTP Requests**: Uses `mimi_http_exec_async()` for non-blocking HTTP calls
+- **Callback-Based**: Uses callback functions to handle LLM responses
+- **Benefits**:
+  - **Concurrent Processing**: Multiple channels can make LLM requests simultaneously
+  - **Non-Blocking**: Worker threads are not blocked, can handle other tasks
+  - **Better Resource Utilization**: More efficient use of system resources
+  - **Improved Responsiveness**: System remains responsive during LLM processing
+
+#### Execution Flow (Asynchronous)
+
+1. **Channel**: Receives user message and calls `llm_request_async()`
+2. **LLM Proxy**: Builds JSON payload and calls `mimi_http_exec_async()`
+3. **HTTP Module**: Sends request and returns immediately
+4. **Worker Thread**: Freed to handle other tasks
+5. **HTTP Response**: Received in event loop, posted to event bus
+6. **Worker Thread**: Processes response and calls callback
+7. **Channel**: Receives LLM response via callback and sends to user
+
+### HTTP Integration
+
 HTTP requests use the shared event loop with condition variable synchronization:
 
 ```
@@ -485,10 +540,46 @@ Shared command system used by all channels.
 - Message format: `mimi_msg_t` with channel, session_id, and content
 
 **Agent Loop** (`main/agent/`):
-- Processes messages from inbound queue
-- Builds context and calls LLM API
-- Handles tool use and ReAct loop
-- Sends responses to outbound queue
+- **Synchronous Agent** (`agent_loop.c`): Processes messages from inbound queue, builds context, calls LLM API, handles tool use and ReAct loop, sends responses to outbound queue
+- **Asynchronous Agent** (`agent_async.c`): Non-blocking agent implementation using state machine and callbacks, supports concurrent processing
+
+**Asynchronous Agent Loop** (`agent_async_loop.c`):
+- **Non-blocking LLM Calls**: Uses `llm_chat_tools_async()` for asynchronous LLM requests
+- **State Machine**: Tracks processing state through callbacks
+- **Concurrent Processing**: Supports multiple concurrent requests (MAX_CONCURRENT=8)
+- **Callback-Based**: Uses completion callbacks for LLM and tool responses
+- **Asynchronous Tool Execution**: Tools run in worker thread pool, not blocking the main loop
+- **Tool Worker Thread Pool**: 4 worker threads process tool executions in parallel
+
+**Asynchronous Tool Execution Flow:**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Async Agent Loop                             │
+│                                                                  │
+│  1. Receive message from inbound queue                          │
+│  2. Start async LLM call (llm_chat_tools_async)                │
+│  3. Return immediately, continue processing next message      │
+│                                                                  │
+│  LLM Response Received:                                         │
+│  4. If tool_use detected:                                      │
+│     - Queue tools to worker thread pool                        │
+│     - Return immediately                                        │
+│                                                                  │
+│  All Tools Complete:                                            │
+│  5. Append tool results to messages                            │
+│  6. Start next LLM call                                        │
+│                                                                  │
+│  No Tool Use:                                                   │
+│  7. Send response to outbound queue                            │
+│  8. Mark request complete                                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Tool Worker Thread Pool:**
+- 4 worker threads for parallel tool execution
+- Non-blocking tool execution via callback
+- Support for multiple concurrent tool calls
+- Thread-safe queue with 16 slot capacity
 
 **Tools** (`main/tools/`):
 - Tool registry for dynamic tool registration

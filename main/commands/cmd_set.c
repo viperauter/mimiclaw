@@ -92,6 +92,6 @@ void cmd_set_init(void)
     if (ret != 0) {
         MIMI_LOGW(TAG, "Failed to register set command: %d", ret);
     } else {
-        MIMI_LOGI(TAG, "Set command registered");
+        MIMI_LOGD(TAG, "Set command registered");
     }
 }

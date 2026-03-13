@@ -44,7 +44,7 @@ static void on_gateway_message(gateway_t *gw, const char *session_id,
 
 static mimi_err_t cli_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
 {
-    MIMI_LOGI(TAG, "Initializing CLI channel");
+    MIMI_LOGD(TAG, "Initializing CLI channel");
 
     memset(&s_priv, 0, sizeof(s_priv));
 
@@ -65,7 +65,7 @@ static mimi_err_t cli_channel_init_impl(channel_t *ch, const channel_config_t *c
     /* Store private data */
     ch->priv_data = &s_priv;
 
-    MIMI_LOGI(TAG, "CLI channel initialized (session: %s)", s_priv.session_id);
+    MIMI_LOGD(TAG, "CLI channel initialized (session: %s)", s_priv.session_id);
     return MIMI_OK;
 }
 

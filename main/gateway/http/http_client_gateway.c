@@ -58,7 +58,7 @@ static mimi_err_t http_client_gateway_init_impl(gateway_t *gw, const http_client
     priv->connected = true;
     gw->is_initialized = true;
     
-    MIMI_LOGI(TAG, "HTTP Gateway initialized (base_url: %s)", priv->base_url);
+    MIMI_LOGD(TAG, "HTTP Gateway initialized (base_url: %s)", priv->base_url);
     return MIMI_OK;
 }
 
@@ -146,7 +146,7 @@ mimi_err_t http_client_gateway_module_init(void)
     g_http_gateway.is_initialized = false;
     g_http_gateway.is_started = false;
     
-    MIMI_LOGI(TAG, "HTTP Gateway module initialized");
+    MIMI_LOGD(TAG, "HTTP Gateway module initialized");
     
     /* Initialize HTTP platform module */
     mimi_http_init();

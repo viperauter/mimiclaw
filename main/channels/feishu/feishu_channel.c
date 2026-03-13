@@ -117,7 +117,6 @@ static void feishu_sm_on_tenant_token(mimi_err_t err, mimi_http_response_t *resp
     }
 
     if (err != MIMI_OK || !resp || !resp->body || resp->body_len == 0) {
-        if (resp) { mimi_http_response_free(resp); free(resp); }
         feishu_sm_fail(err != MIMI_OK ? err : MIMI_ERR_FAIL, "tenant_token");
         /* still allow fallback ws url without token */
         s_priv.tenant_access_token[0] = '\0';
@@ -850,9 +849,9 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
 
     /* Check if Feishu is enabled */
     const mimi_config_t *config = mimi_config_get();
-    MIMI_LOGI(TAG, "Feishu config: enabled=%d, app_id=%s", config->feishu_enabled, config->feishu_app_id);
+    MIMI_LOGD(TAG, "Feishu config: enabled=%d, app_id=%s", config->feishu_enabled, config->feishu_app_id);
     if (!config->feishu_enabled) {
-        MIMI_LOGI(TAG, "Feishu Channel is disabled");
+        MIMI_LOGD(TAG, "Feishu Channel is disabled");
         return MIMI_ERR_NOT_SUPPORTED;
     }
 
@@ -867,7 +866,7 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     if (!s_priv.app_id[0] || !s_priv.app_secret[0]) {
         MIMI_LOGW(TAG, "Feishu credentials not configured");
     } else {
-        MIMI_LOGI(TAG, "Feishu initialized with App ID: %.6s***", s_priv.app_id);
+        MIMI_LOGD(TAG, "Feishu initialized with App ID: %.6s***", s_priv.app_id);
     }
 
     /* Get or create WebSocket Client Gateway */
@@ -905,7 +904,7 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     ch->priv_data = &s_priv;
     s_priv.initialized = true;
 
-    MIMI_LOGI(TAG, "Feishu Channel initialized");
+    MIMI_LOGD(TAG, "Feishu Channel initialized");
     return MIMI_OK;
 }
 

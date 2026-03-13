@@ -24,7 +24,7 @@
 #include "memory/session_mgr.h"
 #include "skills/skill_loader.h"
 #include "tools/tool_registry.h"
-#include "agent/agent_loop.h"
+#include "agent/agent_async_loop.h"
 
 #include "llm/llm_proxy.h"
 #include "proxy/http_proxy.h"
@@ -128,7 +128,7 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         mimi_log_setup(cfg->log_level);
     }
 
-    MIMI_LOGI("app", "Config loaded: feishu_enabled=%d, feishu_app_id=%s",
+    MIMI_LOGD("app", "Config loaded: feishu_enabled=%d, feishu_app_id=%s",
               cfg->feishu_enabled, cfg->feishu_app_id[0] ? cfg->feishu_app_id : "(empty)");
 
     if (mimi_workspace_bootstrap(cfg_path, true) != MIMI_OK) {
@@ -136,7 +136,7 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         return MIMI_ERR_FAIL;
     }
 
-    MIMI_LOGI("app", "workspace=%s config=%s",
+    MIMI_LOGD("app", "workspace=%s config=%s",
               cfg->workspace[0] ? cfg->workspace : "(default)", cfg_path);
 
     if (mimi_kv_init("./kv.json") != MIMI_OK) {
@@ -162,21 +162,21 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         MIMI_LOGE("app", "command_system_auto_init failed");
         return MIMI_ERR_FAIL;
     }
-    MIMI_LOGI("app", "Command system initialized (%d commands)", command_get_count());
+    MIMI_LOGD("app", "Command system initialized (%d commands)", command_get_count());
 
     /* Initialize Gateway System */
     if (gateway_system_init(s_gateway_mode) != MIMI_OK) {
         MIMI_LOGE("app", "gateway_system_init failed");
         return MIMI_ERR_FAIL;
     }
-    MIMI_LOGI("app", "Gateway system initialized");
+    MIMI_LOGD("app", "Gateway system initialized");
 
     /* Initialize Channel System */
     if (channel_system_init() != MIMI_OK) {
         MIMI_LOGE("app", "channel_system_init failed");
         return MIMI_ERR_FAIL;
     }
-    MIMI_LOGI("app", "Channel system initialized");
+    MIMI_LOGD("app", "Channel system initialized");
 
     if (memory_store_init() != MIMI_OK) {
         MIMI_LOGE("app", "memory_store_init failed");
@@ -198,13 +198,13 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         MIMI_LOGE("app", "llm_proxy_init failed");
         return MIMI_ERR_FAIL;
     }
-    if (agent_loop_init() != MIMI_OK) {
-        MIMI_LOGE("app", "agent_loop_init failed");
+    if (agent_async_loop_init() != MIMI_OK) {
+        MIMI_LOGE("app", "agent_async_loop_init failed");
         return MIMI_ERR_FAIL;
     }
 
     s_app_initialized = true;
-    MIMI_LOGI("app", "Application initialized");
+    MIMI_LOGD("app", "Application initialized");
 
     return MIMI_OK;
 }
@@ -219,8 +219,8 @@ mimi_err_t app_start(void)
         return MIMI_OK;
     }
 
-    if (agent_loop_start() != MIMI_OK) {
-        MIMI_LOGE("app", "agent_loop_start failed");
+    if (agent_async_loop_start() != MIMI_OK) {
+        MIMI_LOGE("app", "agent_async_loop_start failed");
         return MIMI_ERR_FAIL;
     }
 
@@ -248,21 +248,21 @@ mimi_err_t app_start(void)
         MIMI_LOGE("app", "Failed to start runtime");
         return MIMI_ERR_FAIL;
     }
-    MIMI_LOGI("app", "Runtime started");
+    MIMI_LOGD("app", "Runtime started");
 
     /* Start Gateway System */
     if (gateway_system_start() != MIMI_OK) {
         MIMI_LOGE("app", "Failed to start gateway system");
         return MIMI_ERR_FAIL;
     }
-    MIMI_LOGI("app", "Gateway system started");
+    MIMI_LOGD("app", "Gateway system started");
 
     /* Start Channel System */
     if (channel_system_start() != MIMI_OK) {
         MIMI_LOGE("app", "Failed to start channel system");
         return MIMI_ERR_FAIL;
     }
-    MIMI_LOGI("app", "Channel system started");
+    MIMI_LOGD("app", "Channel system started");
 
     s_app_started = true;
     MIMI_LOGI("app", "Application started");
@@ -295,14 +295,17 @@ void app_stop(void)
 
     MIMI_LOGI("app", "Stopping application...");
 
-    /* Stop runtime first */
-    mimi_runtime_stop();
+    /* Stop agent loop */
+    agent_async_loop_stop();
 
     /* Stop channel system */
     channel_system_stop();
 
     /* Stop gateway system */
     gateway_system_stop();
+
+    /* Stop runtime last: other subsystems may still need the event loop to close cleanly */
+    mimi_runtime_stop();
 
     /* Cleanup */
     app_cleanup();
@@ -321,6 +324,9 @@ void app_destroy(void)
 
     /* Deinitialize runtime */
     mimi_runtime_deinit();
+    
+    /* Deinitialize tool registry */
+    tool_registry_deinit();
 
     s_app_initialized = false;
     MIMI_LOGI("app", "Application destroyed");

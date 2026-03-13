@@ -274,7 +274,7 @@ mimi_err_t mimi_fs_workspace_activate(const char *name)
     for (int i = 0; i < s_workspace_count; i++) {
         if (strcmp(s_workspaces[i].name, name) == 0) {
             s_current_workspace = i;
-            MIMI_LOGI(TAG, "Activated workspace '%s' (base: %s)",
+            MIMI_LOGD(TAG, "Activated workspace '%s' (base: %s)",
                       name, s_workspaces[i].base_dir);
             return MIMI_OK;
         }

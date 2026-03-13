@@ -258,7 +258,7 @@ mimi_err_t ws_client_gateway_module_init(void)
         event_dispatcher_register_handler(disp, CONN_WS_CLIENT, ws_client_event_handler, NULL);
     }
     
-    MIMI_LOGI(TAG, "WebSocket Client Gateway module initialized");
+    MIMI_LOGD(TAG, "WebSocket Client Gateway module initialized");
     return MIMI_OK;
 }
 

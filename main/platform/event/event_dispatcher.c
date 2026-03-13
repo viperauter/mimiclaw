@@ -55,7 +55,7 @@ static void worker_thread_fn(void *arg)
     mimi_queue_t *recv_queue = event_bus_get_recv_queue(disp->event_bus);
     event_msg_t msg;
     
-    MIMI_LOGI(TAG, "Worker thread started");
+    MIMI_LOGD(TAG, "Worker thread started");
     
     while (disp->running) {
         mimi_err_t err = mimi_queue_recv(recv_queue, &msg, 100);
@@ -151,7 +151,7 @@ int event_dispatcher_register_handler(event_dispatcher_t *disp,
     disp->handlers[disp->handler_count].user_data = user_data;
     disp->handler_count++;
     
-    MIMI_LOGI(TAG, "Registered handler for conn_type=%d", conn_type);
+    MIMI_LOGD(TAG, "Registered handler for conn_type=%d", conn_type);
     return 0;
 }
 
@@ -178,7 +178,7 @@ mimi_err_t event_dispatcher_start(event_dispatcher_t *disp)
         }
     }
     
-    MIMI_LOGI(TAG, "Dispatcher started with %zu workers", disp->worker_count);
+    MIMI_LOGD(TAG, "Dispatcher started with %zu workers", disp->worker_count);
     return MIMI_OK;
 }
 

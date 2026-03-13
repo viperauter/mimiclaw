@@ -30,7 +30,7 @@ mimi_err_t gateway_init(gateway_t *gw, const gateway_config_t *cfg)
     }
     
     gw->is_initialized = true;
-    MIMI_LOGI(TAG, "Gateway '%s' initialized", gw->name);
+    MIMI_LOGD(TAG, "Gateway '%s' initialized", gw->name);
     return MIMI_OK;
 }
 
@@ -59,7 +59,7 @@ mimi_err_t gateway_start(gateway_t *gw)
     }
     
     gw->is_started = true;
-    MIMI_LOGI(TAG, "Gateway '%s' started", gw->name);
+    MIMI_LOGD(TAG, "Gateway '%s' started", gw->name);
     return MIMI_OK;
 }
 

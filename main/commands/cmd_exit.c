@@ -46,6 +46,6 @@ void cmd_exit_init(void)
     if (ret != 0) {
         MIMI_LOGW(TAG, "Failed to register exit command: %d", ret);
     } else {
-        MIMI_LOGI(TAG, "Exit command registered");
+        MIMI_LOGD(TAG, "Exit command registered");
     }
 }

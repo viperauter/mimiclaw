@@ -155,6 +155,7 @@ void mimi_timer_stop(mimi_timer_handle_t *handle)
     if (!handle || !*handle) return;
     struct mimi_timer_handle_inner *h = (struct mimi_timer_handle_inner *)*handle;
     mg_timer_free(&h->mgr->timers, h->t);
+    free(h->t);
     free(h);
     *handle = NULL;
 }

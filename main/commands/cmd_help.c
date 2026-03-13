@@ -50,6 +50,6 @@ void cmd_help_init(void)
     if (ret != 0) {
         MIMI_LOGW(TAG, "Failed to register help command: %d", ret);
     } else {
-        MIMI_LOGI(TAG, "Help command registered");
+        MIMI_LOGD(TAG, "Help command registered");
     }
 }

@@ -4,6 +4,8 @@ project(mimiclaw C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+find_package(OpenSSL REQUIRED)
+
 # --------------------------------
 # OS backend selection
 # --------------------------------
@@ -86,7 +88,8 @@ list(APPEND APP_SRC
     main/cron/cron_service.c
     main/heartbeat/heartbeat.c
     main/agent/context_builder.c
-    main/agent/agent_loop.c
+    main/agent/agent_async.c
+    main/agent/agent_async_loop.c
     main/proxy/http_proxy.c
     main/cli/editor.c
     main/cli/cli_terminal.c
@@ -145,6 +148,8 @@ target_include_directories(mimiclaw PRIVATE
 target_link_libraries(mimiclaw
     PRIVATE
     mongoose
+    OpenSSL::SSL
+    OpenSSL::Crypto
     cjson
     nanopb
     feishu_pb

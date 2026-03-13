@@ -50,7 +50,7 @@ mimi_err_t channel_manager_init_with_config(const channel_manager_config_t *cfg)
     }
 
     s_state.initialized = true;
-    MIMI_LOGI(TAG, "Channel manager initialized (max_channels=%d, auto_start=%s)",
+    MIMI_LOGD(TAG, "Channel manager initialized (max_channels=%d, auto_start=%s)",
               s_state.config.max_channels,
               s_state.config.auto_start ? "true" : "false");
 
@@ -135,7 +135,7 @@ mimi_err_t channel_register(channel_t *ch)
     s_state.channels[s_state.count++] = ch;
     ch->is_initialized = true;
 
-    MIMI_LOGI(TAG, "Channel '%s' registered (%d/%d)", 
+    MIMI_LOGD(TAG, "Channel '%s' registered (%d/%d)", 
               ch->name, s_state.count, s_state.config.max_channels);
 
     /* Auto-start */
@@ -217,7 +217,7 @@ mimi_err_t channel_start_all(void)
                 MIMI_LOGW(TAG, "Failed to start channel '%s': %d", ch->name, err);
             } else {
                 ch->is_started = true;
-                MIMI_LOGI(TAG, "Channel '%s' started", ch->name);
+                MIMI_LOGD(TAG, "Channel '%s' started", ch->name);
             }
         }
     }
@@ -378,7 +378,7 @@ mimi_err_t channel_system_init(void)
         }
     }
 
-    MIMI_LOGI(TAG, "Channel system initialized (%d channels)", channel_get_count());
+    MIMI_LOGD(TAG, "Channel system initialized (%d channels)", channel_get_count());
     return MIMI_OK;
 }
 

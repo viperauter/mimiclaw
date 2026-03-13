@@ -38,7 +38,7 @@ mimi_err_t http_proxy_init(void)
         MIMI_LOGI(TAG, "Proxy configured: %s:%u (%s)",
                   s_proxy_host, (unsigned)s_proxy_port, s_proxy_type);
     } else {
-        MIMI_LOGI(TAG, "No proxy configured (direct connection)");
+        MIMI_LOGD(TAG, "No proxy configured (direct connection)");
     }
     return MIMI_OK;
 }

@@ -20,7 +20,7 @@ mimi_err_t message_bus_init(void)
         return MIMI_ERR_NO_MEM;
     }
 
-    MIMI_LOGI(TAG, "Message bus initialized (queue depth %d)", qlen);
+    MIMI_LOGD(TAG, "Message bus initialized (queue depth %d)", qlen);
     return MIMI_OK;
 }
 

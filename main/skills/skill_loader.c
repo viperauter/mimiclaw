@@ -135,13 +135,13 @@ static void install_builtin(const builtin_skill_t *skill)
 
 mimi_err_t skill_loader_init(void)
 {
-    MIMI_LOGI(TAG, "Initializing skills system");
+    MIMI_LOGD(TAG, "Initializing skills system");
 
     for (size_t i = 0; i < NUM_BUILTINS; i++) {
         install_builtin(&s_builtins[i]);
     }
 
-    MIMI_LOGI(TAG, "Skills system ready (%d built-in)", (int)NUM_BUILTINS);
+    MIMI_LOGD(TAG, "Skills system ready (%d built-in)", (int)NUM_BUILTINS);
     return MIMI_OK;
 }
 

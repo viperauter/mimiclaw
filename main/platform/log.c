@@ -23,7 +23,7 @@ static const char *level_name(mimi_log_level_t level)
     }
 }
 
-void mimi_vlog(mimi_log_level_t level, const char *tag, const char *fmt, va_list ap)
+void mimi_vlog(mimi_log_level_t level, const char *tag, const char *file, int line, const char *fmt, va_list ap)
 {
     if (level > s_log_level) return;
     
@@ -35,19 +35,26 @@ void mimi_vlog(mimi_log_level_t level, const char *tag, const char *fmt, va_list
     strftime(time_buf, sizeof(time_buf), "%H:%M:%S", tm_info);
     long ms = tv.tv_usec / 1000;
 
+    // Extract filename from path
+    const char *filename = file;
+    const char *slash = strrchr(file, '/');
+    if (slash) {
+        filename = slash + 1;
+    }
+
     mimi_tty_hide_prompt();
-    fprintf(stderr, "%s.%03ld %s/%s: ", time_buf, ms, level_name(level), tag ? tag : "-");
+    fprintf(stderr, "%s.%03ld %s tag=%s file=%s line=%d: ", time_buf, ms, level_name(level), tag ? tag : "-", filename, line);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     fflush(stderr);
     mimi_tty_show_prompt();
 }
 
-void mimi_log(mimi_log_level_t level, const char *tag, const char *fmt, ...)
+void mimi_log(mimi_log_level_t level, const char *tag, const char *file, int line, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    mimi_vlog(level, tag, fmt, ap);
+    mimi_vlog(level, tag, file, line, fmt, ap);
     va_end(ap);
 }
 

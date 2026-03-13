@@ -83,6 +83,8 @@ static void apply_defaults(void)
     safe_strcpy(s_config.model, sizeof(s_config.model), "nvidia/nemotron-nano-9b-v2:free");
     s_config.api_key[0] = '\0';
     safe_strcpy(s_config.api_base, sizeof(s_config.api_base), "https://openrouter.ai/api/v1/chat/completions");
+    /* Default protocol for the above provider is OpenAI-compatible. */
+    safe_strcpy(s_config.api_protocol, sizeof(s_config.api_protocol), "openai");
 
     /* Telegram */
     s_config.telegram_enabled = false;
@@ -126,8 +128,11 @@ static void apply_defaults(void)
     s_config.wifi_ssid[0] = '\0';
     s_config.wifi_pass[0] = '\0';
     
-    /* Network */
-    safe_strcpy(s_config.dns_server, sizeof(s_config.dns_server), "114.114.114.114");
+    /* Network
+     * Leave empty by default so Mongoose uses system DNS.
+     * Override via config.network.dnsServer or env MIMI_DNS_SERVER.
+     */
+    s_config.dns_server[0] = '\0';
     
     /* Logging */
     safe_strcpy(s_config.log_level, sizeof(s_config.log_level), "info");
@@ -162,7 +167,7 @@ mimi_err_t mimi_config_load(const char *path)
         return MIMI_OK;
     }
 
-    MIMI_LOGI(TAG, "Loading config from: %s", path);
+    MIMI_LOGD(TAG, "Loading config from: %s", path);
 
     mimi_file_t *f = NULL;
     mimi_err_t ferr = mimi_fs_open(path, "rb", &f);
@@ -174,7 +179,7 @@ mimi_err_t mimi_config_load(const char *path)
         MIMI_LOGE(TAG, "Cannot open config: %s", path);
         return MIMI_ERR_IO;
     }
-    MIMI_LOGI(TAG, "Config file opened successfully");
+    MIMI_LOGD(TAG, "Config file opened successfully");
 
     (void)mimi_fs_seek(f, 0, SEEK_END);
     long n = 0;
@@ -202,7 +207,7 @@ mimi_err_t mimi_config_load(const char *path)
         MIMI_LOGW(TAG, "Invalid JSON in %s; using defaults", path);
         return MIMI_OK;
     }
-    MIMI_LOGI(TAG, "Config JSON parsed successfully");
+    MIMI_LOGD(TAG, "Config JSON parsed successfully");
 
     /* agents.defaults (nanobot-style) */
     cJSON *agents = cJSON_GetObjectItem(root, "agents");
@@ -212,6 +217,7 @@ mimi_err_t mimi_config_load(const char *path)
         json_str_to_buf(cJSON_GetObjectItem(defaults, "timezone"), s_config.timezone, sizeof(s_config.timezone), true);
         json_str_to_buf(cJSON_GetObjectItem(defaults, "provider"), s_config.provider, sizeof(s_config.provider), true);
         json_str_to_buf(cJSON_GetObjectItem(defaults, "model"), s_config.model, sizeof(s_config.model), true);
+        json_str_to_buf(cJSON_GetObjectItem(defaults, "apiProtocol"), s_config.api_protocol, sizeof(s_config.api_protocol), true);
 
         cJSON *mt = cJSON_GetObjectItem(defaults, "maxTokens");
         if (mt && cJSON_IsNumber(mt) && mt->valuedouble > 0) s_config.max_tokens = (int)mt->valuedouble;
@@ -273,20 +279,20 @@ mimi_err_t mimi_config_load(const char *path)
 
     /* channels.feishu */
     cJSON *feishu = channels && cJSON_IsObject(channels) ? cJSON_GetObjectItem(channels, "feishu") : NULL;
-    MIMI_LOGI(TAG, "Loading feishu config, channels=%p, feishu=%p", (void*)channels, (void*)feishu);
+    MIMI_LOGD(TAG, "Loading feishu config, channels=%p, feishu=%p", (void*)channels, (void*)feishu);
     if (cJSON_IsObject(feishu)) {
         cJSON *en = cJSON_GetObjectItem(feishu, "enabled");
         cJSON *app_id = cJSON_GetObjectItem(feishu, "appId");
         cJSON *app_secret = cJSON_GetObjectItem(feishu, "appSecret");
-        MIMI_LOGI(TAG, "Feishu fields: enabled=%p (type=%d, val=%d), appId=%p, appSecret=%p",
+        MIMI_LOGD(TAG, "Feishu fields: enabled=%p (type=%d, val=%d), appId=%p, appSecret=%p",
                   (void*)en, en ? en->type : -1, en ? cJSON_IsTrue(en) : -1, (void*)app_id, (void*)app_secret);
         if (en && (cJSON_IsBool(en) || cJSON_IsNumber(en))) {
             s_config.feishu_enabled = cJSON_IsTrue(en) || (cJSON_IsNumber(en) && en->valueint != 0);
-            MIMI_LOGI(TAG, "Feishu enabled set to: %d", s_config.feishu_enabled);
+            MIMI_LOGD(TAG, "Feishu enabled set to: %d", s_config.feishu_enabled);
         }
         if (app_id && cJSON_IsString(app_id)) {
             strncpy(s_config.feishu_app_id, app_id->valuestring, sizeof(s_config.feishu_app_id) - 1);
-            MIMI_LOGI(TAG, "Feishu app_id set to: %s", s_config.feishu_app_id);
+            MIMI_LOGD(TAG, "Feishu app_id set to: %s", s_config.feishu_app_id);
         }
         if (app_secret && cJSON_IsString(app_secret)) {
             strncpy(s_config.feishu_app_secret, app_secret->valuestring, sizeof(s_config.feishu_app_secret) - 1);
@@ -334,7 +340,7 @@ mimi_err_t mimi_config_load(const char *path)
         json_str_to_buf(cJSON_GetObjectItem(network, "dnsServer"), s_config.dns_server, sizeof(s_config.dns_server), true);
 
     cJSON_Delete(root);
-    MIMI_LOGI(TAG, "Loaded config from %s (workspace=%s provider=%s model=%s)",
+    MIMI_LOGD(TAG, "Loaded config from %s (workspace=%s provider=%s model=%s)",
               path, s_config.workspace, s_config.provider, s_config.model);
     return MIMI_OK;
 }
@@ -371,6 +377,9 @@ mimi_err_t mimi_config_save(const char *path)
         cJSON_AddStringToObject(defaults, "timezone", s_config.timezone);
         cJSON_AddStringToObject(defaults, "model", s_config.model);
         cJSON_AddStringToObject(defaults, "provider", s_config.provider);
+        if (s_config.api_protocol[0]) {
+            cJSON_AddStringToObject(defaults, "apiProtocol", s_config.api_protocol);
+        }
         cJSON_AddNumberToObject(defaults, "maxTokens", s_config.max_tokens);
         cJSON_AddNumberToObject(defaults, "temperature", s_config.temperature);
         cJSON_AddNumberToObject(defaults, "maxToolIterations", s_config.max_tool_iterations);
@@ -443,10 +452,12 @@ mimi_err_t mimi_config_save(const char *path)
     }
     
     /* network */
-    cJSON *network = cJSON_CreateObject();
-    if (network) {
-        cJSON_AddStringToObject(network, "dnsServer", s_config.dns_server);
-        cJSON_AddItemToObject(root, "network", network);
+    if (s_config.dns_server[0]) {
+        cJSON *network = cJSON_CreateObject();
+        if (network) {
+            cJSON_AddStringToObject(network, "dnsServer", s_config.dns_server);
+            cJSON_AddItemToObject(root, "network", network);
+        }
     }
 
     char *json_str = cJSON_Print(root);

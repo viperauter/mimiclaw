@@ -80,7 +80,7 @@ mimi_err_t ws_server_channel_init_impl(channel_t *ch, const channel_config_t *cf
     ch->priv_data = &s_priv;
     s_priv.initialized = true;
 
-    MIMI_LOGI(TAG, "WebSocket Server Channel initialized");
+    MIMI_LOGD(TAG, "WebSocket Server Channel initialized");
     return MIMI_OK;
 }
 

@@ -25,7 +25,7 @@ mimi_err_t memory_store_init(void)
     /* SPIFFS is flat — no real directory creation needed.
        On POSIX we rely on workspace_bootstrap to create needed directories. */
     const mimi_config_t *cfg = mimi_config_get();
-    MIMI_LOGI(TAG, "Memory store initialized (workspace=%s)",
+    MIMI_LOGD(TAG, "Memory store initialized (workspace=%s)",
               cfg->workspace[0] ? cfg->workspace : "(default)");
     return MIMI_OK;
 }

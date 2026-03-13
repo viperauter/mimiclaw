@@ -61,6 +61,6 @@ void cmd_memory_read_init(void)
     if (ret != 0) {
         MIMI_LOGW(TAG, "Failed to register memory_read command: %d", ret);
     } else {
-        MIMI_LOGI(TAG, "Memory_read command registered");
+        MIMI_LOGD(TAG, "Memory_read command registered");
     }
 }

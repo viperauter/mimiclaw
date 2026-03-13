@@ -34,7 +34,7 @@ int command_system_init(void)
     s_registry.count = 0;
     s_registry.initialized = true;
 
-    MIMI_LOGI(TAG, "Command system initialized (max_commands=%d)", COMMAND_MAX_COUNT);
+    MIMI_LOGD(TAG, "Command system initialized (max_commands=%d)", COMMAND_MAX_COUNT);
     return 0;
 }
 
@@ -84,7 +84,7 @@ int command_register(const command_t *cmd)
     s_registry.commands[s_registry.count] = *cmd;
     s_registry.count++;
 
-    MIMI_LOGI(TAG, "Command '%s' registered (%d/%d)",
+    MIMI_LOGD(TAG, "Command '%s' registered (%d/%d)",
               cmd->name, s_registry.count, COMMAND_MAX_COUNT);
     return 0;
 }

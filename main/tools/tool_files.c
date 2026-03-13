@@ -16,6 +16,60 @@ static const char *TAG = "tool_files";
 #define MAX_FILE_SIZE (32 * 1024)
 #define MAX_RESOLVED_PATH 512
 
+/* Try to parse tool input JSON, with a small amount of robustness for
+ * slightly malformed wrappers (e.g. extra text before/after the JSON
+ * object). Returns NULL only when we cannot find a JSON object.
+ */
+static cJSON *parse_tool_input(const char *input_json)
+{
+    if (!input_json) {
+        MIMI_LOGI(TAG, "parse_tool_input: input_json is NULL");
+        return NULL;
+    }
+
+    MIMI_LOGI(TAG, "parse_tool_input: input_json='%s'", input_json);
+
+    /* First attempt: direct parse */
+    cJSON *root = cJSON_Parse(input_json);
+    if (root) {
+        MIMI_LOGI(TAG, "parse_tool_input: direct parse succeeded");
+        return root;
+    }
+
+    MIMI_LOGI(TAG, "parse_tool_input: direct parse failed, trying fallback");
+
+    /* Fallback: try to locate the first '{' and last '}' and parse the slice.
+     * This helps when the arguments contain extra text like
+     * "arguments: {\"path\": \"...\", ...}" or logging prefixes.
+     */
+    const char *start = strchr(input_json, '{');
+    const char *end = strrchr(input_json, '}');
+    if (!start || !end || end <= start) {
+        MIMI_LOGI(TAG, "parse_tool_input: fallback failed - no braces found");
+        return NULL;
+    }
+
+    size_t len = (size_t)(end - start + 1);
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) {
+        MIMI_LOGI(TAG, "parse_tool_input: fallback failed - malloc failed");
+        return NULL;
+    }
+    memcpy(buf, start, len);
+    buf[len] = '\0';
+
+    MIMI_LOGI(TAG, "parse_tool_input: fallback JSON='%s'", buf);
+
+    root = cJSON_Parse(buf);
+    if (root) {
+        MIMI_LOGI(TAG, "parse_tool_input: fallback parse succeeded");
+    } else {
+        MIMI_LOGI(TAG, "parse_tool_input: fallback parse failed");
+    }
+    free(buf);
+    return root;
+}
+
 /**
  * Validate that a path is safe: must not contain "..".
  */
@@ -51,7 +105,7 @@ static void resolve_session_path(const char *path, const mimi_session_ctx_t *ses
 mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size,
                                   const mimi_session_ctx_t *session_ctx)
 {
-    cJSON *root = cJSON_Parse(input_json);
+    cJSON *root = parse_tool_input(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
         return MIMI_ERR_INVALID_ARG;
@@ -93,7 +147,7 @@ mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t o
 mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t output_size,
                                    const mimi_session_ctx_t *session_ctx)
 {
-    cJSON *root = cJSON_Parse(input_json);
+    cJSON *root = parse_tool_input(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
         return MIMI_ERR_INVALID_ARG;
@@ -146,7 +200,7 @@ mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t 
 mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t output_size,
                                   const mimi_session_ctx_t *session_ctx)
 {
-    cJSON *root = cJSON_Parse(input_json);
+    cJSON *root = parse_tool_input(input_json);
     if (!root) {
         snprintf(output, output_size, "Error: invalid JSON input");
         return MIMI_ERR_INVALID_ARG;
@@ -269,7 +323,7 @@ mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t o
 mimi_err_t tool_list_dir_execute(const char *input_json, char *output, size_t output_size,
                                  const mimi_session_ctx_t *session_ctx)
 {
-    cJSON *root = cJSON_Parse(input_json);
+    cJSON *root = parse_tool_input(input_json);
     const char *prefix = NULL;
     if (root) {
         cJSON *pfx = cJSON_GetObjectItem(root, "prefix");

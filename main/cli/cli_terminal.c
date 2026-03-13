@@ -302,7 +302,7 @@ mimi_err_t app_terminal_init(void)
     g_state.initialized = true;
     g_state.count = 0;
 
-    MIMI_LOGI(TAG, "CLI terminal framework initialized");
+    MIMI_LOGD(TAG, "CLI terminal framework initialized");
     return MIMI_OK;
 }
 

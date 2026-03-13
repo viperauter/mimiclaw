@@ -123,7 +123,7 @@ static void heartbeat_timer_cb(void *arg)
 mimi_err_t heartbeat_init(void)
 {
     const mimi_config_t *cfg = mimi_config_get();
-    MIMI_LOGI(TAG, "Heartbeat service initialized (file: %s, interval: %ds)",
+    MIMI_LOGD(TAG, "Heartbeat service initialized (file: %s, interval: %ds)",
              cfg->heartbeat_file,
              ((cfg->heartbeat_interval_ms > 0) ? cfg->heartbeat_interval_ms : (30 * 60 * 1000)) / 1000);
     return MIMI_OK;
@@ -143,7 +143,7 @@ mimi_err_t heartbeat_start(void)
                                        heartbeat_timer_cb, NULL,
                                        &s_timer_handle);
     if (err != MIMI_OK) return err;
-    MIMI_LOGI(TAG, "Heartbeat started (every %d min)", interval_ms / 60000);
+    MIMI_LOGD(TAG, "Heartbeat started (every %d min)", interval_ms / 60000);
     return MIMI_OK;
 }
 

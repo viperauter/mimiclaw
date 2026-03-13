@@ -127,7 +127,7 @@ static mimi_err_t ws_gateway_init_impl(gateway_t *gw, const gateway_config_t *cf
     }
 
     s_priv.initialized = true;
-    MIMI_LOGI(TAG, "WebSocket Gateway initialized (port %d)", s_priv.port);
+    MIMI_LOGD(TAG, "WebSocket Gateway initialized (port %d)", s_priv.port);
     return MIMI_OK;
 }
 

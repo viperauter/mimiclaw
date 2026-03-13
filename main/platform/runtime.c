@@ -104,16 +104,16 @@ mimi_err_t mimi_runtime_init(void)
     if (dns && dns[0]) {
         snprintf(s_dns_url, sizeof(s_dns_url), "udp://%s:53", dns);
         s_mgr.dns4.url = s_dns_url;
-        MIMI_LOGI(TAG, "Runtime DNS server set to %s (from environment)", s_dns_url);
+        MIMI_LOGD(TAG, "Runtime DNS server set to %s (from environment)", s_dns_url);
     } else {
         /* Use DNS server from config */
         const mimi_config_t *config = mimi_config_get();
         if (config && config->dns_server[0]) {
             snprintf(s_dns_url, sizeof(s_dns_url), "udp://%s:53", config->dns_server);
             s_mgr.dns4.url = s_dns_url;
-            MIMI_LOGI(TAG, "Runtime DNS server set to %s (from config)", s_dns_url);
+            MIMI_LOGD(TAG, "Runtime DNS server set to %s (from config)", s_dns_url);
         } else {
-            MIMI_LOGI(TAG, "Using default DNS server");
+            MIMI_LOGD(TAG, "Using default DNS server");
         }
     }
 
@@ -146,7 +146,7 @@ mimi_err_t mimi_runtime_init(void)
     s_should_exit = false;
     s_runtime_thread = NULL;
 
-    MIMI_LOGI(TAG, "Runtime initialized");
+    MIMI_LOGD(TAG, "Runtime initialized");
     return MIMI_OK;
 }
 
@@ -192,7 +192,7 @@ mimi_err_t mimi_runtime_start(void)
         return err;
     }
 
-    MIMI_LOGI(TAG, "Runtime started");
+    MIMI_LOGD(TAG, "Runtime started");
     return MIMI_OK;
 }
 
@@ -201,8 +201,13 @@ void mimi_runtime_stop(void)
     mimi_mutex_lock(s_state_mutex);
 
     if (s_state != RUNTIME_STATE_RUNNING) {
-        MIMI_LOGW(TAG, "Runtime not running");
+        /* Runtime may have stopped itself; still join/free the thread handle if needed. */
+        mimi_task_handle_t th = s_runtime_thread;
+        s_runtime_thread = NULL;
         mimi_mutex_unlock(s_state_mutex);
+        if (th != NULL) {
+            (void)mimi_task_delete(th);
+        }
         return;
     }
 
@@ -241,6 +246,9 @@ void mimi_runtime_deinit(void)
         mimi_mutex_lock(s_state_mutex);
     }
 
+    /* Cleanup Mongoose (connections, internal resources). */
+    mg_mgr_free(&s_mgr);
+
     /* Cleanup event dispatcher */
     if (s_dispatcher) {
         event_dispatcher_destroy(s_dispatcher);
@@ -254,9 +262,6 @@ void mimi_runtime_deinit(void)
         event_bus_destroy(event_bus);
         event_bus_set_global(NULL);
     }
-
-    /* Cleanup Mongoose */
-    mg_mgr_free(&s_mgr);
 
     /* Destroy mutex */
     if (s_state_mutex != NULL) {

@@ -159,7 +159,7 @@ mimi_err_t telegram_channel_init_impl(channel_t *ch, const channel_config_t *cfg
     /* Check if Telegram is enabled */
     const mimi_config_t *config = mimi_config_get();
     if (!config->telegram_enabled) {
-        MIMI_LOGI(TAG, "Telegram Channel is disabled");
+        MIMI_LOGD(TAG, "Telegram Channel is disabled");
         return MIMI_ERR_NOT_SUPPORTED;
     }
 

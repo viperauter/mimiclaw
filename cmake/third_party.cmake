@@ -33,20 +33,22 @@ target_include_directories(mongoose PUBLIC
 # cJSON
 # =====================================================
 
-if(NOT EXISTS ${THIRD_PARTY_DIR}/cjson)
-    message(STATUS "Fetching cJSON from GitHub...")
+set(CJSON_DIR ${THIRD_PARTY_DIR}/cjson)
+
+# Prefer a complete local checkout; otherwise populate via FetchContent.
+if(EXISTS ${CJSON_DIR}/cJSON.c)
+    message(STATUS "Using cached cJSON source: ${CJSON_DIR}")
+    set(cjson_SOURCE_DIR ${CJSON_DIR})
 else()
-    message(STATUS "Using cached cJSON source: ${THIRD_PARTY_DIR}/cjson")
+    message(STATUS "Fetching cJSON from GitHub...")
+    FetchContent_Declare(
+        cjson
+        GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
+        GIT_TAG v1.7.18
+        SOURCE_DIR ${CJSON_DIR}
+    )
+    FetchContent_Populate(cjson)
 endif()
-
-FetchContent_Declare(
-    cjson
-    GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
-    GIT_TAG v1.7.18
-    SOURCE_DIR ${THIRD_PARTY_DIR}/cjson
-)
-
-FetchContent_Populate(cjson)
 
 add_library(cjson STATIC
     ${cjson_SOURCE_DIR}/cJSON.c
@@ -59,20 +61,22 @@ target_include_directories(cjson PUBLIC
 # nanopb - Protocol Buffers for Embedded Systems
 # =====================================================
 
-if(NOT EXISTS ${THIRD_PARTY_DIR}/nanopb)
-    message(STATUS "Fetching nanopb from GitHub...")
+set(NANOPB_DIR ${THIRD_PARTY_DIR}/nanopb)
+
+# Prefer a complete local checkout; otherwise populate via FetchContent.
+if(EXISTS ${NANOPB_DIR}/pb_encode.c AND EXISTS ${NANOPB_DIR}/generator/nanopb_generator.py)
+    message(STATUS "Using cached nanopb source: ${NANOPB_DIR}")
+    set(nanopb_SOURCE_DIR ${NANOPB_DIR})
 else()
-    message(STATUS "Using cached nanopb source: ${THIRD_PARTY_DIR}/nanopb")
+    message(STATUS "Fetching nanopb from GitHub...")
+    FetchContent_Declare(
+        nanopb
+        GIT_REPOSITORY https://github.com/nanopb/nanopb.git
+        GIT_TAG 0.4.9.1
+        SOURCE_DIR ${NANOPB_DIR}
+    )
+    FetchContent_Populate(nanopb)
 endif()
-
-FetchContent_Declare(
-    nanopb
-    GIT_REPOSITORY https://github.com/nanopb/nanopb.git
-    GIT_TAG 0.4.9.1
-    SOURCE_DIR ${THIRD_PARTY_DIR}/nanopb
-)
-
-FetchContent_Populate(nanopb)
 
 add_library(nanopb STATIC
     ${nanopb_SOURCE_DIR}/pb_encode.c
