@@ -38,6 +38,10 @@ main/mimi_secrets.h
 # Reference repos
 nanobot/
 
+# Third party virtual environments and submodules
+third_party/feishu_pb_venv/
+third_party/nanopb/
+
 # MCP / Memov
 .mcp.json
 .mem/

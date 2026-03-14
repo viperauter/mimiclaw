@@ -81,10 +81,8 @@ mimi_err_t tool_registry_init(void)
     mimi_tool_t ws = {
         .name = "web_search",
         .description = "Search the web for current information. Use this when you need up-to-date facts, news, weather, or anything beyond your training data.",
-        .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The search query\"}},"
-            "\"required\":[\"query\"]}",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The search query\"}},\"required\":[\"query\"]}",
+        .requires_confirmation = false,
         .execute = tool_web_search_execute,
     };
     register_tool(&ws);
@@ -94,9 +92,10 @@ mimi_err_t tool_registry_init(void)
         .name = "get_current_time",
         .description = "Get the current date and time. Also sets the system clock. Call this when you need to know what time or date it is.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{}," 
             "\"required\":[]}",
+        .requires_confirmation = false,
         .execute = tool_get_time_execute,
     };
     register_tool(&gt);
@@ -106,9 +105,10 @@ mimi_err_t tool_registry_init(void)
         .name = "read_file",
         .description = "Read a file from storage. Path must not contain '..'.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no \"\"..\"\" segments)\"}},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"}}," 
             "\"required\":[\"path\"]}",
+        .requires_confirmation = false,
         .execute = tool_read_file_execute,
     };
     register_tool(&rf);
@@ -118,10 +118,11 @@ mimi_err_t tool_registry_init(void)
         .name = "write_file",
         .description = "Write or overwrite a file on storage. Path must not contain '..'.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no \"\"..\"\" segments)\"},"
-            "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"}," 
+            "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}}," 
             "\"required\":[\"path\",\"content\"]}",
+        .requires_confirmation = true,
         .execute = tool_write_file_execute,
     };
     register_tool(&wf);
@@ -131,11 +132,12 @@ mimi_err_t tool_registry_init(void)
         .name = "edit_file",
         .description = "Find and replace text in a file on SPIFFS. Replaces first occurrence of old_string with new_string.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no \"\"..\"\" segments)\"},"
-            "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"},"
-            "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"}," 
+            "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"}," 
+            "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}}," 
             "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
+        .requires_confirmation = true,
         .execute = tool_edit_file_execute,
     };
     register_tool(&ef);
@@ -145,9 +147,10 @@ mimi_err_t tool_registry_init(void)
         .name = "list_dir",
         .description = "List files on storage, optionally filtered by path prefix.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter (e.g. memory/)\"}},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter (e.g. memory/)\"}}," 
             "\"required\":[]}",
+        .requires_confirmation = false,
         .execute = tool_list_dir_execute,
     };
     register_tool(&ld);
@@ -157,17 +160,18 @@ mimi_err_t tool_registry_init(void)
         .name = "cron_add",
         .description = "Schedule a recurring or one-shot task. The message will trigger an agent turn when the job fires.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{"
-            "\"name\":{\"type\":\"string\",\"description\":\"Short name for the job\"},"
-            "\"schedule_type\":{\"type\":\"string\",\"description\":\"'every' for recurring interval or 'at' for one-shot at a unix timestamp\"},"
-            "\"interval_s\":{\"type\":\"integer\",\"description\":\"Interval in seconds (required for 'every')\"},"
-            "\"at_epoch\":{\"type\":\"integer\",\"description\":\"Unix timestamp to fire at (required for 'at')\"},"
-            "\"message\":{\"type\":\"string\",\"description\":\"Message to inject when the job fires, triggering an agent turn\"},"
-            "\"channel\":{\"type\":\"string\",\"description\":\"Optional reply channel (e.g. 'telegram'). If omitted, current turn channel is used when available\"},"
-            "\"chat_id\":{\"type\":\"string\",\"description\":\"Optional reply chat_id. Required when channel='telegram'. If omitted during a Telegram turn, current chat_id is used\"}"
-            "},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{" 
+            "\"name\":{\"type\":\"string\",\"description\":\"Short name for the job\"}," 
+            "\"schedule_type\":{\"type\":\"string\",\"description\":\"'every' for recurring interval or 'at' for one-shot at a unix timestamp\"}," 
+            "\"interval_s\":{\"type\":\"integer\",\"description\":\"Interval in seconds (required for 'every')\"}," 
+            "\"at_epoch\":{\"type\":\"integer\",\"description\":\"Unix timestamp to fire at (required for 'at')\"}," 
+            "\"message\":{\"type\":\"string\",\"description\":\"Message to inject when the job fires, triggering an agent turn\"}," 
+            "\"channel\":{\"type\":\"string\",\"description\":\"Optional reply channel (e.g. 'telegram'). If omitted, current turn channel is used when available\"}," 
+            "\"chat_id\":{\"type\":\"string\",\"description\":\"Optional reply chat_id. Required when channel='telegram'. If omitted during a Telegram turn, current chat_id is used\"}" 
+            "}," 
             "\"required\":[\"name\",\"schedule_type\",\"message\"]}",
+        .requires_confirmation = true,
         .execute = tool_cron_add_execute,
     };
     register_tool(&ca);
@@ -177,9 +181,10 @@ mimi_err_t tool_registry_init(void)
         .name = "cron_list",
         .description = "List all scheduled cron jobs with their status, schedule, and IDs.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{}," 
             "\"required\":[]}",
+        .requires_confirmation = false,
         .execute = tool_cron_list_execute,
     };
     register_tool(&cl);
@@ -189,9 +194,10 @@ mimi_err_t tool_registry_init(void)
         .name = "cron_remove",
         .description = "Remove a scheduled cron job by its ID.",
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"job_id\":{\"type\":\"string\",\"description\":\"The 8-character job ID to remove\"}},"
+            "{\"type\":\"object\"," 
+            "\"properties\":{\"job_id\":{\"type\":\"string\",\"description\":\"The 8-character job ID to remove\"}}," 
             "\"required\":[\"job_id\"]}",
+        .requires_confirmation = false,
         .execute = tool_cron_remove_execute,
     };
     register_tool(&cr);
@@ -413,6 +419,21 @@ mimi_err_t tool_registry_execute_all_async(const tool_call_t *calls, int call_co
     }
 
     return result;
+}
+
+bool tool_registry_requires_confirmation(const char *tool_name)
+{
+    if (!tool_name) {
+        return false;
+    }
+    
+    for (int i = 0; i < s_tool_count; i++) {
+        if (strcmp(s_tools[i].name, tool_name) == 0) {
+            return s_tools[i].requires_confirmation;
+        }
+    }
+    
+    return false;
 }
 
 mimi_err_t tool_registry_deinit(void)

@@ -6,6 +6,8 @@
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
+#include "tools/tool_call_context.h"
+#include "control/control_manager.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -23,7 +25,6 @@ static void agent_llm_callback(mimi_err_t result, llm_response_t *resp, void *us
 
 #define CONTEXT_BUF_SIZE     (16 * 1024)
 #define LLM_STREAM_BUF_SIZE  (32 * 1024)
-#define TOOL_OUTPUT_SIZE     (8 * 1024)
 #ifndef MAX_CONCURRENT
 #define MAX_CONCURRENT       8
 #endif
@@ -141,12 +142,15 @@ typedef struct {
     char *tool_call_id;
 } tool_call_ud_t;
 
+/* Forward declaration for tool confirmation callback */
+static void tool_confirm_execution_callback(mimi_err_t result, const char *tool_name, const char *output, void *user_data);
+
 static void tool_async_callback(mimi_err_t result, const char *tool_name, const char *output, void *user_data)
 {
     tool_call_ud_t *ud = (tool_call_ud_t *)user_data;
     tool_async_ctx_t *async_ctx = ud ? ud->parent : NULL;
 
-    if (!async_ctx || !async_ctx->ctx || !async_ctx->ctx->messages) {
+    if (!async_ctx || !async_ctx->ctx || !async_ctx->ctx->in_progress || !async_ctx->ctx->messages) {
         if (ud) {
             free(ud->tool_call_id);
             free(ud);
@@ -225,6 +229,54 @@ static void tool_async_callback(mimi_err_t result, const char *tool_name, const 
     }
 }
 
+/**
+ * Callback for tool execution after confirmation
+ * This callback handles the result of tool execution initiated from tool_confirm_callback
+ */
+static void tool_confirm_execution_callback(mimi_err_t result, const char *tool_name, const char *output, void *user_data)
+{
+    tool_call_context_t *tool_ctx = (tool_call_context_t *)user_data;
+    if (!tool_ctx) {
+        MIMI_LOGW(TAG, "Tool confirm execution callback with null context");
+        return;
+    }
+    
+    MIMI_LOGI(TAG, "Tool execution completed after confirmation: %s, result=%s", 
+              tool_name ? tool_name : "unknown", mimi_err_to_name(result));
+    
+    /* Store execution results */
+    tool_ctx->succeeded = (result == MIMI_OK);
+    tool_ctx->error_code = result;
+    if (output) {
+        strncpy(tool_ctx->output, output, sizeof(tool_ctx->output) - 1);
+        tool_ctx->output[sizeof(tool_ctx->output) - 1] = '\0';
+    }
+    
+    /* Send result to user */
+    if (tool_ctx->session_ctx.channel[0] && tool_ctx->session_ctx.chat_id[0]) {
+        mimi_msg_t result_msg = {0};
+        strncpy(result_msg.channel, tool_ctx->session_ctx.channel, sizeof(result_msg.channel) - 1);
+        strncpy(result_msg.chat_id, tool_ctx->session_ctx.chat_id, sizeof(result_msg.chat_id) - 1);
+        
+        if (result == MIMI_OK) {
+            result_msg.content = strdup(output ? output : "Tool executed successfully");
+        } else {
+            char err_buf[512];
+            snprintf(err_buf, sizeof(err_buf), "Tool execution failed: %s", mimi_err_to_name(result));
+            result_msg.content = strdup(err_buf);
+        }
+        
+        if (result_msg.content) {
+            message_bus_push_outbound(&result_msg);
+        }
+    }
+    
+    /* Destroy tool context */
+    tool_call_context_destroy(tool_ctx);
+}
+
+static mimi_err_t send_tool_confirmation_request(tool_call_context_t *tool_ctx);
+
 static void start_async_tools(agent_request_ctx_t *ctx, const llm_response_t *resp)
 {
     if (!resp) {
@@ -265,23 +317,67 @@ static void start_async_tools(agent_request_ctx_t *ctx, const llm_response_t *re
 
         MIMI_LOGI(TAG, "Async tool execution: %s", call->name);
 
-        tool_call_ud_t *ud = (tool_call_ud_t *)calloc(1, sizeof(*ud));
-        if (!ud) {
-            MIMI_LOGE(TAG, "Failed to allocate tool call user data");
-            free(patched_input);
-            continue;
-        }
-        ud->parent = async_ctx;
-        ud->tool_call_id = strdup(call->id[0] ? call->id : "");
-        if (!ud->tool_call_id) {
-            free(ud);
-            free(patched_input);
-            continue;
-        }
+        /* Check if tool requires confirmation */
+        bool requires_confirmation = tool_registry_requires_confirmation(call->name);
 
-        tool_registry_execute_async(call->name, patched_input ? patched_input : tool_input,
-                                   &session_ctx, tool_async_callback, ud);
+        if (requires_confirmation) {
+            /* Create tool call context for confirmation */
+            tool_call_context_t *tool_ctx = tool_call_context_create(
+                ctx,
+                call->name,
+                call->id[0] ? call->id : "",
+                patched_input ? patched_input : tool_input,
+                true
+            );
+            if (tool_ctx) {
+                /* Send confirmation request */
+                mimi_err_t err = send_tool_confirmation_request(tool_ctx);
+                if (err != MIMI_OK) {
+                    MIMI_LOGE(TAG, "Failed to send confirmation request: %s", mimi_err_to_name(err));
+                    tool_call_context_destroy(tool_ctx);
+                }
+            }
+            /* For tools requiring confirmation, we don't increment completed_calls here
+             * because the confirmation process will handle it asynchronously */
+        } else {
+            /* Execute tool directly without confirmation */
+            tool_call_ud_t *ud = (tool_call_ud_t *)calloc(1, sizeof(*ud));
+            if (!ud) {
+                MIMI_LOGE(TAG, "Failed to allocate tool call user data");
+                free(patched_input);
+                continue;
+            }
+            ud->parent = async_ctx;
+            ud->tool_call_id = strdup(call->id[0] ? call->id : "");
+            if (!ud->tool_call_id) {
+                free(ud);
+                free(patched_input);
+                continue;
+            }
+
+            tool_registry_execute_async(call->name, patched_input ? patched_input : tool_input,
+                                       &session_ctx, tool_async_callback, ud);
+        }
         free(patched_input);
+    }
+    
+    /* If all tools require confirmation, we need to handle the async_ctx cleanup differently */
+    bool all_requires_confirmation = true;
+    for (int i = 0; i < resp->call_count; i++) {
+        const llm_tool_call_t *call = &resp->calls[i];
+        if (!tool_registry_requires_confirmation(call->name)) {
+            all_requires_confirmation = false;
+            break;
+        }
+    }
+    
+    if (all_requires_confirmation) {
+        /* All tools require confirmation, so we need to free async_ctx now
+         * because the confirmation process will handle tool execution */
+        if (async_ctx->mutex) {
+            mimi_mutex_destroy(async_ctx->mutex);
+        }
+        free(async_ctx);
     }
 }
 
@@ -473,6 +569,22 @@ static void agent_async_loop_task(void *arg)
         mimi_msg_t msg;
         mimi_err_t err = message_bus_pop_inbound(&msg, 100);
         if (err != MIMI_OK) {
+            /* Check for control request timeouts */
+            control_manager_check_timeouts();
+            tool_call_context_check_timeouts();
+            continue;
+        }
+        
+        /* Handle control messages */
+        if (msg.type == MIMI_MSG_TYPE_CONTROL) {
+            MIMI_LOGI(TAG, "Received control message: type=%d, request_id=%s", 
+                      msg.control_type, msg.request_id);
+            
+            /* Pass to control manager for handling */
+            control_manager_handle_response(msg.request_id, 
+                                           msg.content ? msg.content : "");
+            
+            free(msg.content);
             continue;
         }
 
@@ -585,8 +697,179 @@ static void agent_async_loop_task(void *arg)
     free(history_json);
 }
 
+/* ==========================================================================
+ * Tool Confirmation Functions
+ * ========================================================================== */
+
+/**
+ * Callback for tool confirmation response
+ */
+static void tool_confirm_callback(const char *request_id, const char *response, void *context)
+{
+    tool_call_context_t *tool_ctx = (tool_call_context_t *)context;
+    if (!tool_ctx) {
+        MIMI_LOGW(TAG, "Tool confirm callback with null context");
+        return;
+    }
+    
+    MIMI_LOGI(TAG, "Tool confirmation response: id=%s, response=%s", request_id, response);
+    
+    /* Parse confirmation result */
+    if (strcmp(response, "ACCEPT") == 0) {
+        tool_ctx->confirmation_result = CONFIRMATION_ACCEPTED;
+        tool_ctx->waiting_for_confirmation = false;
+        
+        /* Execute the tool */
+        MIMI_LOGI(TAG, "Tool execution confirmed: %s", tool_ctx->tool_name);
+        
+        /* Execute tool asynchronously */
+        mimi_err_t err = tool_registry_execute_async(
+            tool_ctx->tool_name,
+            tool_ctx->tool_input,
+            &tool_ctx->session_ctx,
+            tool_confirm_execution_callback,
+            tool_ctx
+        );
+        
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Failed to execute tool %s: %s", tool_ctx->tool_name, mimi_err_to_name(err));
+            tool_ctx->error_code = err;
+            tool_ctx->succeeded = false;
+            tool_call_context_destroy(tool_ctx);
+        } else {
+            tool_ctx->executed = true;
+        }
+        
+    } else if (strcmp(response, "ACCEPT_ALWAYS") == 0) {
+        tool_ctx->confirmation_result = CONFIRMATION_ACCEPTED_ALWAYS;
+        tool_ctx->waiting_for_confirmation = false;
+        
+        /* Mark tool as always allowed */
+        tool_call_context_mark_always_allowed(tool_ctx->tool_name);
+        
+        /* Execute the tool */
+        MIMI_LOGI(TAG, "Tool execution confirmed (always): %s", tool_ctx->tool_name);
+        
+        /* Execute tool asynchronously */
+        mimi_err_t err = tool_registry_execute_async(
+            tool_ctx->tool_name,
+            tool_ctx->tool_input,
+            &tool_ctx->session_ctx,
+            tool_confirm_execution_callback,
+            tool_ctx
+        );
+        
+        if (err != MIMI_OK) {
+            MIMI_LOGE(TAG, "Failed to execute tool %s: %s", tool_ctx->tool_name, mimi_err_to_name(err));
+            tool_ctx->error_code = err;
+            tool_ctx->succeeded = false;
+            tool_call_context_destroy(tool_ctx);
+        } else {
+            tool_ctx->executed = true;
+        }
+        
+    } else if (strcmp(response, "REJECT") == 0 || strcmp(response, "CANCELLED") == 0) {
+        tool_ctx->confirmation_result = CONFIRMATION_REJECTED;
+        tool_ctx->waiting_for_confirmation = false;
+        
+        MIMI_LOGI(TAG, "Tool execution rejected: %s", tool_ctx->tool_name);
+        
+        /* Send cancellation message to user */
+        if (tool_ctx->agent_ctx) {
+            mimi_msg_t cancel_msg = {0};
+            strncpy(cancel_msg.channel, tool_ctx->session_ctx.channel, sizeof(cancel_msg.channel) - 1);
+            strncpy(cancel_msg.chat_id, tool_ctx->session_ctx.chat_id, sizeof(cancel_msg.chat_id) - 1);
+            cancel_msg.content = strdup("Tool execution cancelled by user");
+            if (cancel_msg.content) {
+                message_bus_push_outbound(&cancel_msg);
+            }
+        }
+        
+    } else if (strcmp(response, "TIMEOUT") == 0) {
+        tool_ctx->confirmation_result = CONFIRMATION_TIMEOUT;
+        tool_ctx->waiting_for_confirmation = false;
+        
+        MIMI_LOGW(TAG, "Tool confirmation timeout: %s", tool_ctx->tool_name);
+        
+        /* Send timeout message to user */
+        if (tool_ctx->agent_ctx) {
+            mimi_msg_t timeout_msg = {0};
+            strncpy(timeout_msg.channel, tool_ctx->session_ctx.channel, sizeof(timeout_msg.channel) - 1);
+            strncpy(timeout_msg.chat_id, tool_ctx->session_ctx.chat_id, sizeof(timeout_msg.chat_id) - 1);
+            timeout_msg.content = strdup("Confirmation timeout, operation cancelled");
+            if (timeout_msg.content) {
+                message_bus_push_outbound(&timeout_msg);
+            }
+        }
+    }
+    
+    /* Release the reference held for the callback */
+    tool_call_context_destroy(tool_ctx);
+}
+
+/**
+ * Send confirmation request for a tool
+ */
+static mimi_err_t send_tool_confirmation_request(tool_call_context_t *tool_ctx)
+{
+    if (!tool_ctx || !tool_ctx->agent_ctx) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    
+    agent_request_ctx_t *agent_ctx = (agent_request_ctx_t *)tool_ctx->agent_ctx;
+    
+    /* Build confirmation data */
+    char data[2048];
+    snprintf(data, sizeof(data), "Tool: %.100s\nInput: %.1800s",
+             tool_ctx->tool_name, tool_ctx->tool_input);
+    
+    /* Retain the context for the callback */
+    tool_call_context_retain(tool_ctx);
+    
+    /* Send control request */
+    char request_id[64];
+    mimi_err_t err = control_manager_send_request(
+        agent_ctx->channel,
+        agent_ctx->chat_id,
+        MIMI_CONTROL_TYPE_CONFIRM,
+        tool_ctx->tool_name,
+        data,
+        tool_ctx,
+        tool_confirm_callback,
+        request_id
+    );
+    
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to send confirmation request: %s", mimi_err_to_name(err));
+        tool_call_context_destroy(tool_ctx); /* Release the retained reference */
+        return err;
+    }
+    
+    MIMI_LOGI(TAG, "Tool confirmation request sent: %s (id=%s)", 
+              tool_ctx->tool_name, request_id);
+    
+    return MIMI_OK;
+}
+
 mimi_err_t agent_async_loop_init(void)
 {
+    mimi_err_t err;
+    
+    /* Initialize control manager */
+    err = control_manager_init();
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to init control manager: %s", mimi_err_to_name(err));
+        return err;
+    }
+    
+    /* Initialize tool call context manager */
+    err = tool_call_context_manager_init();
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to init tool call context manager: %s", mimi_err_to_name(err));
+        control_manager_deinit();
+        return err;
+    }
+    
     MIMI_LOGD(TAG, "Async agent loop initialized");
     return MIMI_OK;
 }
@@ -601,4 +884,8 @@ void agent_async_loop_stop(void)
 {
     MIMI_LOGI(TAG, "Async agent loop stopping");
     s_agent_running = false;
+    
+    /* Deinitialize managers */
+    tool_call_context_manager_deinit();
+    control_manager_deinit();
 }

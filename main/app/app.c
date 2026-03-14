@@ -60,6 +60,25 @@ static void outbound_dispatch_task(void *arg)
             continue;
         }
 
+        /* Handle control messages differently */
+        if (msg.type == MIMI_MSG_TYPE_CONTROL) {
+            channel_t *ch = channel_find(msg.channel);
+            if (ch && ch->send_control) {
+                mimi_err_t err = ch->send_control(ch, msg.chat_id, msg.control_type,
+                                                      msg.request_id, msg.target, msg.data);
+                if (err != MIMI_OK) {
+                    MIMI_LOGW("dispatch", "Failed to send control to channel %s: %s",
+                              msg.channel, mimi_err_to_name(err));
+                }
+            } else {
+                MIMI_LOGW("dispatch", "Channel %s does not support control messages",
+                          msg.channel);
+            }
+            free(msg.content);
+            continue;
+        }
+
+        /* Regular text message */
         mimi_err_t err = channel_send(msg.channel, msg.chat_id, msg.content ? msg.content : "");
         if (err != MIMI_OK) {
             if (strcmp(msg.channel, MIMI_CHAN_CLI) == 0) {

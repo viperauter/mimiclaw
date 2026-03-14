@@ -13,6 +13,7 @@
 #include "llm/llm_proxy.h"
 #include "channels/telegram/telegram_channel.h"
 #include "tools/tool_web_search.h"
+#include "bus/message_bus.h"
 #include "log.h"
 #include <string.h>
 #include <stdio.h>

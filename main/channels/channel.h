@@ -11,6 +11,7 @@
 #define CHANNEL_H
 
 #include "mimi_err.h"
+#include "bus/message_bus.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -137,6 +138,37 @@ struct channel {
                               void (*cb)(channel_t *, const char *session_id,
                                         void *user_data),
                               void *user_data);
+    
+    /* Control message handling */
+    
+    /**
+     * Send control request to client
+     * @param ch Channel object
+     * @param session_id Session ID
+     * @param control_type Control message type
+     * @param request_id Unique request ID
+     * @param target Target of the control (e.g., tool name)
+     * @param data Additional data for the control
+     * @return MIMI_OK on success, error code otherwise
+     */
+    mimi_err_t (*send_control)(channel_t *ch, const char *session_id,
+                               mimi_control_type_t control_type,
+                               const char *request_id,
+                               const char *target,
+                               const char *data);
+    
+    /**
+     * Set callback for control responses
+     * @param ch Channel object
+     * @param cb Callback function
+     * @param user_data User data
+     */
+    void (*set_on_control_response)(channel_t *ch,
+                                    void (*cb)(channel_t *, const char *session_id,
+                                              const char *request_id,
+                                              const char *response,
+                                              void *user_data),
+                                    void *user_data);
     
     /* Internal data (used by channel implementation) */
     void *priv_data;

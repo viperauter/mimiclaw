@@ -28,39 +28,58 @@ include(cmake/compiler_options.cmake)
 include(cmake/third_party.cmake)
 
 # --------------------------------
+# Module reorganization
+# Core modules are moved to main/core/ for better organization
+# Include directories are set up to maintain backward compatibility
+# with existing #include statements in source files
+# --------------------------------
+include_directories(
+    ${CMAKE_SOURCE_DIR}/main
+    ${CMAKE_SOURCE_DIR}/main/core
+    ${CMAKE_SOURCE_DIR}/main/core/platform
+    ${CMAKE_SOURCE_DIR}/main/core/platform/os
+    ${CMAKE_SOURCE_DIR}/main/core/config
+    ${CMAKE_SOURCE_DIR}/main/services
+    ${CMAKE_SOURCE_DIR}/main/interface
+    ${CMAKE_SOURCE_DIR}/main/agent
+    ${CMAKE_SOURCE_DIR}/third_party
+)
+
+# --------------------------------
 # source files
 # --------------------------------
 set(APP_SRC
     main/main.c
     main/app/app.c
-    main/config/config.c
-    main/config/workspace_bootstrap.c
 
-    # Platform implementation
-    main/platform/mimi_err.c
-    main/platform/log.c
-    main/platform/random.c
-    main/platform/runtime.c
-    main/platform/queue.c
-    main/platform/event/io_buf.c
-    main/platform/event/event_bus.c
-    main/platform/event/event_dispatcher.c
-    main/platform/fs/fs.c
-    main/platform/kv.c
-    main/platform/http/mg_impl/http.c
-    main/platform/websocket/mg_impl/ws_client.c
-    main/platform/websocket/mg_impl/ws_server.c
-    main/platform/path_utils.c
+    # Core modules (moved to core/ directory)
+    main/core/config/config.c
+    main/core/config/workspace_bootstrap.c
+    main/core/bus/message_bus.c
+    main/core/platform/mimi_err.c
+    main/core/platform/log.c
+    main/core/platform/random.c
+    main/core/platform/runtime.c
+    main/core/platform/queue.c
+    main/core/platform/event/io_buf.c
+    main/core/platform/event/event_bus.c
+    main/core/platform/event/event_dispatcher.c
+    main/core/platform/fs/fs.c
+    main/core/platform/kv.c
+    main/core/platform/http/mg_impl/http.c
+    main/core/platform/websocket/mg_impl/ws_client.c
+    main/core/platform/websocket/mg_impl/ws_server.c
+    main/core/platform/path_utils.c
 )
 
 # OS backend specific files
 if(OS_BACKEND STREQUAL "posix")
     set(OS_IMPL_FILES
-        main/platform/os/posix_impl/os_posix.c
+        main/core/platform/os/posix_impl/os_posix.c
     )
 elseif(OS_BACKEND STREQUAL "freertos")
     set(OS_IMPL_FILES
-        main/platform/os/freertos_impl/os_freertos.c
+        main/core/platform/os/freertos_impl/os_freertos.c
     )
 else()
     message(FATAL_ERROR "Invalid OS_BACKEND: ${OS_BACKEND}")
@@ -68,51 +87,56 @@ endif()
 
 # Always include the POSIX filesystem implementation for now
 list(APPEND OS_IMPL_FILES
-    main/platform/fs/posix_impl/fs_posix.c
+    main/core/platform/fs/posix_impl/fs_posix.c
 )
 
 list(APPEND APP_SRC ${OS_IMPL_FILES})
 
 list(APPEND APP_SRC
-    # Core app modules (platform-agnostic)
-    main/bus/message_bus.c
+    # Memory management
     main/memory/memory_store.c
     main/memory/session_mgr.c
+
+    # Skills system
     main/skills/skill_loader.c
-    main/llm/llm_proxy.c
-    main/tools/tool_registry.c
-    main/tools/tool_files.c
-    main/tools/tool_cron.c
-    main/tools/tool_web_search.c
-    main/tools/tool_get_time.c
-    main/cron/cron_service.c
-    main/heartbeat/heartbeat.c
+
+    # Services (moved to services/ directory)
+    main/services/llm/llm_proxy.c
+    main/services/cron/cron_service.c
+    main/services/heartbeat/heartbeat.c
+    main/services/proxy/http_proxy.c
+
+    # Agent modules (including control and tools)
     main/agent/context_builder.c
     main/agent/agent_async.c
     main/agent/agent_async_loop.c
-    main/proxy/http_proxy.c
-    main/cli/editor.c
-    main/cli/cli_terminal.c
+    main/agent/control/control_manager.c
+    main/agent/tools/tool_registry.c
+    main/agent/tools/tool_files.c
+    main/agent/tools/tool_cron.c
+    main/agent/tools/tool_web_search.c
+    main/agent/tools/tool_get_time.c
+    main/agent/tools/tool_call_context.c
 
-    # Commands system (shared across channels)
-    main/commands/command_registry.c
-    main/commands/cmd_help.c
-    main/commands/cmd_session.c
-    main/commands/cmd_set.c
-    main/commands/cmd_memory.c
-    main/commands/cmd_ask.c
-    main/commands/cmd_exit.c
+    # Interface modules (moved to interface/ directory)
+    main/interface/cli/editor.c
+    main/interface/cli/cli_terminal.c
+    main/interface/commands/command_registry.c
+    main/interface/commands/cmd_help.c
+    main/interface/commands/cmd_session.c
+    main/interface/commands/cmd_set.c
+    main/interface/commands/cmd_memory.c
+    main/interface/commands/cmd_ask.c
+    main/interface/commands/cmd_exit.c
+    main/interface/router/router.c
 
     # Gateway layer
-        main/gateway/gateway.c
-        main/gateway/gateway_manager.c
-        main/gateway/stdio/stdio_gateway.c
-        main/gateway/websocket/ws_server_gateway.c
-        main/gateway/websocket/ws_client_gateway.c
-        main/gateway/http/http_client_gateway.c
-
-    # Input processor
-    main/router/router.c
+    main/gateway/gateway.c
+    main/gateway/gateway_manager.c
+    main/gateway/stdio/stdio_gateway.c
+    main/gateway/websocket/ws_server_gateway.c
+    main/gateway/websocket/ws_client_gateway.c
+    main/gateway/http/http_client_gateway.c
 
     # Channels system
     main/channels/channel_manager.c
@@ -132,13 +156,13 @@ add_executable(mimiclaw
 )
 
 # --------------------------------
-# include dirs
+# include dirs (for target-specific includes)
 # --------------------------------
 target_include_directories(mimiclaw PRIVATE
     main
     main/app
-    main/platform
-    main/config
+    main/core/platform
+    main/core/config
     third_party
 )
 
@@ -169,4 +193,7 @@ if(WIN32)
     target_link_libraries(mimiclaw PRIVATE ws2_32)
 endif()
 
-add_subdirectory(main/platform/os/freertos_impl)
+# Only add FreeRTOS subdirectory when using FreeRTOS backend
+if(OS_BACKEND STREQUAL "freertos")
+    add_subdirectory(main/core/platform/os/freertos_impl)
+endif()

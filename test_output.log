@@ -1,0 +1,105 @@
+13:13:47.869 I tag=app file=app.c line=139: OS backend: POSIX backend
+13:13:47.871 I tag=channel_mgr file=channel_manager.c line=321: Initializing channel system...
+13:13:47.872 I tag=channel_mgr file=channel_manager.c line=328: Router initialized
+13:13:47.872 E tag=channel_mgr file=channel_manager.c line=129: Failed to init channel 'telegram': -8
+13:13:47.872 W tag=channel_mgr file=channel_manager.c line=350: Failed to register Telegram channel
+13:13:47.872 E tag=channel_mgr file=channel_manager.c line=129: Failed to init channel 'qq': -8
+13:13:47.872 W tag=channel_mgr file=channel_manager.c line=377: Failed to register QQ channel
+13:13:47.872 E tag=skills file=skill_loader.c line=126: Cannot write skill: skills/weather.md
+13:13:47.872 E tag=skills file=skill_loader.c line=126: Cannot write skill: skills/daily-briefing.md
+13:13:47.872 E tag=skills file=skill_loader.c line=126: Cannot write skill: skills/skill-creator.md
+13:13:47.874 W tag=web_search_posix file=tool_web_search.c line=85: No search API key. Set in config.json (tools.search.apiKey)
+13:13:47.875 I tag=CTRL_MGR file=control_manager.c line=50: Control manager initialized
+13:13:47.878 I tag=TOOL_CTX file=tool_call_context.c line=371: Always allowed tools loaded: 0
+13:13:47.878 I tag=TOOL_CTX file=tool_call_context.c line=46: Tool call context manager initialized
+13:13:47.878 I tag=os file=os_posix.c line=50: task start: agent_async_loop
+13:13:47.879 I tag=os file=os_posix.c line=50: task start: outbound_dispatch
+13:13:47.882 I tag=cron file=cron_service.c line=68: No cron file found, starting fresh
+13:13:47.882 I tag=cron file=cron_service.c line=374: Cron service started (0 jobs, check every 60s)
+13:13:47.882 I tag=os file=os_posix.c line=50: task start: worker_0
+13:13:47.882 I tag=os file=os_posix.c line=50: task start: worker_1
+13:13:47.882 I tag=cli_terminal file=cli_terminal.c line=344: Created terminal 'stdio' (cli:default)
+13:13:47.883 I tag=os file=os_posix.c line=50: task start: runtime[13:13:47] mimiclaw(cli:default)> 
+13:13:47.883 I tag=runtime file=runtime.c line=38: Runtime thread started
+13:13:47.883 I tag=gw_stdio file=stdio_gateway.c line=300: STDIO Gateway started
+13:13:47.883 I tag=os file=os_posix.c line=50: task start: stdio_gw
+13:13:47.883 I tag=gw_stdio file=stdio_gateway.c line=56: STDIO gateway task started
+13:13:47.883 I tag=cli_terminal file=cli_terminal.c line=422: EOF received, requesting exit
+
+13:13:47.883 I tag=runtime file=runtime.c line=298: Exit requested
+13:13:47.883 E tag=ws_srv file=ws_server.c line=81: Failed to listen on http://0.0.0.0:18789
+13:13:47.883 E tag=gw_ws file=ws_server_gateway.c line=152: Failed to start WS server: -7
+13:13:47.883 E tag=gateway file=gateway.c line=56: Failed to start gateway 'websocket': -7
+13:13:47.883 E tag=gateway_mgr file=gateway_manager.c line=128: Failed to start gateway 'websocket': -7
+13:13:47.883 W tag=gateway_mgr file=gateway_manager.c line=117: Gateway 'ws_client' not initialized, skipping
+13:13:47.883 I tag=channel_mgr file=channel_manager.c line=387: Starting channel system...
+13:13:47.883 I tag=channel_mgr file=channel_manager.c line=210: Starting all channels (3)...
+13:13:47.883 I tag=cli_channel file=cli_channel.c line=83: Starting CLI channel
+13:13:47.883 W tag=gateway file=gateway.c line=49: Gateway 'stdio' already started
+13:13:47.883 I tag=cli_channel file=cli_channel.c line=92: CLI channel started
+13:13:47.883 E tag=ws_srv file=ws_server.c line=81: Failed to listen on http://0.0.0.0:18789
+13:13:47.883 E tag=gw_ws file=ws_server_gateway.c line=152: Failed to start WS server: -7
+13:13:47.883 E tag=gateway file=gateway.c line=56: Failed to start gateway 'websocket': -7
+13:13:47.884 E tag=ws_ch file=ws_service_channel.c line=108: Failed to start WebSocket Gateway: MIMI_ERR_IO
+13:13:47.884 W tag=channel_mgr file=channel_manager.c line=217: Failed to start channel 'websocket': -7
+13:13:47.884 W tag=gateway file=gateway.c line=49: Gateway 'http' already started
+13:13:47.884 I tag=app file=app.c line=287: Application started
+13:13:47.884 I tag=app file=app.c line=298: Waiting for runtime...
+13:13:47.893 I tag=runtime file=runtime.c line=50: Runtime thread exiting
+13:13:47.893 I tag=os file=os_posix.c line=52: task exit: runtime
+13:13:47.980 I tag=os file=os_posix.c line=52: task exit: agent_async_loop
+13:13:47.985 I tag=app file=app.c line=305: Runtime stopped
+13:13:47.985 I tag=app file=app.c line=315: Stopping application...
+13:13:47.985 I tag=agent_async file=agent_async_loop.c line=805: Async agent loop stopping
+13:13:47.985 I tag=TOOL_CTX file=tool_call_context.c line=74: Tool call context manager deinitialized
+13:13:47.985 I tag=CTRL_MGR file=control_manager.c line=81: Control manager deinitialized
+13:13:47.985 I tag=channel_mgr file=channel_manager.c line=393: Stopping channel system...
+13:13:47.985 I tag=channel_mgr file=channel_manager.c line=234: Stopping all channels (3)...
+13:13:47.985 I tag=cli_channel file=cli_channel.c line=103: Stopping CLI channel
+13:13:48.035 I tag=gw_stdio file=stdio_gateway.c line=189: STDIO transport closed
+13:13:48.035 I tag=cli_terminal file=cli_terminal.c line=379: Destroyed terminal 'stdio'
+13:13:48.035 I tag=gw_stdio file=stdio_gateway.c line=326: STDIO Gateway stopped
+13:13:48.035 I tag=gateway file=gateway.c line=81: Gateway 'stdio' stopped
+13:13:48.035 I tag=cli_channel file=cli_channel.c line=108: CLI channel stopped
+13:13:48.035 I tag=channel_mgr file=channel_manager.c line=241: Channel 'cli' stopped
+13:13:48.035 I tag=gw_http file=http_client_gateway.c line=99: HTTP Gateway stopped
+13:13:48.035 I tag=gateway file=gateway.c line=81: Gateway 'http' stopped
+13:13:48.035 I tag=feishu file=feishu_channel.c line=976: Feishu Channel stopped
+13:13:48.035 I tag=channel_mgr file=channel_manager.c line=241: Channel 'feishu' stopped
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=273: Stopping gateway system...
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=143: Stopping all gateways...
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=153: All gateways stopped
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=143: Stopping all gateways...
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=153: All gateways stopped
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=162: Destroying all gateways...
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=143: Stopping all gateways...
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=153: All gateways stopped
+13:13:48.036 I tag=gw_stdio file=stdio_gateway.c line=335: STDIO Gateway destroyed
+13:13:48.036 I tag=gateway file=gateway.c line=98: Gateway 'stdio' destroyed
+13:13:48.036 I tag=gw_ws file=ws_server_gateway.c line=174: WebSocket Gateway stopped
+13:13:48.036 I tag=gw_ws file=ws_server_gateway.c line=185: WebSocket Gateway destroyed
+13:13:48.036 I tag=gateway file=gateway.c line=98: Gateway 'websocket' destroyed
+13:13:48.036 I tag=gw_http file=http_client_gateway.c line=114: HTTP Gateway destroyed
+13:13:48.036 I tag=gateway file=gateway.c line=98: Gateway 'http' destroyed
+13:13:48.036 I tag=gw_ws_client file=ws_client_gateway.c line=201: WebSocket Client Gateway destroyed
+13:13:48.036 I tag=gateway file=gateway.c line=98: Gateway 'ws_client' destroyed
+13:13:48.036 I tag=gateway_mgr file=gateway_manager.c line=173: All gateways destroyed
+13:13:48.036 I tag=app file=app.c line=333: Application stopped
+13:13:48.036 I tag=app file=app.c line=342: Destroying application...
+13:13:48.037 E tag=http_posix file=http.c line=279: Mongoose HTTP error: DNS error
+13:13:48.037 I tag=dispatcher file=event_dispatcher.c line=81: Worker thread exiting
+13:13:48.037 I tag=os file=os_posix.c line=52: task exit: worker_0
+13:13:48.083 I tag=dispatcher file=event_dispatcher.c line=81: Worker thread exiting
+13:13:48.083 I tag=os file=os_posix.c line=52: task exit: worker_1
+13:13:48.083 I tag=dispatcher file=event_dispatcher.c line=204: Dispatcher stopped
+13:13:48.083 I tag=event_bus file=event_bus.c line=65: Event bus destroyed
+13:13:48.083 I tag=runtime file=runtime.c line=278: Runtime deinitialized
+13:13:48.083 I tag=app file=app.c line=351: Application destroyed
+13:13:48.083 I tag=main file=main.c line=83: MimiClaw exited with code: MIMI_OK
+13:13:48.083 I tag=gw_stdio file=stdio_gateway.c line=65: STDIO gateway task stopped
+13:13:48.083 I tag=os file=os_posix.c line=52: task exit: stdio_gw
+aba0ec 1 mongoose.c:7425:mg_open_listen bind: 98
+aba0ec 1 mongoose.c:4806:mg_listen      Failed: http://0.0.0.0:18789, errno 98
+aba0ed 1 mongoose.c:7425:mg_open_listen bind: 98
+aba0ed 1 mongoose.c:4806:mg_listen      Failed: http://0.0.0.0:18789, errno 98
+aba186 1 mongoose.c:1363:mg_error       3 -1 DNS error

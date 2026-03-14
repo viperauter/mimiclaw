@@ -11,6 +11,7 @@
 #include "os/os.h"
 #include "runtime.h"
 #include "memory/session_mgr.h"
+#include "control/control_manager.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -223,23 +224,46 @@ static void cli_execute_wrapper(const char *line, void *user_data)
             }
         }
     } else {
-        /* Plain text: treat as chat message */
-        mimi_msg_t msg;
-        memset(&msg, 0, sizeof(msg));
-        strncpy(msg.channel, term->channel, sizeof(msg.channel) - 1);
-        strncpy(msg.chat_id, term->chat_id, sizeof(msg.chat_id) - 1);
-        
-        size_t len = strlen(line);
-        char *text = (char *)calloc(1, len + 1);
-        if (!text) {
-            cli_output_ln("Error: out of memory");
+        /* Check if this is a control response (single digit 1-3) */
+        if (strlen(line) == 1 && line[0] >= '1' && line[0] <= '3') {
+            /* This is a control response */
+            const char *response = "";
+            
+            switch (line[0]) {
+                case '1':
+                    response = "ACCEPT";
+                    break;
+                case '2':
+                    response = "ACCEPT_ALWAYS";
+                    break;
+                case '3':
+                    response = "REJECT";
+                    break;
+            }
+            
+            MIMI_LOGI("cli_terminal", "CLI control response: %s", response);
+            
+            /* Handle the control response by chat ID */
+            control_manager_handle_response_by_chat_id(term->chat_id, response);
         } else {
-            memcpy(text, line, len);
-            msg.content = text;
-            mimi_err_t e = message_bus_push_inbound(&msg);
-            if (e != MIMI_OK) {
-                cli_output_ln("Failed to enqueue message");
-                free(text);
+            /* Plain text: treat as chat message */
+            mimi_msg_t msg;
+            memset(&msg, 0, sizeof(msg));
+            strncpy(msg.channel, term->channel, sizeof(msg.channel) - 1);
+            strncpy(msg.chat_id, term->chat_id, sizeof(msg.chat_id) - 1);
+            
+            size_t len = strlen(line);
+            char *text = (char *)calloc(1, len + 1);
+            if (!text) {
+                cli_output_ln("Error: out of memory");
+            } else {
+                memcpy(text, line, len);
+                msg.content = text;
+                mimi_err_t e = message_bus_push_inbound(&msg);
+                if (e != MIMI_OK) {
+                    cli_output_ln("Failed to enqueue message");
+                    free(text);
+                }
             }
         }
     }

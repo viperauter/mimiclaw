@@ -9,6 +9,7 @@ typedef struct {
     const char *name;
     const char *description;
     const char *input_schema_json;  /* JSON Schema string for input */
+    bool requires_confirmation;     /* Whether tool requires user confirmation */
     mimi_err_t (*execute)(const char *input_json, char *output, size_t output_size,
                           const mimi_session_ctx_t *session_ctx);
 } mimi_tool_t;
@@ -35,5 +36,7 @@ typedef struct {
 mimi_err_t tool_registry_execute_all_async(const tool_call_t *calls, int call_count,
                                            const mimi_session_ctx_t *session_ctx,
                                            tool_callback_t callback, void *user_data);
+
+bool tool_registry_requires_confirmation(const char *tool_name);
 
 mimi_err_t tool_registry_deinit(void);

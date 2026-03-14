@@ -13,12 +13,17 @@
 #include "bus/message_bus.h"
 #include "log.h"
 #include "os/os.h"
+#include "control/control_manager.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
 #include "gateway/gateway_manager.h"
+
+/* Control message handling */
+static void (*s_on_control_response)(channel_t *, const char *, const char *, const char *, void *) = NULL;
+static void *s_control_response_user_data = NULL;
 
 static const char *TAG = "cli_channel";
 
@@ -180,6 +185,67 @@ static void cli_channel_set_on_disconnect(channel_t *ch,
     (void)user_data;
 }
 
+static mimi_err_t cli_channel_send_control(channel_t *ch, const char *session_id,
+                                         mimi_control_type_t control_type,
+                                         const char *request_id,
+                                         const char *target,
+                                         const char *data)
+{
+    cli_channel_priv_t *priv = (cli_channel_priv_t *)ch->priv_data;
+    if (!priv || !priv->gateway) {
+        return MIMI_ERR_INVALID_STATE;
+    }
+
+    /* Build control message for CLI */
+    char msg[2048];
+    const char *type_str = "";
+    
+    switch (control_type) {
+        case MIMI_CONTROL_TYPE_CONFIRM:
+            type_str = "CONFIRM";
+            break;
+        case MIMI_CONTROL_TYPE_CANCEL:
+            type_str = "CANCEL";
+            break;
+        case MIMI_CONTROL_TYPE_STOP:
+            type_str = "STOP";
+            break;
+        case MIMI_CONTROL_TYPE_STATUS:
+            type_str = "STATUS";
+            break;
+        default:
+            type_str = "UNKNOWN";
+            break;
+    }
+    
+    snprintf(msg, sizeof(msg),
+             "\n=== CONTROL REQUEST ====\n"
+             "Type: %s\n"
+             "Request ID: %s\n"
+             "Target: %s\n"
+             "Data: %s\n"
+             "Please choose an option:\n"
+             "  1. ACCEPT - Execute operation\n"
+             "  2. ACCEPT_ALWAYS - Execute and always allow\n"
+             "  3. REJECT - Cancel operation\n"
+             "> ",
+             type_str, request_id, target, data ? data : "");
+    
+    /* Send via gateway */
+    return gateway_send(priv->gateway, session_id, msg);
+}
+
+static void cli_channel_set_on_control_response(channel_t *ch,
+                                                void (*cb)(channel_t *, const char *,
+                                                          const char *, const char *,
+                                                          void *),
+                                                void *user_data)
+{
+    (void)ch;
+    s_on_control_response = cb;
+    s_control_response_user_data = user_data;
+}
+
 /*
  * Gateway Message Handler
  */
@@ -193,6 +259,33 @@ static void on_gateway_message(gateway_t *gw, const char *session_id,
     cli_channel_priv_t *priv = (cli_channel_priv_t *)ch->priv_data;
 
     if (!priv || !content) {
+        return;
+    }
+
+    MIMI_LOGD(TAG, "Received content: '%s' (len=%zu)", content, strlen(content));
+
+    /* Check if this is a control response (starts with number 1-3) */
+    if (content[0] >= '1' && content[0] <= '3') {
+        /* This is a control response */
+        const char *response = "";
+        
+        switch (content[0]) {
+            case '1':
+                response = "ACCEPT";
+                break;
+            case '2':
+                response = "ACCEPT_ALWAYS";
+                break;
+            case '3':
+                response = "REJECT";
+                break;
+        }
+        
+        MIMI_LOGI(TAG, "CLI control response: %s", response);
+        
+        /* Handle the control response by chat ID */
+        control_manager_handle_response_by_chat_id(session_id, response);
+        
         return;
     }
 
@@ -218,6 +311,8 @@ channel_t g_cli_channel = {
     .set_on_message = cli_channel_set_on_message,
     .set_on_connect = cli_channel_set_on_connect,
     .set_on_disconnect = cli_channel_set_on_disconnect,
+    .send_control = cli_channel_send_control,
+    .set_on_control_response = cli_channel_set_on_control_response,
     .priv_data = NULL,
     .is_initialized = false,
     .is_started = false

@@ -59,26 +59,49 @@
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           Message Bus Layer                                          │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐   │
+│  │  Inter-Component Communication                                                │   │
+│  │                                                                              │   │
+│  │  ┌─────────────────────┐     ┌─────────────────────┐                        │   │
+│  │  │   Inbound Queue     │     │   Outbound Queue    │                        │   │
+│  │  │  (Channel→Agent)    │     │  (Agent→Channel)    │                        │   │
+│  │  │                     │     │                     │                        │   │
+│  │  │  • User messages    │     │  • Agent responses  │                        │   │
+│  │  │  • Commands         │     │  • Tool results     │                        │   │
+│  │  │  • Confirmation     │     │  • Confirm requests │                        │   │
+│  │  │    responses        │     │                     │                        │   │
+│  │  └──────────┬──────────┘     └──────────┬──────────┘                        │   │
+│  │             │                           │                                    │   │
+│  │             └───────────┬───────────────┘                                    │   │
+│  │                         │                                                    │   │
+│  │              ┌──────────▼──────────┐                                         │   │
+│  │              │    Message Bus      │                                         │   │
+│  │              │   (mimi_msg_t)      │                                         │   │
+│  │              │                     │                                         │   │
+│  │              │  Unified message    │                                         │   │
+│  │              │  format for all     │                                         │   │
+│  │              │  channels           │                                         │   │
+│  │              └──────────┬──────────┘                                         │   │
+│  └─────────────────────────┼────────────────────────────────────────────────────┘   │
+└────────────────────────────┼────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
 │                              Core System                                             │
 │                                                                                      │
-│   ┌─────────────┐       ┌──────────────────┐                                        │
-│   │  Inbound    │◀──────│   Message Bus    │                                        │
-│   │   Queue     │       │   (mimi_msg_t)   │                                        │
-│   └──────┬──────┘       └──────────────────┘                                        │
-│          │                                                                           │
-│          ▼                                                                           │
-│   ┌────────────────────────┐                                                        │
-│   │     Agent Loop          │                                                       │
-│   │                         │                                                       │
-│   │  Context ──▶ LLM Proxy │                                                       │
-│   │  Builder      (HTTPS)   │                                                       │
-│   │       ▲          │      │                                                       │
-│   │       │     tool_use?   │                                                       │
-│   │       │          ▼      │                                                       │
-│   │  Tool Results ◀─ Tools  │                                                       │
-│   │              (web_search)│                                                      │
-│   └──────────┬─────────────┘                                                        │
-│              │                                                                       │
+│   ┌────────────────────────┐       ┌──────────────────────┐                         │
+│   │     Agent Loop          │◀─────│   Control Manager    │                         │
+│   │                         │       │  (Control Channel)   │                         │
+│   │  Context ──▶ LLM Proxy │       └──────────┬───────────┘                         │
+│   │  Builder      (HTTPS)   │                │                                       │
+│   │       ▲          │      │                │                                       │
+│   │       │     tool_use?   │                │                                       │
+│   │       │          ▼      │                │                                       │
+│   │  Tool Results ◀─ Tools  │────▶┌──────────▼───────────┐                         │
+│   │              (web_search)│    │ Tool Call Context    │                         │
+│   └──────────┬─────────────┘     │    Manager           │                         │
+│              │                   └──────────────────────┘                         │
 │       ┌──────▼───────┐                                                              │
 │       │ Outbound Queue│                                                              │
 │       └──────┬───────┘                                                              │
@@ -105,6 +128,129 @@
                     │(Claude/etc)│   │ (Brave/etc)  │
                     └───────────┘   └──────────────┘
 ```
+
+---
+
+## Message Bus Layer
+
+The Message Bus serves as the central communication backbone between the Channel Layer and Core System, providing a unified message passing mechanism.
+
+### Architecture Position
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Message Bus Layer                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────┐     ┌─────────────────────┐           │
+│  │   Inbound Queue     │     │   Outbound Queue    │           │
+│  │  (Channel→Agent)    │     │  (Agent→Channel)    │           │
+│  │                     │     │                     │           │
+│  │  • User messages    │     │  • Agent responses  │           │
+│  │  • Commands         │     │  • Tool results     │           │
+│  │  • Confirmation     │     │  • Confirm requests │           │
+│  │    responses        │     │                     │           │
+│  └──────────┬──────────┘     └──────────┬──────────┘           │
+│             │                           │                      │
+│             └───────────┬───────────────┘                      │
+│                         │                                      │
+│              ┌──────────▼──────────┐                           │
+│              │    Message Bus      │                           │
+│              │   (mimi_msg_t)      │                           │
+│              │                     │                           │
+│              │  Unified message    │                           │
+│              │  format for all     │                           │
+│              │  channels           │                           │
+│              └─────────────────────┘                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Components
+
+#### 1. Message Structure (`mimi_msg_t`)
+
+```c
+typedef enum {
+    MIMI_MSG_TYPE_TEXT = 0,         /* Normal text message */
+    MIMI_MSG_TYPE_CONTROL,          /* Control message (generic) */
+    MIMI_MSG_TYPE_TOOL_RESULT,      /* Tool execution result */
+} mimi_msg_type_t;
+
+typedef enum {
+    MIMI_CONTROL_TYPE_CONFIRM = 0,  /* Confirmation request */
+    MIMI_CONTROL_TYPE_CANCEL,       /* Cancel operation */
+    MIMI_CONTROL_TYPE_STOP,         /* Stop operation */
+    MIMI_CONTROL_TYPE_STATUS,       /* Status query */
+} mimi_control_type_t;
+
+typedef struct {
+    char channel[16];               /* "telegram", "websocket", "cli" */
+    char chat_id[128];              /* Telegram/Feishu chat_id or WS client id */
+    char *content;                  /* Heap-allocated message text (caller must free) */
+    mimi_msg_type_t type;           /* Message type */
+    
+    /* Control message specific fields */
+    mimi_control_type_t control_type;   /* Control type (for CONTROL messages) */
+    char request_id[64];                /* Unique request ID */
+    char target[64];                    /* Target (e.g., tool name, operation ID) */
+    char data[1024];                    /* Additional data (e.g., tool params) */
+} mimi_msg_t;
+```
+
+#### 2. Dual Queue System
+
+| Queue | Direction | Purpose | API |
+|-------|-----------|---------|-----|
+| **Inbound** | Channel → Agent | User messages, commands, confirmation responses | `message_bus_push_inbound()` / `message_bus_pop_inbound()` |
+| **Outbound** | Agent → Channel | Agent responses, tool results, confirmation requests | `message_bus_push_outbound()` / `message_bus_pop_outbound()` |
+
+#### 3. Message Flow
+
+**Inbound Flow (User → Agent):**
+```
+Channel (Telegram/CLI/etc)
+    ↓
+Channel Manager
+    ↓
+message_bus_push_inbound()
+    ↓
+Inbound Queue
+    ↓
+Agent Async Loop (message_bus_pop_inbound)
+    ↓
+LLM Processing / Tool Execution
+```
+
+**Outbound Flow (Agent → User):**
+```
+Agent Async Loop
+    ↓
+message_bus_push_outbound()
+    ↓
+Outbound Queue
+    ↓
+Outbound Dispatch Task (app.c)
+    ↓
+channel_send() → Channel Manager → Specific Channel
+```
+
+### Design Rationale
+
+1. **Decoupling**: Channels and Agent are completely decoupled through the Message Bus
+2. **Unified Format**: Single message format works across all channel types
+3. **Async Communication**: Non-blocking message passing with queue-based buffering
+4. **Thread Safety**: Queue operations are thread-safe, allowing concurrent access
+5. **Extensibility**: Easy to add new message types (e.g., confirmation requests)
+
+### Tool Confirmation Integration
+
+For tool confirmation mechanism, the Message Bus plays a crucial role:
+
+1. **Confirmation Request**: Agent sends confirmation request via `message_bus_push_outbound()`
+2. **User Response**: Channel receives user response and routes via `message_bus_push_inbound()`
+3. **State Management**: Agent maintains confirmation state while waiting for response
+
+This design allows the confirmation mechanism to work seamlessly across all supported channels without channel-specific code.
 
 ---
 
@@ -139,7 +285,7 @@ The platform layer implements an event-driven architecture that separates I/O ha
 
 ### Core Components
 
-#### 1. Event Loop Thread (`runtime.c`)
+#### 1. Event Loop Thread (`core/platform/runtime.c`)
 
 The single event loop thread handles all I/O operations:
 
@@ -155,7 +301,7 @@ The single event loop thread handles all I/O operations:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 2. Worker Thread Pool (`event/event_dispatcher.c`)
+#### 2. Worker Thread Pool (`core/platform/event/event_dispatcher.c`)
 
 Worker threads process business logic:
 
@@ -171,7 +317,7 @@ Worker threads process business logic:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 3. Dual Queue System (`event/event_bus.c`)
+#### 3. Dual Queue System (`core/platform/event/event_bus.c`)
 
 Two message queues bridge the event loop and worker threads:
 
@@ -268,13 +414,13 @@ Two message queues bridge the event loop and worker threads:
 
 The current implementation follows a clear separation of concerns between I/O, scheduling, and business orchestration:
 
-- **runtime (`runtime.c`, single I/O thread)**  
+- **runtime (`core/platform/runtime.c`, single I/O thread)**  
   - Starts first in `app_start()` via `mimi_runtime_start()`.  
   - Owns the single event loop thread that runs `mg_mgr_poll()` in a loop.  
   - All socket operations (connect/accept/read/write/TLS/DNS/close) are driven from this thread, typically via Mongoose callbacks and `event_bus_post_*` calls.  
   - Other threads never touch raw `mg_connection` state directly; they only communicate through the event bus.
 
-- **event bus + dispatcher (`event_bus.c`, `event_dispatcher.c`)**  
+- **event bus + dispatcher (`core/platform/event/event_bus.c`, `core/platform/event/event_dispatcher.c`)**  
   - Created during runtime initialization; dispatcher workers are started from `runtime_start()`.  
   - Workers pull messages from `recv_queue` and execute short, non-blocking handlers (JSON parsing, routing, LLM calls, etc.).  
   - Long synchronous waits on network (e.g. 30s HTTP) are avoided here; instead, workers initiate async operations and react to completion events.
@@ -321,17 +467,11 @@ io_buf_unref(buf);                              // release our reference
 
 ### HTTP Integration
 
-### LLM Proxy (llm/llm_proxy.c)
+### LLM Proxy (services/llm/llm_proxy.c)
 
 The LLM proxy handles communication with various LLM providers (OpenAI, Anthropic, OpenRouter).
 
-#### Current Implementation (Synchronous)
-
-- **Synchronous HTTP Requests**: Uses `mimi_http_exec()` for blocking HTTP calls to LLM APIs
-- **Blocking Behavior**: Worker threads are blocked until LLM responses are received
-- **Limitations**: Cannot handle multiple concurrent LLM requests from different channels
-
-#### Proposed Implementation (Asynchronous)
+#### Implementation (Asynchronous)
 
 - **Asynchronous HTTP Requests**: Uses `mimi_http_exec_async()` for non-blocking HTTP calls
 - **Callback-Based**: Uses callback functions to handle LLM responses
@@ -340,6 +480,24 @@ The LLM proxy handles communication with various LLM providers (OpenAI, Anthropi
   - **Non-Blocking**: Worker threads are not blocked, can handle other tasks
   - **Better Resource Utilization**: More efficient use of system resources
   - **Improved Responsiveness**: System remains responsive during LLM processing
+
+#### API Interface
+
+```c
+/* Synchronous API (for simple use cases) */
+mimi_err_t llm_chat_tools(const char *system_prompt,
+                          cJSON *messages,
+                          const char *tools_json,
+                          llm_response_t *resp);
+
+/* Asynchronous API (recommended for production) */
+mimi_err_t llm_chat_tools_async(const char *system_prompt,
+                               cJSON *messages,
+                               const char *tools_json,
+                               llm_response_t *resp,
+                               llm_callback_t callback,
+                               void *user_data);
+```
 
 #### Execution Flow (Asynchronous)
 
@@ -403,7 +561,7 @@ HTTP requests use the shared event loop with condition variable synchronization:
 
 ## Layered Architecture
 
-### 1. Platform Layer (`main/platform/`)
+### 1. Platform Layer (`main/core/platform/`)
 
 The foundation layer providing OS abstraction and basic services.
 
@@ -483,6 +641,66 @@ Business logic layer handling protocol-specific message processing.
 - Channels register event handlers with dispatcher
 - Channels handle protocol-specific message formatting
 - Business logic runs in worker threads
+- **Control Message Support**: Channels support control messages for tool confirmation and other interactive operations
+
+**Channel Interface (with Control Support):**
+```c
+struct channel {
+    /* Basic lifecycle and messaging */
+    mimi_err_t (*init)(channel_t *ch, const channel_config_t *cfg);
+    mimi_err_t (*start)(channel_t *ch);
+    mimi_err_t (*stop)(channel_t *ch);
+    mimi_err_t (*send)(channel_t *ch, const char *session_id, const char *content);
+    
+    /* Control message handling */
+    mimi_err_t (*send_control)(channel_t *ch, const char *session_id,
+                               mimi_control_type_t control_type,
+                               const char *request_id,
+                               const char *target,
+                               const char *data);
+    void (*set_on_control_response)(channel_t *ch,
+                                    void (*cb)(channel_t *, const char *session_id,
+                                              const char *request_id,
+                                              const char *response,
+                                              void *user_data),
+                                    void *user_data);
+    /* ... other fields ... */
+};
+```
+
+**Control Message Types:**
+| Type | Purpose | Usage |
+|------|---------|-------|
+| `MIMI_CONTROL_TYPE_CONFIRM` | Tool execution confirmation | Request user approval before executing sensitive tools |
+| `MIMI_CONTROL_TYPE_CANCEL` | Cancel operation | Cancel ongoing operations |
+| `MIMI_CONTROL_TYPE_STOP` | Stop operation | Stop agent processing |
+| `MIMI_CONTROL_TYPE_STATUS` | Status query | Query system or operation status |
+
+**Control Message Flow:**
+```
+Agent Async Loop
+    │
+    │ 1. Detect tool requiring confirmation
+    │ 2. Send control request via Message Bus
+    ▼
+Message Bus (Outbound Queue)
+    │
+    │ 3. Route to appropriate channel
+    ▼
+Channel (e.g., CLI/Telegram)
+    │
+    │ 4. Display confirmation prompt to user
+    │ 5. Collect user response (ACCEPT/ACCEPT_ALWAYS/REJECT)
+    ▼
+Message Bus (Inbound Queue)
+    │
+    │ 6. Route control response to Agent
+    ▼
+Agent Async Loop
+    │
+    │ 7. Process confirmation result
+    │ 8. Execute tool or abort based on response
+```
 
 **Channel-Gateway Relationship:**
 ```
@@ -515,7 +733,7 @@ Event Loop
 External
 ```
 
-### 4. Command System (`main/commands/`)
+### 4. Command System (`main/interface/commands/`)
 
 Shared command system used by all channels.
 
@@ -540,8 +758,8 @@ Shared command system used by all channels.
 - Message format: `mimi_msg_t` with channel, session_id, and content
 
 **Agent Loop** (`main/agent/`):
-- **Synchronous Agent** (`agent_loop.c`): Processes messages from inbound queue, builds context, calls LLM API, handles tool use and ReAct loop, sends responses to outbound queue
-- **Asynchronous Agent** (`agent_async.c`): Non-blocking agent implementation using state machine and callbacks, supports concurrent processing
+- **Primary: Asynchronous Agent Loop** (`agent_async_loop.c`): Full-featured non-blocking agent with concurrent request support
+- **Legacy: Synchronous Agent** (`agent_loop.c`): Simple blocking implementation for basic use cases
 
 **Asynchronous Agent Loop** (`agent_async_loop.c`):
 - **Non-blocking LLM Calls**: Uses `llm_chat_tools_async()` for asynchronous LLM requests
@@ -550,6 +768,175 @@ Shared command system used by all channels.
 - **Callback-Based**: Uses completion callbacks for LLM and tool responses
 - **Asynchronous Tool Execution**: Tools run in worker thread pool, not blocking the main loop
 - **Tool Worker Thread Pool**: 4 worker threads process tool executions in parallel
+
+**Control Channel Mechanism**:
+
+**Control Manager** (`main/agent/control/control_manager.c/h`):
+- **Central Control Hub**: Manages control requests and responses
+- **Request Tracking**: Tracks pending control requests by chat ID
+- **Callback Management**: Handles asynchronous control responses
+- **Thread Safe**: Uses mutex for thread synchronization
+
+**Tool Call Context Manager** (`main/agent/tools/tool_call_context.c/h`):
+- **Tool Execution State**: Manages tool execution state and confirmation status
+- **Reference Counting**: Memory management for tool call contexts
+- **Confirmation Tracking**: Tracks user confirmation status for tools
+- **Always Allow List**: Maintains list of tools that don't require confirmation
+
+**Control Flow**:
+1. **Tool Use Detection**: Agent detects tool use in LLM response
+2. **Confirmation Request**: Control Manager sends confirmation request to channel
+3. **User Response**: Channel receives user confirmation (ACCEPT/ACCEPT_ALWAYS/REJECT)
+4. **Response Handling**: Control Manager processes response and triggers callback
+5. **Tool Execution**: Agent executes tool based on confirmation result
+
+**Supported Control Types**:
+- **CONFIRM**: Tool execution confirmation
+- **CANCEL**: Operation cancellation
+- **STOP**: Operation stopping
+- **STATUS**: Status queries
+
+**Channel Integration**:
+- **CLI Channel**: Console-based confirmation prompts
+- **Other Channels**: Channel-specific confirmation UI (Telegram buttons, etc.)
+
+**Asynchronous State Management**:
+- Control responses are processed asynchronously without blocking the main loop
+- State is maintained through tool call contexts and control request tracking
+
+**Detailed Tool Confirmation Flow**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                            工具确认流程数据流向                                     │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│   用户 (User)    │  │  CLI Channel    │  │ Control Manager │  │ Agent Async Loop │
+└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
+         │                     │                     │                     │
+         │ 1. 发送消息        │                     │                     │
+         ├─────────────────────▶│                     │                     │
+         │                     │                     │                     │
+         │                     │ 2. 推送到入队     │                     │
+         │                     ├─────────────────────▶│                     │
+         │                     │                     │                     │
+         │                     │                     │ 3. 处理消息       │
+         │                     │                     ├─────────────────────▶│
+         │                     │                     │                     │
+         │                     │                     │                     │ 4. 调用LLM
+         │                     │                     │                     ├──────────────────▶
+         │                     │                     │                     │              LLM API
+         │                     │                     │                     │◀──────────────────
+         │                     │                     │                     │
+         │                     │                     │                     │ 5. 检测工具调用
+         │                     │                     │                     │
+         │                     │                     │                     │ 6. 创建工具上下文
+         │                     │                     │                     │
+         │                     │                     │                     │ 7. 发送确认请求
+         │                     │                     │◀─────────────────────┤
+         │                     │                     │                     │
+         │                     │ 8. 推送控制请求   │                     │
+         │                     │◀─────────────────────┤                     │
+         │                     │                     │                     │
+         │ 9. 显示确认提示    │                     │                     │
+         │◀─────────────────────┤                     │                     │
+         │                     │                     │                     │
+         │ 10. 选择确认选项   │                     │                     │
+         ├─────────────────────▶│                     │                     │
+         │                     │                     │                     │
+         │                     │ 11. 推送控制响应  │                     │
+         │                     ├─────────────────────▶│                     │
+         │                     │                     │                     │
+         │                     │                     │ 12. 查找待处理请求 │
+         │                     │                     │                     │
+         │                     │                     │ 13. 调用回调       │
+         │                     │                     │◀─────────────────────┤
+         │                     │                     │                     │
+         │                     │                     │                     │ 14. 处理确认结果
+         │                     │                     │                     │
+         │                     │                     │                     │ 15. 执行工具
+         │                     │                     │                     ├──────────────────▶
+         │                     │                     │                     │              Tool Registry
+         │                     │                     │                     │◀──────────────────
+         │                     │                     │                     │
+         │                     │                     │                     │ 16. 工具执行完成
+         │                     │                     │                     │
+         │                     │                     │                     │ 17. 发送结果
+         │                     │                     │                     ├──────────────────▶
+         │                     │                     │                     │              Message Bus
+         │                     │                     │                     │◀──────────────────
+         │                     │                     │                     │
+         │ 18. 显示执行结果    │                     │                     │
+         │◀─────────────────────┤                     │                     │
+         │                     │                     │                     │
+└──────────────────┘  └──────────────────┘  └──────────────────┘  └──────────────────┘
+```
+
+**Phase 1: User Request Processing**
+1. **User sends message**: User inputs message through CLI terminal
+2. **CLI Channel receives**: CLI Channel receives user message and pushes to inbound queue
+3. **Agent processing**: Agent Async Loop retrieves message from inbound queue
+4. **LLM call**: Agent calls LLM API to process user request
+
+**Phase 2: Tool Call Detection**
+5. **Detect tool call**: Agent detects tool call in LLM response
+6. **Create tool context**: Agent creates tool call context with tool name, parameters, etc.
+7. **Check confirmation need**: Agent checks if tool requires user confirmation
+8. **Send confirmation request**: If confirmation needed, Agent sends confirmation request via Control Manager
+
+**Phase 3: Confirmation Request Display**
+9. **Push control request**: Control Manager pushes control request to outbound queue
+10. **Display confirmation prompt**: CLI Channel retrieves control request from outbound queue and displays confirmation prompt
+11. **User selection**: User selects confirmation option (1=ACCEPT, 2=ACCEPT_ALWAYS, 3=REJECT)
+
+**Phase 4: Confirmation Response Processing**
+12. **Push control response**: CLI Channel pushes user's selection as control response to inbound queue
+13. **Find pending request**: Control Manager finds corresponding pending control request
+14. **Invoke callback**: Control Manager invokes registered callback function to process confirmation result
+
+**Phase 5: Tool Execution**
+15. **Process confirmation result**: Agent decides whether to execute tool based on user's confirmation
+16. **Execute tool**: If user confirmed, Agent executes tool via Tool Registry
+17. **Tool execution complete**: Tool Registry completes tool execution and returns result
+
+**Phase 6: Result Return**
+18. **Send result**: Agent pushes tool execution result to outbound queue
+19. **Display execution result**: CLI Channel retrieves result from outbound queue and displays to user
+
+**File and Function Mapping**:
+
+| Step | File | Function | Description |
+|------|------|----------|-------------|
+| 1-2 | `main/channels/cli/cli_channel.c` | `on_gateway_message()` | Receives user message from gateway |
+| 2-3 | `main/core/bus/message_bus.c` | `message_bus_push_inbound()` | Pushes message to inbound queue |
+| 3-4 | `main/agent/agent_async_loop.c` | `agent_async_loop_process_message()` | Processes inbound message |
+| 4-5 | `main/agent/agent_async_loop.c` | `llm_chat_tools_async()` | Calls LLM API asynchronously |
+| 5-6 | `main/agent/agent_async_loop.c` | `tool_call_context_create()` | Creates tool call context |
+| 6-7 | `main/agent/agent_async_loop.c` | `tool_call_context_is_always_allowed()` | Checks if tool requires confirmation |
+| 7-8 | `main/agent/agent_async_loop.c` | `control_manager_send_request()` | Sends confirmation request |
+| 8-9 | `main/agent/control/control_manager.c` | `control_manager_send_request()` | Pushes control request to outbound queue |
+| 9-10 | `main/app/app.c` | `outbound_dispatch_task()` | Processes outbound queue messages |
+| 9-10 | `main/channels/cli/cli_channel.c` | `cli_channel_send_control()` | Displays confirmation prompt |
+| 10-11 | `main/channels/cli/cli_channel.c` | `gateway_send()` | Sends prompt to user via gateway |
+| 11-12 | `main/channels/cli/cli_channel.c` | `on_gateway_message()` | Receives user selection |
+| 11-12 | `main/channels/cli/cli_channel.c` | `control_manager_handle_response_by_chat_id()` | Handles control response |
+| 12-13 | `main/agent/control/control_manager.c` | `control_manager_handle_response_by_chat_id()` | Finds pending request |
+| 13-14 | `main/agent/control/control_manager.c` | `control_manager_handle_response_by_chat_id()` | Invokes callback |
+| 14-15 | `main/agent/agent_async_loop.c` | `tool_confirm_callback()` | Processes confirmation result |
+| 15-16 | `main/agent/agent_async_loop.c` | `tool_confirm_execution_callback()` | Executes tool if confirmed |
+| 15-16 | `main/agent/tools/tool_registry.c` | `tool_execute()` | Executes tool via registry |
+| 16-17 | `main/agent/agent_async_loop.c` | `tool_confirm_execution_callback()` | Handles tool completion |
+| 17-18 | `main/agent/agent_async_loop.c` | `message_bus_push_outbound()` | Pushes result to outbound queue |
+| 18-19 | `main/app/app.c` | `outbound_dispatch_task()` | Processes outbound queue messages |
+| 18-19 | `main/channels/cli/cli_channel.c` | `cli_channel_send_impl()` | Displays result to user |
+
+**Data Flow Characteristics**:
+1. **Asynchronous Processing**: All operations are asynchronous without blocking the main thread
+2. **Message Bus**: Component decoupling through Message Bus
+3. **Control Manager**: Unified management of all control requests and responses
+4. **Tool Context**: Maintains complete state information of tool calls
+5. **User Interaction**: Channel is responsible for user interaction interface
 
 **Asynchronous Tool Execution Flow:**
 ```
@@ -631,29 +1018,74 @@ main/
 ├── mimi_config.h               # Compile-time configuration
 ├── mimi_secrets.h              # Build-time credentials (gitignored)
 │
-├── platform/                   # Platform Layer
-│   ├── os/                     # OS Abstraction
-│   │   ├── os.h                # OS interface (task, mutex, cond)
-│   │   └── posix_impl/         # POSIX implementation
-│   ├── runtime.c/h             # Event loop management
-│   ├── event/
-│   │   ├── event_bus.c/h       # Event bus (cross-thread message transport)
-│   │   ├── event_dispatcher.c/h # Worker thread pool
-│   │   └── io_buf.c/h          # Reference-counted I/O buffer
-│   ├── queue.c/h               # Thread-safe queue
-│   ├── log.h                   # Logging interface
-│   ├── mimi_time.h             # Time functions
-│   ├── mimi_err.h              # Error codes
-│   └── fs/                     # File system
-│       ├── mimi_fs.h           # VFS interface
-│       └── posix/              # POSIX implementation
+├── app/                        # Application Layer
+│   └── app.c                   # Application main
 │
-├── gateway/                    # Gateway Layer
-│   ├── gateway.h               # Gateway interface
-│   ├── gateway_manager.c/h     # Gateway registry
-│   ├── stdio/                  # STDIO transport
-│   ├── http/                   # HTTP client
-│   └── websocket/              # WebSocket server/client
+├── core/                       # Core System
+│   ├── platform/               # Platform Layer
+│   │   ├── os/                 # OS Abstraction
+│   │   │   ├── os.h            # OS interface (task, mutex, cond)
+│   │   │   ├── posix_impl/     # POSIX implementation
+│   │   │   └── freertos_impl/  # FreeRTOS implementation
+│   │   ├── runtime.c/h         # Event loop management
+│   │   ├── event/
+│   │   │   ├── event_bus.c/h   # Event bus (cross-thread message transport)
+│   │   │   ├── event_dispatcher.c/h # Worker thread pool
+│   │   │   └── io_buf.c/h      # Reference-counted I/O buffer
+│   │   ├── queue.c/h           # Thread-safe queue
+│   │   ├── log.h               # Logging interface
+│   │   ├── mimi_time.h         # Time functions
+│   │   ├── mimi_err.h          # Error codes
+│   │   ├── fs/                 # File system
+│   │   │   ├── mimi_fs.h       # VFS interface
+│   │   │   └── posix/          # POSIX implementation
+│   │   ├── http/               # HTTP client
+│   │   ├── websocket/          # WebSocket
+│   │   └── path_utils.c/h      # Path utilities
+│   ├── bus/                    # Message Bus
+│   │   └── message_bus.c/h     # Inbound/outbound queues
+│   └── config/                 # Configuration
+│       ├── config.c/h          # Config loading
+│       └── workspace_bootstrap.c # Workspace setup
+│
+├── services/                   # Service Layer
+│   ├── llm/                    # LLM Integration
+│   │   └── llm_proxy.c/h       # LLM API client
+│   ├── cron/                   # Cron Service
+│   │   └── cron_service.c/h    # Scheduled jobs
+│   ├── heartbeat/              # Heartbeat Service
+│   │   └── heartbeat.c/h       # Periodic heartbeat
+│   └── proxy/                  # HTTP Proxy
+│       └── http_proxy.c/h      # Proxy configuration
+│
+├── interface/                  # Interface Layer
+│   ├── cli/                    # CLI Framework
+│   │   ├── cli_terminal.c/h    # Terminal handling
+│   │   └── editor.c/h          # Line editor
+│   ├── commands/               # Command System
+│   │   ├── command_registry.c/h # Command registry
+│   │   ├── cmd_help.c          # /help command
+│   │   ├── cmd_session.c       # /session command
+│   │   ├── cmd_set.c           # /set command
+│   │   ├── cmd_ask.c           # /ask command
+│   │   ├── cmd_memory.c        # /memory_read command
+│   │   └── cmd_exit.c          # /exit command
+│   └── router/                 # Router Layer
+│       └── router.c/h          # Message routing
+│
+├── agent/                      # Agent System
+│   ├── agent_async.c/h         # Async agent functions
+│   ├── agent_async_loop.c/h    # Main agent loop
+│   ├── context_builder.c/h     # Context building
+│   ├── control/                # Control Channel
+│   │   └── control_manager.c/h # Control manager
+│   └── tools/                  # Tool System
+│       ├── tool_registry.c/h   # Tool registry
+│       ├── tool_call_context.c/h # Tool call context management
+│       ├── tool_web_search.c   # Web search tool
+│       ├── tool_get_time.c     # Time tool
+│       ├── tool_files.c        # File operations
+│       └── tool_cron.c         # Cron tool
 │
 ├── channels/                   # Channel Layer
 │   ├── channel.h               # Channel interface
@@ -664,31 +1096,12 @@ main/
 │   ├── websocket/              # WebSocket channel
 │   └── qq/                     # QQ channel
 │
-├── commands/                   # Command System
-│   ├── command_registry.c/h    # Command registry
-│   ├── cmd_help.c              # /help command
-│   ├── cmd_session.c           # /session command
-│   ├── cmd_set.c               # /set command
-│   ├── cmd_ask.c               # /ask command
-│   ├── cmd_memory.c            # /memory_read command
-│   └── cmd_exit.c              # /exit command
-│
-├── bus/                        # Message Bus
-│   └── message_bus.c/h         # Inbound/outbound queues
-│
-├── agent/                      # Agent System
-│   ├── agent_loop.c/h          # Main agent loop
-│   └── context_builder.c/h     # Context building
-│
-├── llm/                        # LLM Integration
-│   └── llm_proxy.c/h           # LLM API client
-│
-├── tools/                      # Tool System
-│   ├── tool_registry.c/h       # Tool registry
-│   ├── tool_web_search.c       # Web search tool
-│   ├── tool_get_time.c         # Time tool
-│   ├── tool_files.c            # File operations
-│   └── tool_cron.c             # Cron tool
+├── gateway/                    # Gateway Layer
+│   ├── gateway.h               # Gateway interface
+│   ├── gateway_manager.c/h     # Gateway registry
+│   ├── stdio/                  # STDIO transport
+│   ├── http/                   # HTTP client
+│   └── websocket/              # WebSocket server/client
 │
 ├── memory/                     # Memory System
 │   ├── memory_store.c/h        # Long-term memory
@@ -696,26 +1109,6 @@ main/
 │
 ├── skills/                     # Skills System
 │   └── skill_loader.c/h        # Dynamic skill loading
-│
-├── router/                     # Router Layer
-│   └── router.c/h              # Message routing
-│
-├── config/                     # Configuration
-│   ├── config.c/h              # Config loading
-│   └── workspace_bootstrap.c   # Workspace setup
-│
-├── cli/                        # CLI Framework
-│   ├── cli_terminal.c/h        # Terminal handling
-│   └── editor.c/h              # Line editor
-│
-├── cron/                       # Cron Service
-│   └── cron_service.c/h        # Scheduled jobs
-│
-├── heartbeat/                  # Heartbeat Service
-│   └── heartbeat.c/h           # Periodic heartbeat
-│
-├── proxy/                      # HTTP Proxy
-│   └── http_proxy.c/h          # Proxy configuration
 │
 └── wifi/                       # WiFi Manager (ESP32)
     └── wifi_manager.c/h        # WiFi management
