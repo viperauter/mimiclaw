@@ -349,7 +349,16 @@ static mimi_err_t stdio_gateway_send_impl(gateway_t *gw, const char *session_id,
         return MIMI_ERR_INVALID_ARG;
     }
 
-    app_terminal_output_ln(s_priv.terminal, content);
+    size_t len = strlen(content);
+    if (len > 0 && content[len - 1] == '\n') {
+        app_terminal_output(s_priv.terminal, content);
+    } else {
+        app_terminal_output_ln(s_priv.terminal, content);
+    }
+
+    /* Print prompt after sending message */
+    app_terminal_print_prompt(s_priv.terminal);
+
     return MIMI_OK;
 }
 

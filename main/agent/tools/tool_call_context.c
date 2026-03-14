@@ -5,6 +5,7 @@
  */
 
 #include "tool_call_context.h"
+#include "memory/session_mgr.h"
 #include "platform/log.h"
 #include "platform/os/os.h"
 #include "platform/kv.h"
@@ -122,8 +123,12 @@ tool_call_context_t *tool_call_context_create(
             char chat_id[128];
         } agent_ctx_t;
         agent_ctx_t *ctx_ptr = (agent_ctx_t *)agent_ctx;
-        strncpy(ctx->session_ctx.channel, ctx_ptr->channel, sizeof(ctx->session_ctx.channel) - 1);
-        strncpy(ctx->session_ctx.chat_id, ctx_ptr->chat_id, sizeof(ctx->session_ctx.chat_id) - 1);
+        
+        /* Create a temporary message to use session_ctx_from_msg */
+        mimi_msg_t temp_msg = {0};
+        strncpy(temp_msg.channel, ctx_ptr->channel, sizeof(temp_msg.channel) - 1);
+        strncpy(temp_msg.chat_id, ctx_ptr->chat_id, sizeof(temp_msg.chat_id) - 1);
+        session_ctx_from_msg(&temp_msg, &ctx->session_ctx);
     }
     
     ctx->requires_confirmation = requires_confirmation;

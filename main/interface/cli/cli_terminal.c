@@ -481,3 +481,9 @@ int app_terminal_count(void)
 {
     return g_state.count;
 }
+
+void app_terminal_print_prompt(app_terminal_t *term)
+{
+    if (!term || !term->editor_term) return;
+    cli_terminal_print_prompt(term->editor_term);
+}

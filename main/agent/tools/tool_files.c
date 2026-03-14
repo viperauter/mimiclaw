@@ -100,6 +100,34 @@ static void resolve_session_path(const char *path, const mimi_session_ctx_t *ses
     snprintf(out, out_size, "%s/%s", session_ctx->workspace_root, path);
 }
 
+/**
+ * Create parent directory for a file path if it doesn't exist.
+ */
+static mimi_err_t ensure_parent_dir(const char *path)
+{
+    if (!path) return MIMI_ERR_INVALID_ARG;
+    
+    /* Find the last directory separator */
+    const char *last_sep = strrchr(path, '/');
+    if (!last_sep) return MIMI_OK;  /* No directory component */
+    
+    /* Extract directory path */
+    size_t dir_len = last_sep - path;
+    if (dir_len == 0) return MIMI_OK;  /* Root directory */
+    
+    char *dir = (char *)malloc(dir_len + 1);
+    if (!dir) return MIMI_ERR_NO_MEM;
+    
+    memcpy(dir, path, dir_len);
+    dir[dir_len] = '\0';
+    
+    /* Create directory (and parents) */
+    mimi_err_t err = mimi_fs_mkdir_p(dir);
+    free(dir);
+    
+    return err;
+}
+
 /* ── read_file ─────────────────────────────────────────────── */
 
 mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size,
@@ -170,10 +198,23 @@ mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t 
     char resolved[MAX_RESOLVED_PATH];
     resolve_session_path(path, session_ctx, resolved, sizeof(resolved));
 
-    mimi_file_t *f = NULL;
-    mimi_err_t err = mimi_fs_open(resolved, "w", &f);
+    MIMI_LOGI(TAG, "write_file: resolved path='%s', session_ctx=%p, workspace_root='%s'",
+              resolved, (void*)session_ctx, session_ctx ? session_ctx->workspace_root : "(null)");
+
+    /* Ensure parent directory exists */
+    mimi_err_t err = ensure_parent_dir(resolved);
     if (err != MIMI_OK) {
-        snprintf(output, output_size, "Error: cannot open file for writing: %s", path);
+        MIMI_LOGE(TAG, "write_file: failed to create parent directory for '%s', err=%s", resolved, mimi_err_to_name(err));
+        snprintf(output, output_size, "Error: cannot create directory for: %s", path);
+        cJSON_Delete(root);
+        return MIMI_ERR_IO;
+    }
+
+    mimi_file_t *f = NULL;
+    err = mimi_fs_open(resolved, "w", &f);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "write_file: failed to open '%s', err=%s", resolved, mimi_err_to_name(err));
+        snprintf(output, output_size, "Error: cannot open file for writing: %s (err=%s)", path, mimi_err_to_name(err));
         cJSON_Delete(root);
         return MIMI_ERR_IO;
     }

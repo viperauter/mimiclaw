@@ -312,15 +312,18 @@ static void start_async_tools(agent_request_ctx_t *ctx, const llm_response_t *re
     
     for (int i = 0; i < resp->call_count; i++) {
         const llm_tool_call_t *call = &resp->calls[i];
-        const char *tool_input = call->input ? call->input : "{}";
+        const char *tool_input = (call->input && call->input[0]) ? call->input : "{}";
         char *patched_input = patch_tool_input_with_context(call, ctx->channel, ctx->chat_id);
 
-        MIMI_LOGI(TAG, "Async tool execution: %s", call->name);
+        MIMI_LOGI(TAG, "Async tool execution: %s, input='%s'", call->name, tool_input);
 
         /* Check if tool requires confirmation */
         bool requires_confirmation = tool_registry_requires_confirmation(call->name);
+        
+        /* Check if tool is already marked as always allowed */
+        bool always_allowed = tool_call_context_is_always_allowed(call->name);
 
-        if (requires_confirmation) {
+        if (requires_confirmation && !always_allowed) {
             /* Create tool call context for confirmation */
             tool_call_context_t *tool_ctx = tool_call_context_create(
                 ctx,

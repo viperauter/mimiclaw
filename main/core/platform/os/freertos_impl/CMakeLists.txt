@@ -39,12 +39,16 @@ if(FREERTOS_BUILD_RUNTIME)
         ${CMAKE_CURRENT_SOURCE_DIR}/freertos_hooks.c
     )
 
-    target_include_directories(freertos_runtime_posix PUBLIC
+    # FreeRTOS headers must come BEFORE project headers to avoid conflicts
+    # (e.g., queue.h in FreeRTOS vs queue.h in main/core/platform/)
+    target_include_directories(freertos_runtime_posix BEFORE PUBLIC
         "${FREERTOS_PROJECT_CFG_DIR}"
         "${FREERTOS_INCLUDE_DIR}"
         "${FREERTOS_POSIX_PORT_DIR}"
         "${FREERTOS_POSIX_PORT_DIR}/utils"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+    )
+    target_include_directories(freertos_runtime_posix PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.."
     )
 
     target_link_libraries(freertos_runtime_posix PUBLIC pthread)

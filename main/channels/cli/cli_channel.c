@@ -140,8 +140,29 @@ static mimi_err_t cli_channel_send_impl(channel_t *ch,
         return MIMI_ERR_INVALID_STATE;
     }
 
+    /* Skip formatting for status messages like "mimi is working..." */
+    if (content && strstr(content, "mimi is working")) {
+        return gateway_send(priv->gateway, session_id, content);
+    }
+
+    /* Format message with mimi prefix for assistant responses */
+    char *formatted = NULL;
+    if (content && *content) {
+        size_t len = strlen(content) + 32;
+        formatted = malloc(len);
+        if (formatted) {
+            snprintf(formatted, len, "\n🐱mimi:\n%s\n", content);
+        }
+    }
+
     /* Send via gateway */
-    return gateway_send(priv->gateway, session_id, content);
+    mimi_err_t err = gateway_send(priv->gateway, session_id, formatted ? formatted : content);
+
+    if (formatted) {
+        free(formatted);
+    }
+
+    return err;
 }
 
 static bool cli_channel_is_running_impl(channel_t *ch)
@@ -191,15 +212,16 @@ static mimi_err_t cli_channel_send_control(channel_t *ch, const char *session_id
                                          const char *target,
                                          const char *data)
 {
-    cli_channel_priv_t *priv = (cli_channel_priv_t *)ch->priv_data;
-    if (!priv || !priv->gateway) {
+    (void)ch;
+    cli_channel_priv_t *priv = &s_priv;
+
+    if (!priv->gateway) {
         return MIMI_ERR_INVALID_STATE;
     }
 
-    /* Build control message for CLI */
-    char msg[2048];
+    char msg[1024];
     const char *type_str = "";
-    
+
     switch (control_type) {
         case MIMI_CONTROL_TYPE_CONFIRM:
             type_str = "CONFIRM";
@@ -217,21 +239,18 @@ static mimi_err_t cli_channel_send_control(channel_t *ch, const char *session_id
             type_str = "UNKNOWN";
             break;
     }
-    
+
     snprintf(msg, sizeof(msg),
              "\n=== CONTROL REQUEST ====\n"
              "Type: %s\n"
-             "Request ID: %s\n"
              "Target: %s\n"
-             "Data: %s\n"
              "Please choose an option:\n"
              "  1. ACCEPT - Execute operation\n"
              "  2. ACCEPT_ALWAYS - Execute and always allow\n"
              "  3. REJECT - Cancel operation\n"
-             "> ",
-             type_str, request_id, target, data ? data : "");
-    
-    /* Send via gateway */
+             ">",
+             type_str, target ? target : "");
+
     return gateway_send(priv->gateway, session_id, msg);
 }
 

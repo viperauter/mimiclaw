@@ -114,6 +114,12 @@ const char* app_terminal_get_name(app_terminal_t *term);
  */
 int app_terminal_count(void);
 
+/**
+ * Print prompt for a specific terminal
+ * @param term Terminal handle
+ */
+void app_terminal_print_prompt(app_terminal_t *term);
+
 #ifdef __cplusplus
 }
 #endif
