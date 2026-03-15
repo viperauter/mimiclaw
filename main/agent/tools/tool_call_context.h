@@ -11,18 +11,13 @@
 
 #include "mimi_err.h"
 #include "memory/session_mgr.h"
+#include "mimi_config.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Maximum number of concurrent tool call contexts */
-#define TOOL_CALL_MAX_CONTEXTS 16
-
-/* Tool output buffer size */
-#define TOOL_OUTPUT_SIZE 32768
 
 /* Confirmation result enumeration */
 typedef enum {

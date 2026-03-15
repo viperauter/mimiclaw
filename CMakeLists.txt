@@ -107,6 +107,14 @@ list(APPEND OS_IMPL_FILES
 
 list(APPEND APP_SRC ${OS_IMPL_FILES})
 
+# Agent files (asynchronous mode only)
+list(APPEND APP_SRC
+    main/agent/agent_async.c
+    main/agent/agent_async_loop.c
+    main/agent/tools/tool_call_context.c
+)
+message(STATUS "Using asynchronous agent loop (configurable via MIMI_MEM_PROFILE)")
+
 list(APPEND APP_SRC
     # Memory management
     main/memory/memory_store.c
@@ -123,15 +131,12 @@ list(APPEND APP_SRC
 
     # Agent modules (including control and tools)
     main/agent/context_builder.c
-    main/agent/agent_async.c
-    main/agent/agent_async_loop.c
     main/agent/control/control_manager.c
     main/agent/tools/tool_registry.c
     main/agent/tools/tool_files.c
     main/agent/tools/tool_cron.c
     main/agent/tools/tool_web_search.c
     main/agent/tools/tool_get_time.c
-    main/agent/tools/tool_call_context.c
 
     # Interface modules (moved to interface/ directory)
     main/interface/cli/editor.c

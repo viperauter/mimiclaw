@@ -8,6 +8,7 @@
 #include "tools/tool_registry.h"
 #include "tools/tool_call_context.h"
 #include "control/control_manager.h"
+#include "mimi_config.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -23,29 +24,23 @@ static volatile bool s_agent_running = true;
 
 static void agent_llm_callback(mimi_err_t result, llm_response_t *resp, void *user_data);
 
-#define CONTEXT_BUF_SIZE     (16 * 1024)
-#define LLM_STREAM_BUF_SIZE  (32 * 1024)
-#ifndef MAX_CONCURRENT
-#define MAX_CONCURRENT       8
-#endif
-
 typedef struct {
-    char channel[64];
-    char chat_id[128];
-    char content[32768];
+    char channel[MIMI_CHANNEL_NAME_LEN];
+    char chat_id[MIMI_CHAT_ID_LEN];
+    char content[MIMI_CONTEXT_BUF_SIZE];
     char *system_prompt;
     cJSON *messages;
     const char *tools_json;
     int iteration;
     int max_iters;
     bool sent_working_status;
-    char tool_output[TOOL_OUTPUT_SIZE];
+    char tool_output[MIMI_TOOL_OUTPUT_SIZE];
     llm_response_t llm_resp;
     bool in_progress;
 } agent_request_ctx_t;
 
 static mimi_mutex_t *s_ctx_mutex = NULL;
-static agent_request_ctx_t s_pending_ctx[MAX_CONCURRENT];
+static agent_request_ctx_t s_pending_ctx[MIMI_MAX_CONCURRENT];
 static int s_active_count = 0;
 
 static cJSON *build_assistant_tool_calls(const llm_response_t *resp)

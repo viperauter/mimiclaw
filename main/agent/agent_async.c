@@ -6,6 +6,7 @@
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
+#include "mimi_config.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -16,10 +17,6 @@
 #include "fs/fs.h"
 
 static const char *TAG = "agent_async";
-
-#define CONTEXT_BUF_SIZE     (16 * 1024)
-#define LLM_STREAM_BUF_SIZE  (32 * 1024)
-#define TOOL_OUTPUT_SIZE     (8 * 1024)
 
 /* Build the assistant content array from llm_response_t for the messages history. */
 static cJSON *build_assistant_content(const llm_response_t *resp)
