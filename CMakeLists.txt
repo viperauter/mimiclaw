@@ -4,13 +4,28 @@ project(mimiclaw C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-find_package(OpenSSL REQUIRED)
+# --------------------------------
+# TLS backend selection
+# --------------------------------
+# Options: "openssl" or "builtin"
+# Can be set via: -DTLS_BACKEND=builtin or by modifying this file
+if(NOT DEFINED TLS_BACKEND)
+    set(TLS_BACKEND "builtin")
+endif()
+
+# OpenSSL is required only when using OpenSSL TLS backend
+if(TLS_BACKEND STREQUAL "openssl")
+    find_package(OpenSSL REQUIRED)
+endif()
 
 # --------------------------------
 # OS backend selection
 # --------------------------------
-set(OS_BACKEND "posix" CACHE STRING "OS backend to use (posix or freertos)")
-set_property(CACHE OS_BACKEND PROPERTY STRINGS posix freertos)
+# Options: "posix" or "freertos"
+# Can be set via: -DOS_BACKEND=freertos or by modifying this file
+if(NOT DEFINED OS_BACKEND)
+    set(OS_BACKEND "freertos")
+endif()
 
 # Windows: static link pthread to avoid DLL dependency
 if(WIN32)
@@ -172,13 +187,16 @@ target_include_directories(mimiclaw PRIVATE
 target_link_libraries(mimiclaw
     PRIVATE
     mongoose
-    OpenSSL::SSL
-    OpenSSL::Crypto
     cjson
     nanopb
     feishu_pb
     pthread
 )
+
+# TLS backend specific dependencies
+if(TLS_BACKEND STREQUAL "openssl")
+    target_link_libraries(mimiclaw PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 # OS backend specific dependencies
 if(OS_BACKEND STREQUAL "freertos")
