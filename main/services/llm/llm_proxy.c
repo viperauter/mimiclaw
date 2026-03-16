@@ -1,5 +1,7 @@
 #include "llm/llm_proxy.h"
+#include "llm/llm_trace.h"
 #include "config.h"
+#include "config_view.h"
 
 #include "http/http.h"
 #include "log.h"
@@ -158,24 +160,26 @@ static const char *llm_api_url(void)
 
 mimi_err_t llm_proxy_init(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    if (cfg->api_key[0] != '\0') {
-        safe_copy(s_api_key, sizeof(s_api_key), cfg->api_key);
-    }
-    if (cfg->model[0] != '\0') {
-        safe_copy(s_model, sizeof(s_model), cfg->model);
-    }
-    if (cfg->provider[0] != '\0') {
-        safe_copy(s_provider, sizeof(s_provider), cfg->provider);
-    }
-    if (cfg->api_protocol[0] != '\0') {
-        safe_copy(s_api_protocol, sizeof(s_api_protocol), cfg->api_protocol);
-    }
-    if (cfg->api_url[0] != '\0') {
-        safe_copy(s_api_override, sizeof(s_api_override), cfg->api_url);
-    } else if (cfg->api_base[0] != '\0') {
-        safe_copy(s_api_override, sizeof(s_api_override), cfg->api_base);
-    }
+    /* Prefer JSON-backed config so plugins/extensions can add fields. */
+    mimi_cfg_obj_t agents = mimi_cfg_section("agents");
+    mimi_cfg_obj_t defaults = mimi_cfg_get_obj(agents, "defaults");
+    const char *prov_name = mimi_cfg_get_str(defaults, "provider", NULL);
+    const char *model_name = mimi_cfg_get_str(defaults, "model", NULL);
+    const char *api_proto = mimi_cfg_get_str(defaults, "apiProtocol", NULL);
+    if (prov_name) safe_copy(s_provider, sizeof(s_provider), prov_name);
+    if (model_name) safe_copy(s_model, sizeof(s_model), model_name);
+    if (api_proto) safe_copy(s_api_protocol, sizeof(s_api_protocol), api_proto);
+
+    /* Resolve provider details from providers.<name> */
+    mimi_cfg_obj_t prov = (s_provider[0] ? mimi_cfg_named("providers", s_provider) : (mimi_cfg_obj_t){0});
+    const char *api_key = mimi_cfg_get_str(prov, "apiKey", NULL);
+    const char *api_base = mimi_cfg_get_str(prov, "apiBase", NULL);
+    if (api_key && api_key[0]) safe_copy(s_api_key, sizeof(s_api_key), api_key);
+
+    /* API override: agents.defaults.apiUrl > providers.<name>.apiBase > cfg.api_base */
+    const char *api_url = mimi_cfg_get_str(defaults, "apiUrl", NULL);
+    if (api_url && api_url[0]) safe_copy(s_api_override, sizeof(s_api_override), api_url);
+    else if (api_base && api_base[0]) safe_copy(s_api_override, sizeof(s_api_override), api_base);
 
     if (s_api_key[0]) {
         MIMI_LOGD(TAG, "LLM proxy initialized (provider=%s, model=%s)", s_provider, s_model);
@@ -296,19 +300,18 @@ static void try_extract_tool_calls_from_text_json(llm_response_t *resp)
     cJSON_Delete(root);
 }
 
-mimi_err_t llm_chat_tools(const char *system_prompt,
-                          cJSON *messages,
-                          const char *tools_json,
-                          llm_response_t *resp)
+mimi_err_t llm_chat_tools_req(const llm_chat_req_t *req, llm_response_t *resp)
 {
     if (!resp) return MIMI_ERR_INVALID_ARG;
     memset(resp, 0, sizeof(*resp));
 
     if (s_api_key[0] == '\0') return MIMI_ERR_INVALID_STATE;
+    if (!req || !req->messages) return MIMI_ERR_INVALID_ARG;
 
-    const mimi_config_t *cfg = mimi_config_get();
-    int max_tokens = (cfg->max_tokens > 0) ? cfg->max_tokens : 8192;
-    double temperature = cfg->temperature;
+    mimi_cfg_obj_t defaults = mimi_cfg_get_obj(mimi_cfg_section("agents"), "defaults");
+    int max_tokens = mimi_cfg_get_int(defaults, "maxTokens", 8192);
+    double temperature = mimi_cfg_get_double(defaults, "temperature", 0.1);
+    if (max_tokens <= 0) max_tokens = 8192;
 
     cJSON *body = cJSON_CreateObject();
     if (!body) return MIMI_ERR_NO_MEM;
@@ -324,24 +327,24 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
     }
 
     if (provider_is_openai_compat()) {
-        cJSON *openai_msgs = convert_messages_openai(system_prompt, messages);
+        cJSON *openai_msgs = convert_messages_openai(req->system_prompt, req->messages);
         cJSON_AddItemToObject(body, "messages", openai_msgs);
 
-        if (tools_json) {
-            cJSON *tools = convert_tools_openai(tools_json);
+        if (req->tools_json) {
+            cJSON *tools = convert_tools_openai(req->tools_json);
             if (tools) {
                 cJSON_AddItemToObject(body, "tools", tools);
                 cJSON_AddStringToObject(body, "tool_choice", "auto");
             }
         }
     } else {
-        cJSON_AddStringToObject(body, "system", system_prompt ? system_prompt : "");
-        cJSON *msgs_copy = cJSON_Duplicate(messages, 1);
+        cJSON_AddStringToObject(body, "system", (req->system_prompt && req->system_prompt[0]) ? req->system_prompt : "");
+        cJSON *msgs_copy = cJSON_Duplicate(req->messages, 1);
         if (msgs_copy) {
             cJSON_AddItemToObject(body, "messages", msgs_copy);
         }
-        if (tools_json) {
-            cJSON *tools = cJSON_Parse(tools_json);
+        if (req->tools_json) {
+            cJSON *tools = cJSON_Parse(req->tools_json);
             if (tools) {
                 cJSON_AddItemToObject(body, "tools", tools);
             }
@@ -353,6 +356,11 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
     if (!post_data) return MIMI_ERR_NO_MEM;
 
     llm_log_payload("LLM tools request", post_data);
+    if (req->trace_id && req->trace_id[0]) {
+        llm_trace_event_kv(req->trace_id, "llm_request",
+                           "json", post_data,
+                           NULL, NULL, NULL, NULL, NULL, NULL);
+    }
 
     /* Build HTTP request */
     char headers[LLM_API_KEY_MAX_LEN + 256];
@@ -371,7 +379,7 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
                  s_api_key, ANTHROPIC_VERSION);
     }
 
-    mimi_http_request_t req = {
+    mimi_http_request_t http_req = {
         .method = "POST",
         .url = llm_api_url(),
         .headers = headers,
@@ -380,12 +388,18 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
         .timeout_ms = 120000,
     };
     mimi_http_response_t hresp;
-    mimi_err_t herr = mimi_http_exec(&req, &hresp);
+    mimi_err_t herr = mimi_http_exec(&http_req, &hresp);
     free(post_data);
 
     if (herr != MIMI_OK) {
         snprintf(s_last_error, sizeof(s_last_error), "HTTP request failed: %s", mimi_err_to_name(herr));
         MIMI_LOGE(TAG, "%s", s_last_error);
+        if (req->trace_id && req->trace_id[0]) {
+            llm_trace_event_kv(req->trace_id, "llm_http_error",
+                               "error", mimi_err_to_name(herr),
+                               "last_error", s_last_error,
+                               NULL, NULL, NULL, NULL);
+        }
         return herr;
     }
 
@@ -394,11 +408,29 @@ mimi_err_t llm_chat_tools(const char *system_prompt,
                   hresp.status,
                   hresp.body ? (char *) hresp.body : "");
         MIMI_LOGE(TAG, "%s", s_last_error);
+        if (req->trace_id && req->trace_id[0]) {
+            char code[16];
+            snprintf(code, sizeof(code), "%d", hresp.status);
+            llm_trace_event_kv(req->trace_id, "llm_http_error",
+                               "status", code,
+                               "last_error", s_last_error,
+                               NULL, NULL, NULL, NULL);
+            if (hresp.body) {
+                llm_trace_event_kv(req->trace_id, "llm_response_raw",
+                                   "json", (char *)hresp.body,
+                                   NULL, NULL, NULL, NULL, NULL, NULL);
+            }
+        }
         mimi_http_response_free(&hresp);
         return MIMI_ERR_FAIL;
     }
 
     llm_log_payload("LLM tools raw response", (char *) hresp.body);
+    if (req->trace_id && req->trace_id[0]) {
+        llm_trace_event_kv(req->trace_id, "llm_response_raw",
+                           "json", (char *)hresp.body,
+                           NULL, NULL, NULL, NULL, NULL, NULL);
+    }
 
     cJSON *root = cJSON_Parse((char *) hresp.body);
     mimi_http_response_free(&hresp);
@@ -651,6 +683,7 @@ typedef struct {
     llm_response_t *resp;
     llm_callback_t callback;
     void *user_data;
+    char trace_id[64];
 } llm_async_ctx_t;
 
 static void llm_http_callback(mimi_err_t result, mimi_http_response_t *hresp, void *user_data)
@@ -659,12 +692,19 @@ static void llm_http_callback(mimi_err_t result, mimi_http_response_t *hresp, vo
     llm_response_t *resp = ctx->resp;
     llm_callback_t callback = ctx->callback;
     void *cb_data = ctx->user_data;
+    const char *trace_id = ctx->trace_id[0] ? ctx->trace_id : NULL;
     
     free(ctx);
     
     if (result != MIMI_OK) {
         snprintf(s_last_error, sizeof(s_last_error), "HTTP request failed: %s", mimi_err_to_name(result));
         MIMI_LOGE(TAG, "%s", s_last_error);
+        if (trace_id) {
+            llm_trace_event_kv(trace_id, "llm_http_error",
+                               "error", mimi_err_to_name(result),
+                               "last_error", s_last_error,
+                               NULL, NULL, NULL, NULL);
+        }
         if (callback) {
             callback(result, resp, cb_data);
         }
@@ -680,6 +720,19 @@ static void llm_http_callback(mimi_err_t result, mimi_http_response_t *hresp, vo
                   hresp->status,
                   hresp->body ? (char *) hresp->body : "");
         MIMI_LOGE(TAG, "%s", s_last_error);
+        if (trace_id) {
+            char code[16];
+            snprintf(code, sizeof(code), "%d", hresp->status);
+            llm_trace_event_kv(trace_id, "llm_http_error",
+                               "status", code,
+                               "last_error", s_last_error,
+                               NULL, NULL, NULL, NULL);
+            if (hresp->body) {
+                llm_trace_event_kv(trace_id, "llm_response_raw",
+                                   "json", (char *)hresp->body,
+                                   NULL, NULL, NULL, NULL, NULL, NULL);
+            }
+        }
         mimi_http_response_free(hresp);
         free(hresp);
         if (callback) {
@@ -689,6 +742,11 @@ static void llm_http_callback(mimi_err_t result, mimi_http_response_t *hresp, vo
     }
     
     llm_log_payload("LLM tools raw response", (char *) hresp->body);
+    if (trace_id) {
+        llm_trace_event_kv(trace_id, "llm_response_raw",
+                           "json", (char *)hresp->body,
+                           NULL, NULL, NULL, NULL, NULL, NULL);
+    }
     
     cJSON *root = cJSON_Parse((char *) hresp->body);
     mimi_http_response_free(hresp);
@@ -842,21 +900,21 @@ static void llm_http_callback(mimi_err_t result, mimi_http_response_t *hresp, vo
     }
 }
 
-mimi_err_t llm_chat_tools_async(const char *system_prompt,
-                               cJSON *messages,
-                               const char *tools_json,
-                               llm_response_t *resp,
-                               llm_callback_t callback,
-                               void *user_data)
+mimi_err_t llm_chat_tools_async_req(const llm_chat_req_t *req,
+                                   llm_response_t *resp,
+                                   llm_callback_t callback,
+                                   void *user_data)
 {
     if (!resp) return MIMI_ERR_INVALID_ARG;
     memset(resp, 0, sizeof(*resp));
 
     if (s_api_key[0] == '\0') return MIMI_ERR_INVALID_STATE;
+    if (!req || !req->messages) return MIMI_ERR_INVALID_ARG;
 
-    const mimi_config_t *cfg = mimi_config_get();
-    int max_tokens = (cfg->max_tokens > 0) ? cfg->max_tokens : 8192;
-    double temperature = cfg->temperature;
+    mimi_cfg_obj_t defaults = mimi_cfg_get_obj(mimi_cfg_section("agents"), "defaults");
+    int max_tokens = mimi_cfg_get_int(defaults, "maxTokens", 8192);
+    double temperature = mimi_cfg_get_double(defaults, "temperature", 0.1);
+    if (max_tokens <= 0) max_tokens = 8192;
 
     cJSON *body = cJSON_CreateObject();
     if (!body) return MIMI_ERR_NO_MEM;
@@ -872,24 +930,24 @@ mimi_err_t llm_chat_tools_async(const char *system_prompt,
     }
 
     if (provider_is_openai_compat()) {
-        cJSON *openai_msgs = convert_messages_openai(system_prompt, messages);
+        cJSON *openai_msgs = convert_messages_openai(req->system_prompt, req->messages);
         cJSON_AddItemToObject(body, "messages", openai_msgs);
 
-        if (tools_json) {
-            cJSON *tools = convert_tools_openai(tools_json);
+        if (req->tools_json) {
+            cJSON *tools = convert_tools_openai(req->tools_json);
             if (tools) {
                 cJSON_AddItemToObject(body, "tools", tools);
                 cJSON_AddStringToObject(body, "tool_choice", "auto");
             }
         }
     } else {
-        cJSON_AddStringToObject(body, "system", system_prompt ? system_prompt : "");
-        cJSON *msgs_copy = cJSON_Duplicate(messages, 1);
+        cJSON_AddStringToObject(body, "system", (req->system_prompt && req->system_prompt[0]) ? req->system_prompt : "");
+        cJSON *msgs_copy = cJSON_Duplicate(req->messages, 1);
         if (msgs_copy) {
             cJSON_AddItemToObject(body, "messages", msgs_copy);
         }
-        if (tools_json) {
-            cJSON *tools = cJSON_Parse(tools_json);
+        if (req->tools_json) {
+            cJSON *tools = cJSON_Parse(req->tools_json);
             if (tools) {
                 cJSON_AddItemToObject(body, "tools", tools);
             }
@@ -901,6 +959,11 @@ mimi_err_t llm_chat_tools_async(const char *system_prompt,
     if (!post_data) return MIMI_ERR_NO_MEM;
 
     llm_log_payload("LLM tools request", post_data);
+    if (req->trace_id && req->trace_id[0]) {
+        llm_trace_event_kv(req->trace_id, "llm_request",
+                           "json", post_data,
+                           NULL, NULL, NULL, NULL, NULL, NULL);
+    }
 
     /* Build HTTP request */
     char headers[LLM_API_KEY_MAX_LEN + 256];
@@ -919,7 +982,7 @@ mimi_err_t llm_chat_tools_async(const char *system_prompt,
                  s_api_key, ANTHROPIC_VERSION);
     }
 
-    mimi_http_request_t req = {
+    mimi_http_request_t http_req = {
         .method = "POST",
         .url = llm_api_url(),
         .headers = headers,
@@ -937,6 +1000,10 @@ mimi_err_t llm_chat_tools_async(const char *system_prompt,
     ctx->resp = resp;
     ctx->callback = callback;
     ctx->user_data = user_data;
+    ctx->trace_id[0] = '\0';
+    if (req->trace_id) {
+        safe_copy(ctx->trace_id, sizeof(ctx->trace_id), req->trace_id);
+    }
     
     /* Send async HTTP request */
     mimi_http_response_t *hresp = (mimi_http_response_t *)calloc(1, sizeof(*hresp));
@@ -945,7 +1012,7 @@ mimi_err_t llm_chat_tools_async(const char *system_prompt,
         free(ctx);
         return MIMI_ERR_NO_MEM;
     }
-    mimi_err_t herr = mimi_http_exec_async(&req, hresp, llm_http_callback, ctx);
+    mimi_err_t herr = mimi_http_exec_async(&http_req, hresp, llm_http_callback, ctx);
     
     free(post_data);
     

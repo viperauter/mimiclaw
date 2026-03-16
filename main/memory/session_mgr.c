@@ -1,5 +1,6 @@
 #include "session_mgr.h"
 #include "config.h"
+#include "config_view.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -13,8 +14,8 @@ static const char *TAG = "session";
 
 static void session_path(const char *channel, const char *chat_id, char *buf, size_t size)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    const char *dir = cfg->session_dir[0] ? cfg->session_dir : "sessions";
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *dir = mimi_cfg_get_str(files, "sessionDir", "sessions");
     const char *chan = (channel && channel[0]) ? channel : "unknown";
     const char *id = (chat_id && chat_id[0]) ? chat_id : "unknown";
     snprintf(buf, size, "%s/%s_%s.jsonl", dir, chan, id);
@@ -35,8 +36,9 @@ void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out)
 
 mimi_err_t session_mgr_init(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    MIMI_LOGD(TAG, "Session manager initialized at %s", cfg->session_dir);
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *dir = mimi_cfg_get_str(files, "sessionDir", "sessions");
+    MIMI_LOGD(TAG, "Session manager initialized at %s", dir);
     return MIMI_OK;
 }
 
@@ -48,7 +50,7 @@ mimi_err_t session_append(const char *channel, const char *chat_id, const char *
     mimi_file_t *f = NULL;
     mimi_err_t err = mimi_fs_open(path, "a", &f);
     if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Cannot open session file %s", path);
+        MIMI_LOGE(TAG, "Cannot open session file %s: %s", path, mimi_err_to_name(err));
         return err;
     }
 
@@ -173,8 +175,8 @@ mimi_err_t session_clear(const char *channel, const char *chat_id)
 
 void session_list(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    const char *base_dir = cfg->session_dir[0] ? cfg->session_dir : "sessions";
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *base_dir = mimi_cfg_get_str(files, "sessionDir", "sessions");
     mimi_dir_t *dir = NULL;
     mimi_err_t err = mimi_fs_opendir(base_dir, &dir);
     if (err != MIMI_OK) {

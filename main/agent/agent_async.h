@@ -14,6 +14,7 @@ typedef struct {
     const char *tools_json;     /* Tools JSON schema */
     char channel[64];           /* Channel identifier */
     char chat_id[64];           /* Chat ID */
+    char trace_id[64];          /* Trace ID for llm_trace correlation */
     char content[32768];        /* User content */
     char final_text[32768];     /* Final response text */
     int iteration;              /* Current iteration */

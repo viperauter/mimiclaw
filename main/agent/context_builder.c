@@ -1,5 +1,6 @@
 #include "context_builder.h"
 #include "config.h"
+#include "config_view.h"
 #include "memory/memory_store.h"
 #include "skills/skill_loader.h"
 
@@ -30,7 +31,11 @@ static size_t append_file(char *buf, size_t size, size_t offset, const char *pat
 
 mimi_err_t context_build_system_prompt(char *buf, size_t size)
 {
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", "memory/MEMORY.md");
+    const char *skills_prefix = mimi_cfg_get_str(files, "skillsPrefix", "skills/");
+    const char *soul_file = mimi_cfg_get_str(files, "soulFile", "config/SOUL.md");
+    const char *user_file = mimi_cfg_get_str(files, "userFile", "config/USER.md");
     size_t off = 0;
 
     off += snprintf(buf + off, size - off,
@@ -76,14 +81,14 @@ mimi_err_t context_build_system_prompt(char *buf, size_t size)
         "Skills are specialized instruction files stored under %s.\n"
         "When a task matches a skill, read the full skill file for detailed instructions.\n"
         "You can create new skills using write_file to %s<name>.md.\n",
-        cfg->memory_file,
+        memory_file,
         "memory",
-        cfg->skills_prefix[0] ? cfg->skills_prefix : "skills/",
-        cfg->skills_prefix[0] ? cfg->skills_prefix : "skills/");
+        skills_prefix,
+        skills_prefix);
 
     /* Bootstrap files */
-    off = append_file(buf, size, off, cfg->soul_file, "Personality");
-    off = append_file(buf, size, off, cfg->user_file, "User Info");
+    off = append_file(buf, size, off, soul_file, "Personality");
+    off = append_file(buf, size, off, user_file, "User Info");
 
     /* Long-term memory */
     char mem_buf[4096];

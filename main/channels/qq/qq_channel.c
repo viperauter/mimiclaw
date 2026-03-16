@@ -10,6 +10,7 @@
 #include "router/router.h"
 #include "commands/command.h"
 #include "config.h"
+#include "config_view.h"
 #include "bus/message_bus.h"
 #include "gateway/websocket/ws_client_gateway.h"
 #include "gateway/http/http_client_gateway.h"
@@ -164,19 +165,17 @@ mimi_err_t qq_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     }
 
     /* Check if QQ is enabled */
-    const mimi_config_t *config = mimi_config_get();
-    if (!config->qq_enabled) {
+    mimi_cfg_obj_t qq = mimi_cfg_named("channels", "qq");
+    if (!mimi_cfg_get_bool(qq, "enabled", false)) {
         MIMI_LOGD(TAG, "QQ Channel is disabled");
         return MIMI_ERR_NOT_SUPPORTED;
     }
 
     /* Load credentials from config */
-    if (config->qq_app_id[0] != '\0') {
-        strncpy(s_priv.app_id, config->qq_app_id, sizeof(s_priv.app_id) - 1);
-    }
-    if (config->qq_token[0] != '\0') {
-        strncpy(s_priv.token, config->qq_token, sizeof(s_priv.token) - 1);
-    }
+    const char *app_id = mimi_cfg_get_str(qq, "appId", "");
+    const char *secret = mimi_cfg_get_str(qq, "secret", "");
+    if (app_id && app_id[0] != '\0') strncpy(s_priv.app_id, app_id, sizeof(s_priv.app_id) - 1);
+    if (secret && secret[0] != '\0') strncpy(s_priv.token, secret, sizeof(s_priv.token) - 1);
 
     if (!s_priv.app_id[0] || !s_priv.token[0]) {
         MIMI_LOGW(TAG, "QQ credentials not configured");
@@ -327,23 +326,13 @@ void qq_channel_destroy_impl(channel_t *ch)
     MIMI_LOGI(TAG, "QQ Channel destroyed");
 }
 
-/**
- * Send message through QQ Channel
- */
-mimi_err_t qq_channel_send_impl(channel_t *ch, const char *session_id,
-                                       const char *content)
+static mimi_err_t qq_channel_send_msg_impl(channel_t *ch, const mimi_msg_t *msg)
 {
     (void)ch;
-
-    if (!s_priv.initialized || !s_priv.started) {
-        return MIMI_ERR_INVALID_STATE;
-    }
-
-    if (!session_id || !content) {
+    if (!msg || !msg->chat_id[0] || !msg->content) {
         return MIMI_ERR_INVALID_ARG;
     }
-
-    return qq_send_message(session_id, content);
+    return qq_send_message(msg->chat_id, msg->content);
 }
 
 /**
@@ -407,7 +396,7 @@ channel_t g_qq_channel = {
     .start = qq_channel_start_impl,
     .stop = qq_channel_stop_impl,
     .destroy = qq_channel_destroy_impl,
-    .send = qq_channel_send_impl,
+    .send_msg = qq_channel_send_msg_impl,
     .is_running = qq_is_running_impl,
     .set_on_message = qq_set_on_message,
     .set_on_connect = qq_set_on_connect,

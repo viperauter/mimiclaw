@@ -1,5 +1,6 @@
 #include "cron/cron_service.h"
 #include "config.h"
+#include "config_view.h"
 #include "bus/message_bus.h"
 
 #include <stdio.h>
@@ -61,9 +62,10 @@ static void cron_generate_id(char *id_buf)
 
 static mimi_err_t cron_load_jobs(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *cron_file = mimi_cfg_get_str(files, "cronFile", "cron.json");
     mimi_file_t *f = NULL;
-    mimi_err_t err = mimi_fs_open(cfg->cron_file, "r", &f);
+    mimi_err_t err = mimi_fs_open(cron_file, "r", &f);
     if (err != MIMI_OK) {
         MIMI_LOGI(TAG, "No cron file found, starting fresh");
         s_job_count = 0;
@@ -225,11 +227,12 @@ static mimi_err_t cron_save_jobs(void)
         return MIMI_ERR_NO_MEM;
     }
 
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *cron_file = mimi_cfg_get_str(files, "cronFile", "cron.json");
     mimi_file_t *f = NULL;
-    mimi_err_t err = mimi_fs_open(cfg->cron_file, "w", &f);
+    mimi_err_t err = mimi_fs_open(cron_file, "w", &f);
     if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to open %s for writing", cfg->cron_file);
+        MIMI_LOGE(TAG, "Failed to open %s for writing", cron_file);
         free(json_str);
         return MIMI_ERR_IO;
     }
@@ -245,7 +248,7 @@ static mimi_err_t cron_save_jobs(void)
         return MIMI_ERR_IO;
     }
 
-    MIMI_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, cfg->cron_file);
+    MIMI_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, cron_file);
     return MIMI_OK;
 }
 
@@ -363,8 +366,9 @@ mimi_err_t cron_service_start(void)
         }
     }
 
-    const mimi_config_t *cfg = mimi_config_get();
-    int interval_ms = (cfg->cron_check_interval_ms > 0) ? cfg->cron_check_interval_ms : (60 * 1000);
+    mimi_cfg_obj_t internal = mimi_cfg_section("internal");
+    int interval_ms = mimi_cfg_get_int(internal, "cronCheckIntervalMs", 60 * 1000);
+    if (interval_ms <= 0) interval_ms = 60 * 1000;
 
     mimi_err_t err = mimi_timer_start(interval_ms, true,
                                       (mimi_timer_fn_t)cron_task_main, NULL,

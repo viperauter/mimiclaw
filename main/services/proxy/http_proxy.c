@@ -1,5 +1,6 @@
 #include "http_proxy.h"
 #include "config.h"
+#include "config_view.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -23,13 +24,17 @@ bool http_proxy_is_enabled(void)
 
 mimi_err_t http_proxy_init(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    if (cfg->proxy_host[0] != '\0' && cfg->proxy_port[0] != '\0') {
-        strncpy(s_proxy_host, cfg->proxy_host, sizeof(s_proxy_host) - 1);
+    mimi_cfg_obj_t proxy = mimi_cfg_section("proxy");
+    const char *host = mimi_cfg_get_str(proxy, "host", "");
+    const char *port_s = mimi_cfg_get_str(proxy, "port", "");
+    const char *type = mimi_cfg_get_str(proxy, "type", "http");
+
+    if (host && host[0] && port_s && port_s[0]) {
+        strncpy(s_proxy_host, host, sizeof(s_proxy_host) - 1);
         s_proxy_host[sizeof(s_proxy_host) - 1] = '\0';
-        s_proxy_port = (uint16_t)atoi(cfg->proxy_port);
-        if (cfg->proxy_type[0] != '\0') {
-            strncpy(s_proxy_type, cfg->proxy_type, sizeof(s_proxy_type) - 1);
+        s_proxy_port = (uint16_t)atoi(port_s);
+        if (type && type[0]) {
+            strncpy(s_proxy_type, type, sizeof(s_proxy_type) - 1);
             s_proxy_type[sizeof(s_proxy_type) - 1] = '\0';
         }
     }

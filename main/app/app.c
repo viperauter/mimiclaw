@@ -17,6 +17,7 @@
 #include "path_utils.h"
 
 #include "config.h"
+#include "config_view.h"
 #include "workspace_bootstrap.h"
 
 #include "bus/message_bus.h"
@@ -25,6 +26,11 @@
 #include "skills/skill_loader.h"
 #include "tools/tool_registry.h"
 #include "agent/agent_async_loop.h"
+#include "mimi_config.h"
+
+#if MIMI_ENABLE_SUBAGENT
+#include "agent/subagent/subagent_config.h"
+#endif
 
 #include "llm/llm_proxy.h"
 #include "proxy/http_proxy.h"
@@ -77,15 +83,22 @@ static void outbound_dispatch_task(void *arg)
             free(msg.content);
             continue;
         }
-
-        /* Regular text message */
-        mimi_err_t err = channel_send(msg.channel, msg.chat_id, msg.content ? msg.content : "");
-        if (err != MIMI_OK) {
-            if (strcmp(msg.channel, MIMI_CHAN_CLI) == 0) {
-                mimi_tty_printf("[cli:%s] %s\n", msg.chat_id, msg.content ? msg.content : "");
-            } else {
-                MIMI_LOGW("dispatch", "Failed to send to channel %s: %s",
-                          msg.channel, mimi_err_to_name(err));
+        
+        /* Non-control messages: prefer extended send_msg() when available. */
+        channel_t *ch = channel_find(msg.channel);
+        mimi_err_t err = MIMI_ERR_NOT_FOUND;
+        if (ch && ch->send_msg) {
+            err = ch->send_msg(ch, &msg);
+        } else {
+            /* Fallback: treat as plain text. */
+            err = channel_send(&msg);
+            if (err != MIMI_OK) {
+                if (strcmp(msg.channel, MIMI_CHAN_CLI) == 0) {
+                    mimi_tty_printf("[cli:%s] %s\n", msg.chat_id, msg.content ? msg.content : "");
+                } else {
+                    MIMI_LOGW("dispatch", "Failed to send to channel %s: %s",
+                              msg.channel, mimi_err_to_name(err));
+                }
             }
         }
         free(msg.content);
@@ -131,24 +144,31 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         return MIMI_ERR_FAIL;
     }
 
+    /* Load config first so we know the log level */
+    if (mimi_config_load(cfg_path) != MIMI_OK) {
+        MIMI_LOGW("app", "config load failed; using defaults");
+    }
+    mimi_cfg_obj_t defaults = mimi_cfg_get_obj(mimi_cfg_section("agents"), "defaults");
+    mimi_cfg_obj_t logging = mimi_cfg_section("logging");
+    mimi_cfg_obj_t feishu = mimi_cfg_named("channels", "feishu");
+    const char *log_level_cfg = mimi_cfg_get_str(logging, "level", "info");
+    const char *model = mimi_cfg_get_str(defaults, "model", "");
+    const char *provider = mimi_cfg_get_str(defaults, "provider", "");
+    bool feishu_enabled = mimi_cfg_get_bool(feishu, "enabled", false);
+    const char *feishu_app_id = mimi_cfg_get_str(feishu, "appId", "");
+    const char *workspace = mimi_cfg_get_str(defaults, "workspace", "");
+
+    /* Setup logging after config load (config may specify log level) */
     if (enable_logs) {
-        mimi_log_setup(log_level ? log_level : "info");
+        mimi_log_setup(log_level ? log_level : (log_level_cfg && log_level_cfg[0] ? log_level_cfg : "info"));
     }
 
     /* Print OS backend version */
     MIMI_LOGI("app", "OS backend: %s", mimi_os_get_version());
-
-    if (mimi_config_load(cfg_path) != MIMI_OK) {
-        MIMI_LOGW("app", "config load failed; using defaults");
-    }
-    const mimi_config_t *cfg = mimi_config_get();
-
-    if (enable_logs && !log_level) {
-        mimi_log_setup(cfg->log_level);
-    }
+    MIMI_LOGI("app", "Config: model=%s provider=%s", model, provider);
 
     MIMI_LOGD("app", "Config loaded: feishu_enabled=%d, feishu_app_id=%s",
-              cfg->feishu_enabled, cfg->feishu_app_id[0] ? cfg->feishu_app_id : "(empty)");
+              feishu_enabled, (feishu_app_id && feishu_app_id[0]) ? feishu_app_id : "(empty)");
 
     if (mimi_workspace_bootstrap(cfg_path, true) != MIMI_OK) {
         MIMI_LOGE("app", "workspace bootstrap failed");
@@ -156,7 +176,7 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
     }
 
     MIMI_LOGD("app", "workspace=%s config=%s",
-              cfg->workspace[0] ? cfg->workspace : "(default)", cfg_path);
+              (workspace && workspace[0]) ? workspace : "(default)", cfg_path);
 
     if (mimi_kv_init("./kv.json") != MIMI_OK) {
         MIMI_LOGE("app", "failed to init kv");
@@ -166,6 +186,11 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
     if (http_proxy_init() != MIMI_OK) {
         MIMI_LOGW("app", "http_proxy_init failed");
     }
+
+    /* Initialize subagent configs (if any) */
+#if MIMI_ENABLE_SUBAGENT
+    subagent_config_init();
+#endif
 
     if (message_bus_init() != MIMI_OK) {
         MIMI_LOGE("app", "message_bus_init failed");

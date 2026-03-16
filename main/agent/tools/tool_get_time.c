@@ -6,6 +6,7 @@
 
 #include "tools/tool_get_time.h"
 #include "config.h"
+#include "config_view.h"
 
 #include "http/http.h"
 #include "log.h"
@@ -27,8 +28,9 @@ static bool set_clock_from_epoch(long long epoch, char *out, size_t out_size)
     struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
     settimeofday(&tv, NULL);
 
-    const mimi_config_t *cfg = mimi_config_get();
-    setenv("TZ", (cfg->timezone[0] ? cfg->timezone : "UTC"), 1);
+    mimi_cfg_obj_t defaults = mimi_cfg_get_obj(mimi_cfg_section("agents"), "defaults");
+    const char *tz = mimi_cfg_get_str(defaults, "timezone", "UTC");
+    setenv("TZ", (tz && tz[0] ? tz : "UTC"), 1);
     tzset();
 #endif
 

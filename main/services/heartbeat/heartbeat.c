@@ -1,5 +1,6 @@
 #include "heartbeat/heartbeat.h"
 #include "config.h"
+#include "config_view.h"
 #include "bus/message_bus.h"
 
 #include <stdio.h>
@@ -26,9 +27,10 @@ static mimi_timer_handle_t s_timer_handle = NULL;
  */
 static bool heartbeat_has_tasks(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *heartbeat_file = mimi_cfg_get_str(files, "heartbeatFile", "HEARTBEAT.md");
     mimi_file_t *f = NULL;
-    mimi_err_t err = mimi_fs_open(cfg->heartbeat_file, "r", &f);
+    mimi_err_t err = mimi_fs_open(heartbeat_file, "r", &f);
     if (err != MIMI_OK) {
         return false;
     }
@@ -83,12 +85,13 @@ static bool heartbeat_send(void)
         return false;
     }
 
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *heartbeat_file = mimi_cfg_get_str(files, "heartbeatFile", "HEARTBEAT.md");
     char prompt[512];
     snprintf(prompt, sizeof(prompt),
              "Read %s and follow any instructions or tasks listed there. "
              "If nothing needs attention, reply with just: HEARTBEAT_OK",
-             cfg->heartbeat_file);
+             heartbeat_file);
 
     mimi_msg_t msg;
     memset(&msg, 0, sizeof(msg));
@@ -122,10 +125,14 @@ static void heartbeat_timer_cb(void *arg)
 
 mimi_err_t heartbeat_init(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    mimi_cfg_obj_t internal = mimi_cfg_section("internal");
+    const char *heartbeat_file = mimi_cfg_get_str(files, "heartbeatFile", "HEARTBEAT.md");
+    int interval_ms = mimi_cfg_get_int(internal, "heartbeatIntervalMs", 30 * 60 * 1000);
+    if (interval_ms <= 0) interval_ms = 30 * 60 * 1000;
     MIMI_LOGD(TAG, "Heartbeat service initialized (file: %s, interval: %ds)",
-             cfg->heartbeat_file,
-             ((cfg->heartbeat_interval_ms > 0) ? cfg->heartbeat_interval_ms : (30 * 60 * 1000)) / 1000);
+             heartbeat_file,
+             interval_ms / 1000);
     return MIMI_OK;
 }
 
@@ -136,8 +143,9 @@ mimi_err_t heartbeat_start(void)
         return MIMI_OK;
     }
 
-    const mimi_config_t *cfg = mimi_config_get();
-    int interval_ms = (cfg->heartbeat_interval_ms > 0) ? cfg->heartbeat_interval_ms : (30 * 60 * 1000);
+    mimi_cfg_obj_t internal = mimi_cfg_section("internal");
+    int interval_ms = mimi_cfg_get_int(internal, "heartbeatIntervalMs", 30 * 60 * 1000);
+    if (interval_ms <= 0) interval_ms = 30 * 60 * 1000;
 
     mimi_err_t err = mimi_timer_start(interval_ms, true,
                                        heartbeat_timer_cb, NULL,

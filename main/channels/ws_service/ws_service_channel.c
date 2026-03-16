@@ -12,6 +12,7 @@
 #include "router/router.h"
 #include "commands/command.h"
 #include "config.h"
+#include "config_view.h"
 #include "bus/message_bus.h"
 #include "log.h"
 
@@ -72,10 +73,9 @@ mimi_err_t ws_server_channel_init_impl(channel_t *ch, const channel_config_t *cf
     gateway_set_on_message(s_priv.gateway, on_gateway_message, NULL);
 
     /* Configure gateway port from config */
-    const mimi_config_t *config = mimi_config_get();
-    if (config->ws_port > 0) {
-        ws_gateway_configure(config->ws_port, "/");
-    }
+    mimi_cfg_obj_t internal = mimi_cfg_section("internal");
+    int port = mimi_cfg_get_int(internal, "wsPort", 18789);
+    if (port > 0) ws_gateway_configure(port, "/");
 
     ch->priv_data = &s_priv;
     s_priv.initialized = true;
@@ -160,8 +160,26 @@ void ws_server_channel_destroy_impl(channel_t *ch)
     MIMI_LOGI(TAG, "WebSocket Server Channel destroyed");
 }
 
+static mimi_err_t ws_server_channel_send_msg_impl(channel_t *ch, const mimi_msg_t *msg)
+{
+    (void)ch;
+    if (!msg || !msg->chat_id[0] || !msg->content) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    if (!s_priv.initialized) {
+        return MIMI_ERR_INVALID_STATE;
+    }
+
+    if (s_priv.gateway) {
+        return gateway_send(s_priv.gateway, msg->chat_id, msg->content);
+    }
+
+    return MIMI_ERR_INVALID_STATE;
+}
+
 /**
- * Send message through WebSocket Server Channel
+ * Send message through WebSocket Server Channel (legacy helper, kept for reuse)
  */
 mimi_err_t ws_server_channel_send_impl(channel_t *ch, const char *session_id,
                                  const char *content)
@@ -247,7 +265,7 @@ channel_t g_ws_server_channel = {
     .start = ws_server_channel_start_impl,
     .stop = ws_server_channel_stop_impl,
     .destroy = ws_server_channel_destroy_impl,
-    .send = ws_server_channel_send_impl,
+    .send_msg = ws_server_channel_send_msg_impl,
     .is_running = ws_server_is_running_impl,
     .set_on_message = ws_server_set_on_message_impl,
     .set_on_connect = ws_server_set_on_connect_impl,

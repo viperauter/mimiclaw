@@ -1,5 +1,6 @@
 #include "memory_store.h"
 #include "config.h"
+#include "config_view.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -24,17 +25,19 @@ mimi_err_t memory_store_init(void)
 {
     /* SPIFFS is flat — no real directory creation needed.
        On POSIX we rely on workspace_bootstrap to create needed directories. */
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t defaults = mimi_cfg_get_obj(mimi_cfg_section("agents"), "defaults");
+    const char *workspace = mimi_cfg_get_str(defaults, "workspace", "");
     MIMI_LOGD(TAG, "Memory store initialized (workspace=%s)",
-              cfg->workspace[0] ? cfg->workspace : "(default)");
+              (workspace && workspace[0]) ? workspace : "(default)");
     return MIMI_OK;
 }
 
 mimi_err_t memory_read_long_term(char *buf, size_t size)
 {
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", "memory/MEMORY.md");
     mimi_file_t *f = NULL;
-    mimi_err_t err = mimi_fs_open(cfg->memory_file, "r", &f);
+    mimi_err_t err = mimi_fs_open(memory_file, "r", &f);
     if (err != MIMI_OK) {
         buf[0] = '\0';
         return err;
@@ -49,11 +52,12 @@ mimi_err_t memory_read_long_term(char *buf, size_t size)
 
 mimi_err_t memory_write_long_term(const char *content)
 {
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", "memory/MEMORY.md");
     mimi_file_t *f = NULL;
-    mimi_err_t err = mimi_fs_open(cfg->memory_file, "w", &f);
+    mimi_err_t err = mimi_fs_open(memory_file, "w", &f);
     if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Cannot write %s", cfg->memory_file);
+        MIMI_LOGE(TAG, "Cannot write %s", memory_file);
         return err;
     }
     size_t written = 0;
@@ -69,11 +73,12 @@ mimi_err_t memory_append_today(const char *note)
     char date_str[16];
     get_date_str(date_str, sizeof(date_str), 0);
 
-    const mimi_config_t *cfg = mimi_config_get();
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", "memory/MEMORY.md");
 
     /* Derive daily notes directory from memory_file dirname. */
     char base[256];
-    if (mimi_path_dirname(cfg->memory_file, base, sizeof(base)) != 0) {
+    if (mimi_path_dirname(memory_file, base, sizeof(base)) != 0) {
         strncpy(base, "memory", sizeof(base) - 1);
         base[sizeof(base) - 1] = '\0';
     }
@@ -121,10 +126,11 @@ mimi_err_t memory_read_recent(char *buf, size_t size, int days)
         char date_str[16];
         get_date_str(date_str, sizeof(date_str), i);
 
-        const mimi_config_t *cfg = mimi_config_get();
+        mimi_cfg_obj_t files = mimi_cfg_section("files");
+        const char *memory_file = mimi_cfg_get_str(files, "memoryFile", "memory/MEMORY.md");
 
         char base[256];
-        if (mimi_path_dirname(cfg->memory_file, base, sizeof(base)) != 0) {
+        if (mimi_path_dirname(memory_file, base, sizeof(base)) != 0) {
             strncpy(base, "memory", sizeof(base) - 1);
             base[sizeof(base) - 1] = '\0';
         }

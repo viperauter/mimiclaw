@@ -261,7 +261,15 @@ mimi_err_t router_handle_telegram(const char *session_id,
 
         if (ret == 0) {
             /* Send response via Telegram Channel */
-            channel_send(channel_name, session_id, output);
+            mimi_msg_t msg = {0};
+            strncpy(msg.channel, channel_name, sizeof(msg.channel) - 1);
+            strncpy(msg.chat_id, session_id, sizeof(msg.chat_id) - 1);
+            msg.type = MIMI_MSG_TYPE_TEXT;
+            msg.content = strdup(output);
+            if (msg.content) {
+                channel_send(&msg);
+                free(msg.content);
+            }
         }
         return MIMI_OK;
     } else {
@@ -301,7 +309,15 @@ mimi_err_t router_handle_feishu(const char *session_id,
 
         if (ret == 0) {
             /* Send response via Feishu Channel */
-            channel_send(channel_name, session_id, output);
+            mimi_msg_t msg = {0};
+            strncpy(msg.channel, channel_name, sizeof(msg.channel) - 1);
+            strncpy(msg.chat_id, session_id, sizeof(msg.chat_id) - 1);
+            msg.type = MIMI_MSG_TYPE_TEXT;
+            msg.content = strdup(output);
+            if (msg.content) {
+                channel_send(&msg);
+                free(msg.content);
+            }
         }
         return MIMI_OK;
     } else {
@@ -341,7 +357,15 @@ mimi_err_t router_handle_qq(const char *session_id,
 
         if (ret == 0) {
             /* Send response via QQ Channel */
-            channel_send(channel_name, session_id, output);
+            mimi_msg_t msg = {0};
+            strncpy(msg.channel, channel_name, sizeof(msg.channel) - 1);
+            strncpy(msg.chat_id, session_id, sizeof(msg.chat_id) - 1);
+            msg.type = MIMI_MSG_TYPE_TEXT;
+            msg.content = strdup(output);
+            if (msg.content) {
+                channel_send(&msg);
+                free(msg.content);
+            }
         }
         return MIMI_OK;
     } else {

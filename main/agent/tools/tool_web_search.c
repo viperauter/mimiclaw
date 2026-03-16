@@ -1,5 +1,6 @@
 #include "tools/tool_web_search.h"
 #include "config.h"
+#include "config_view.h"
 
 #include "http/http.h"
 #include "log.h"
@@ -73,9 +74,10 @@ static void format_results(cJSON *root, char *output, size_t output_size)
 
 mimi_err_t tool_web_search_init(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    if (cfg->search_api_key[0] != '\0') {
-        strncpy(s_search_key, cfg->search_api_key, sizeof(s_search_key) - 1);
+    mimi_cfg_obj_t search = mimi_cfg_get_obj(mimi_cfg_section("tools"), "search");
+    const char *key = mimi_cfg_get_str(search, "apiKey", "");
+    if (key && key[0] != '\0') {
+        strncpy(s_search_key, key, sizeof(s_search_key) - 1);
         s_search_key[sizeof(s_search_key) - 1] = '\0';
     }
 

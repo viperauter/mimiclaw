@@ -131,10 +131,12 @@ static void cli_channel_destroy_impl(channel_t *ch)
     MIMI_LOGI(TAG, "CLI channel destroyed");
 }
 
-static mimi_err_t cli_channel_send_impl(channel_t *ch,
-                                         const char *session_id,
-                                         const char *content)
+static mimi_err_t cli_channel_send_msg_impl(channel_t *ch,
+                                            const mimi_msg_t *msg)
 {
+    const char *session_id = msg ? msg->chat_id : NULL;
+    const char *content = msg ? msg->content : NULL;
+
     cli_channel_priv_t *priv = (cli_channel_priv_t *)ch->priv_data;
     if (!priv || !priv->gateway) {
         return MIMI_ERR_INVALID_STATE;
@@ -325,7 +327,7 @@ channel_t g_cli_channel = {
     .start = cli_channel_start_impl,
     .stop = cli_channel_stop_impl,
     .destroy = cli_channel_destroy_impl,
-    .send = cli_channel_send_impl,
+    .send_msg = cli_channel_send_msg_impl,
     .is_running = cli_channel_is_running_impl,
     .set_on_message = cli_channel_set_on_message,
     .set_on_connect = cli_channel_set_on_connect,

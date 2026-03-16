@@ -243,29 +243,32 @@ void channel_stop_all(void)
     }
 }
 
-mimi_err_t channel_send(const char *channel_name, const char *session_id, 
-                        const char *content)
+mimi_err_t channel_send(const mimi_msg_t *msg)
 {
     if (!s_state.initialized) {
         return MIMI_ERR_INVALID_STATE;
     }
 
-    channel_t *ch = channel_find(channel_name);
+    if (!msg || !msg->channel[0] || !msg->chat_id[0]) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    channel_t *ch = channel_find(msg->channel);
     if (!ch) {
-        MIMI_LOGW(TAG, "Channel '%s' not found", channel_name);
+        MIMI_LOGW(TAG, "Channel '%s' not found", msg->channel);
         return MIMI_ERR_NOT_FOUND;
     }
 
     if (!ch->is_started) {
-        MIMI_LOGW(TAG, "Channel '%s' not started", channel_name);
+        MIMI_LOGW(TAG, "Channel '%s' not started", msg->channel);
         return MIMI_ERR_INVALID_STATE;
     }
 
-    if (!ch->send) {
+    if (!ch->send_msg) {
         return MIMI_ERR_NOT_SUPPORTED;
     }
 
-    return ch->send(ch, session_id, content);
+    return ch->send_msg(ch, msg);
 }
 
 int channel_get_count(void)

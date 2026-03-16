@@ -4,6 +4,12 @@
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
 #include "tools/tool_cron.h"
+#include "tools/tool_bash.h"
+#include "mimi_config.h"
+
+#if MIMI_ENABLE_TOOL_SUBAGENT
+#include "tools/tool_subagent.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -201,6 +207,40 @@ mimi_err_t tool_registry_init(void)
         .execute = tool_cron_remove_execute,
     };
     register_tool(&cr);
+
+    /* Register bash */
+    mimi_tool_t bash = {
+        .name = "bash",
+        .description = "Execute a bash command in the workspace. Use this to run shell commands, scripts, or system operations. Commands are executed in the session's workspace directory.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The bash command to execute\"}},"
+            "\"required\":[\"command\"]}",
+        .requires_confirmation = true,
+        .execute = tool_bash_execute,
+    };
+    register_tool(&bash);
+
+#if MIMI_ENABLE_TOOL_SUBAGENT
+    /* Register subagent_run */
+    mimi_tool_t sa = {
+        .name = "subagent_run",
+        .description = "Run a named subagent (planner/coder/...).",
+        .input_schema_json =
+            "{"
+            "\"type\":\"object\","
+            "\"properties\":{"
+            "\"role\":{\"type\":\"string\",\"description\":\"Subagent role to run (e.g. planner, coder)\"},"
+            "\"task\":{\"type\":\"string\",\"description\":\"Main task for the subagent\"},"
+            "\"context\":{\"type\":\"string\",\"description\":\"Optional additional context\",\"default\":\"\"}"
+            "},"
+            "\"required\":[\"role\",\"task\"]"
+            "}",
+        .requires_confirmation = false,
+        .execute = tool_subagent_run_execute,
+    };
+    register_tool(&sa);
+#endif
 
     build_tools_json();
 

@@ -14,7 +14,15 @@ typedef enum {
     MIMI_MSG_TYPE_TEXT = 0,         /* Normal text message */
     MIMI_MSG_TYPE_CONTROL,          /* Control message (generic) */
     MIMI_MSG_TYPE_TOOL_RESULT,      /* Tool execution result */
+    MIMI_MSG_TYPE_STATUS,           /* Generic status update (start/progress/done) */
 } mimi_msg_type_t;
+
+/* Status phases for MIMI_MSG_TYPE_STATUS messages. */
+typedef enum {
+    MIMI_STATUS_PHASE_START = 0,    /* Start of an operation */
+    MIMI_STATUS_PHASE_PROGRESS,     /* In-progress update */
+    MIMI_STATUS_PHASE_DONE,         /* Operation completed */
+} mimi_status_phase_t;
 
 /* Control message types */
 typedef enum {
@@ -35,6 +43,10 @@ typedef struct {
     char request_id[64];                /* Unique request ID */
     char target[64];                    /* Target (e.g., tool name, operation ID) */
     char data[1024];                    /* Additional data (e.g., tool params) */
+
+    /* Status message specific fields (for MIMI_MSG_TYPE_STATUS). */
+    mimi_status_phase_t status_phase;   /* Phase of the status update */
+    char status_key[64];                /* Optional logical key (e.g., "agent_turn") */
 } mimi_msg_t;
 
 /**

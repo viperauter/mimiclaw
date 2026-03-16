@@ -1,5 +1,6 @@
 #include "skills/skill_loader.h"
 #include "config.h"
+#include "config_view.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -105,8 +106,8 @@ static const builtin_skill_t s_builtins[] = {
 
 static void install_builtin(const builtin_skill_t *skill)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    const char *prefix = cfg->skills_prefix[0] ? cfg->skills_prefix : "skills/";
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *prefix = mimi_cfg_get_str(files, "skillsPrefix", "skills/");
     char path[256];
     snprintf(path, sizeof(path), "%s%s.md", prefix, skill->filename);
 
@@ -210,8 +211,8 @@ static void extract_description_fs(mimi_file_t *f, char *out, size_t out_size)
 
 size_t skill_loader_build_summary(char *buf, size_t size)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    const char *skills_dir = cfg->skills_prefix[0] ? cfg->skills_prefix : "skills/";
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *skills_dir = mimi_cfg_get_str(files, "skillsPrefix", "skills/");
     mimi_dir_t *dir = NULL;
     if (mimi_fs_opendir(skills_dir, &dir) != MIMI_OK) {
         MIMI_LOGW(TAG, "Cannot open skills base for enumeration");

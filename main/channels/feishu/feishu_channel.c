@@ -7,10 +7,15 @@
 
 #include "channels/feishu/feishu_channel.h"
 #include "channels/feishu/feishu_media.h"
+#include "channels/feishu/feishu_priv.h"
+#include "channels/feishu/feishu_cards.h"
+#include "channels/feishu/feishu_startup.h"
+#include "channels/feishu/feishu_ws.h"
 #include "channels/channel_manager.h"
 #include "router/router.h"
 #include "commands/command.h"
 #include "config.h"
+#include "config_view.h"
 #include "bus/message_bus.h"
 #include "gateway/websocket/ws_client_gateway.h"
 #include "gateway/http/http_client_gateway.h"
@@ -21,10 +26,6 @@
 
 #include "cJSON.h"
 
-#include "channels/feishu/pb/pbbp2.pb.h"
-#include "pb_decode.h"
-#include "pb_encode.h"
-
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -33,499 +34,176 @@
 
 static const char *TAG = "feishu";
 
-/* Feishu Channel private data */
-typedef struct {
-    bool initialized;
-    bool started;
-    gateway_t *ws_gateway;
-    gateway_t *http_gateway;
-    char app_id[64];
-    char app_secret[128];
-    char tenant_access_token[512];
-    char ws_url[256];
-    const char *ws_token; /* points to tenant_access_token or NULL */
-    volatile bool running;
-    volatile bool stopping;
-
-    /* Startup state machine */
-    enum {
-        FEISHU_SM_IDLE = 0,
-        FEISHU_SM_GET_TENANT_TOKEN,
-        FEISHU_SM_GET_WS_URL,
-        FEISHU_SM_START_WS,
-        FEISHU_SM_RUNNING,
-        FEISHU_SM_FAILED,
-    } sm_state;
-} feishu_channel_priv_t;
-
 static feishu_channel_priv_t s_priv = {0};
+
+feishu_channel_priv_t *feishu_priv_get(void)
+{
+    return &s_priv;
+}
 
 /* Forward declarations */
 static bool feishu_is_running_impl(channel_t *ch);
+#include <stdbool.h>
 
-typedef void (*feishu_http_async_cb)(mimi_err_t err, mimi_http_response_t *resp, void *user_data);
-static mimi_err_t feishu_http_post_json_async(const char *path, const char *json_body,
-                                             feishu_http_async_cb cb, void *user_data);
-static void feishu_sm_start(channel_t *ch);
-static void feishu_sm_fail(mimi_err_t err, const char *why);
-static void feishu_sm_on_tenant_token(mimi_err_t err, mimi_http_response_t *resp, void *user_data);
-static void feishu_sm_on_ws_url(mimi_err_t err, mimi_http_response_t *resp, void *user_data);
+/* card helpers moved to feishu_cards.c */
 
-static mimi_err_t feishu_http_post_json_async(const char *path, const char *json_body,
-                                             feishu_http_async_cb cb, void *user_data)
-{
-    if (!path || !path[0] || !cb) return MIMI_ERR_INVALID_ARG;
-
-    char url[512];
-    snprintf(url, sizeof(url), "%s%s", "https://open.feishu.cn", path);
-
-    const char *headers = "Content-Type: application/json\r\n";
-    mimi_http_request_t req = {
-        .method = "POST",
-        .url = url,
-        .headers = headers,
-        .body = (const uint8_t *)json_body,
-        .body_len = json_body ? strlen(json_body) : 0,
-        .timeout_ms = 30000,
-    };
-
-    mimi_http_response_t *resp = (mimi_http_response_t *)calloc(1, sizeof(*resp));
-    if (!resp) return MIMI_ERR_NO_MEM;
-
-    mimi_err_t err = mimi_http_exec_async(&req, resp, cb, user_data);
-    if (err != MIMI_OK) {
-        free(resp);
-        return err;
-    }
-    return MIMI_OK;
-}
-
-static void feishu_sm_fail(mimi_err_t err, const char *why)
-{
-    if (s_priv.stopping) return;
-    s_priv.sm_state = FEISHU_SM_FAILED;
-    MIMI_LOGE(TAG, "Feishu startup failed (%s): %d", why ? why : "unknown", err);
-}
-
-static void feishu_sm_on_tenant_token(mimi_err_t err, mimi_http_response_t *resp, void *user_data)
-{
-    (void)user_data;
-
-    if (s_priv.stopping) {
-        if (resp) { mimi_http_response_free(resp); free(resp); }
-        return;
-    }
-
-    if (err != MIMI_OK || !resp || !resp->body || resp->body_len == 0) {
-        feishu_sm_fail(err != MIMI_OK ? err : MIMI_ERR_FAIL, "tenant_token");
-        /* still allow fallback ws url without token */
-        s_priv.tenant_access_token[0] = '\0';
-    } else {
-        cJSON *root = cJSON_Parse((const char *)resp->body);
-        if (!root) {
-            feishu_sm_fail(MIMI_ERR_FAIL, "tenant_token_parse");
-        } else {
-            cJSON *token = cJSON_GetObjectItem(root, "tenant_access_token");
-            if (token && cJSON_IsString(token)) {
-                strncpy(s_priv.tenant_access_token, token->valuestring,
-                        sizeof(s_priv.tenant_access_token) - 1);
-                s_priv.tenant_access_token[sizeof(s_priv.tenant_access_token) - 1] = '\0';
-                MIMI_LOGI(TAG, "Tenant token acquired");
-            } else {
-                feishu_sm_fail(MIMI_ERR_FAIL, "tenant_token_missing");
-            }
-            cJSON_Delete(root);
-        }
-    }
-
-    if (resp) { mimi_http_response_free(resp); free(resp); }
-
-    /* Next: request WS URL (official endpoint). */
-    s_priv.sm_state = FEISHU_SM_GET_WS_URL;
-    cJSON *body = cJSON_CreateObject();
-    if (!body) {
-        feishu_sm_fail(MIMI_ERR_NO_MEM, "ws_url_body");
-        return;
-    }
-    cJSON_AddStringToObject(body, "AppID", s_priv.app_id);
-    cJSON_AddStringToObject(body, "AppSecret", s_priv.app_secret);
-    char *json = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (!json) {
-        feishu_sm_fail(MIMI_ERR_NO_MEM, "ws_url_json");
-        return;
-    }
-
-    mimi_err_t e2 = feishu_http_post_json_async("/callback/ws/endpoint", json, feishu_sm_on_ws_url, NULL);
-    free(json);
-    if (e2 != MIMI_OK) {
-        feishu_sm_fail(e2, "ws_url_request");
-    }
-}
-
-static void feishu_sm_on_ws_url(mimi_err_t err, mimi_http_response_t *resp, void *user_data)
-{
-    (void)user_data;
-
-    if (s_priv.stopping) {
-        if (resp) { mimi_http_response_free(resp); free(resp); }
-        return;
-    }
-
-    s_priv.ws_url[0] = '\0';
-    s_priv.ws_token = NULL;
-
-    bool ok = (err == MIMI_OK && resp && resp->body && resp->body_len > 0);
-    if (ok) {
-        cJSON *root = cJSON_Parse((const char *)resp->body);
-        if (root) {
-            cJSON *data = cJSON_GetObjectItem(root, "data");
-            cJSON *url = data ? cJSON_GetObjectItem(data, "URL") : NULL;
-            if (url && cJSON_IsString(url) && url->valuestring && url->valuestring[0]) {
-                strncpy(s_priv.ws_url, url->valuestring, sizeof(s_priv.ws_url) - 1);
-                s_priv.ws_url[sizeof(s_priv.ws_url) - 1] = '\0';
-                s_priv.ws_token = NULL; /* auth embedded */
-                ok = true;
-            } else {
-                ok = false;
-            }
-            cJSON_Delete(root);
-        } else {
-            ok = false;
-        }
-    }
-
-    if (!ok) {
-        MIMI_LOGW(TAG, "Feishu endpoints not available, falling back to hyper-event URL");
-        snprintf(s_priv.ws_url, sizeof(s_priv.ws_url),
-                 "wss://open.feishu.cn/open-apis/bot/v3/hyper-event?app_id=%s",
-                 s_priv.app_id);
-        s_priv.ws_token = (s_priv.tenant_access_token[0] != '\0') ? s_priv.tenant_access_token : NULL;
-    }
-
-    if (resp) { mimi_http_response_free(resp); free(resp); }
-
-    /* Configure + start WS gateway (non-blocking). */
-    s_priv.sm_state = FEISHU_SM_START_WS;
-    mimi_err_t cfg_err = ws_client_gateway_configure(s_priv.ws_url, s_priv.ws_token, 30000, 30000);
-    if (cfg_err != MIMI_OK) {
-        feishu_sm_fail(cfg_err, "ws_configure");
-        return;
-    }
-
-    mimi_err_t start_err = gateway_start(s_priv.ws_gateway);
-    if (start_err != MIMI_OK) {
-        feishu_sm_fail(start_err, "ws_start");
-        return;
-    }
-
-    s_priv.running = true;
-    s_priv.started = true;
-    s_priv.sm_state = FEISHU_SM_RUNNING;
-    MIMI_LOGI(TAG, "Feishu Channel started (async state machine)");
-}
-
-static void feishu_sm_start(channel_t *ch)
-{
-    (void)ch;
-
-    if (s_priv.stopping) return;
-    if (!s_priv.app_id[0] || !s_priv.app_secret[0]) {
-        feishu_sm_fail(MIMI_ERR_INVALID_STATE, "credentials");
-        return;
-    }
-
-    s_priv.sm_state = FEISHU_SM_GET_TENANT_TOKEN;
-
-    cJSON *body = cJSON_CreateObject();
-    if (!body) {
-        feishu_sm_fail(MIMI_ERR_NO_MEM, "tenant_body");
-        return;
-    }
-    cJSON_AddStringToObject(body, "app_id", s_priv.app_id);
-    cJSON_AddStringToObject(body, "app_secret", s_priv.app_secret);
-    char *json = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (!json) {
-        feishu_sm_fail(MIMI_ERR_NO_MEM, "tenant_json");
-        return;
-    }
-
-    mimi_err_t e = feishu_http_post_json_async("/open-apis/auth/v3/tenant_access_token/internal",
-                                              json, feishu_sm_on_tenant_token, NULL);
-    free(json);
-    if (e != MIMI_OK) {
-        feishu_sm_fail(e, "tenant_request");
-        return;
-    }
-}
-
-/* Send a message with given msg_type and JSON content body (e.g. {"text":"..."}, {"image_key":"..."}, {"file_key":"..."}). */
-static mimi_err_t feishu_send_raw(const char *user_id, const char *msg_type, const char *content_json)
-{
-    if (!s_priv.tenant_access_token[0]) return MIMI_ERR_INVALID_STATE;
-    if (!user_id || !msg_type || !content_json) return MIMI_ERR_INVALID_ARG;
-
-    cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "receive_id", user_id);
-    cJSON_AddStringToObject(body, "msg_type", msg_type);
-    cJSON_AddStringToObject(body, "content", content_json);
-
-    char *json = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (!json) return MIMI_ERR_NO_MEM;
-
-    char url[512];
-    snprintf(url, sizeof(url), "%s/open-apis/im/v1/messages?receive_id_type=chat_id", "https://open.feishu.cn");
-    char headers[1024];
-    snprintf(headers, sizeof(headers),
-             "Authorization: Bearer %s\r\nContent-Type: application/json\r\n",
-             s_priv.tenant_access_token);
-
-    mimi_http_request_t req = {
-        .method = "POST",
-        .url = url,
-        .headers = headers,
-        .body = (const uint8_t *)json,
-        .body_len = strlen(json),
-        .timeout_ms = 30000,
-    };
-
-    mimi_http_response_t resp;
-    memset(&resp, 0, sizeof(resp));
-    mimi_err_t err = mimi_http_exec(&req, &resp);
-    free(json);
-
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to send message: %d", err);
-        mimi_http_response_free(&resp);
-        return err;
-    }
-    mimi_http_response_free(&resp);
-    return MIMI_OK;
-}
-
-/**
- * Send text message to Feishu user (chat_id for p2p).
- */
-static mimi_err_t feishu_send_message(const char *user_id, const char *content)
-{
-    if (!user_id || !content) return MIMI_ERR_INVALID_ARG;
-    cJSON *content_obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(content_obj, "text", content);
-    char *content_str = cJSON_PrintUnformatted(content_obj);
-    cJSON_Delete(content_obj);
-    if (!content_str) return MIMI_ERR_NO_MEM;
-    mimi_err_t err = feishu_send_raw(user_id, "text", content_str);
-    free(content_str);
-    return err;
-}
-
-/** Send image message using already-uploaded image_key. */
-static mimi_err_t feishu_send_image(const char *user_id, const char *image_key)
-{
-    if (!user_id || !image_key) return MIMI_ERR_INVALID_ARG;
-    cJSON *content_obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(content_obj, "image_key", image_key);
-    char *content_str = cJSON_PrintUnformatted(content_obj);
-    cJSON_Delete(content_obj);
-    if (!content_str) return MIMI_ERR_NO_MEM;
-    mimi_err_t err = feishu_send_raw(user_id, "image", content_str);
-    free(content_str);
-    return err;
-}
-
-/** Send audio/voice message using already-uploaded file_key. */
-static mimi_err_t feishu_send_audio(const char *user_id, const char *file_key)
-{
-    if (!user_id || !file_key) return MIMI_ERR_INVALID_ARG;
-    cJSON *content_obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(content_obj, "file_key", file_key);
-    char *content_str = cJSON_PrintUnformatted(content_obj);
-    cJSON_Delete(content_obj);
-    if (!content_str) return MIMI_ERR_NO_MEM;
-    mimi_err_t err = feishu_send_raw(user_id, "audio", content_str);
-    free(content_str);
-    return err;
-}
-
-/**
- * Handle incoming message from Feishu
- */
-static void handle_message(const char *user_id, const char *content)
-{
-    MIMI_LOGI(TAG, "Incoming message from %s: %.40s...", user_id, content);
-
-#ifdef FEISHU_TEST_REPLY
-    /* Optional: send a simple echo reply for debugging */
-    MIMI_LOGI(TAG, "Sending test reply to user %s", user_id);
-    mimi_err_t err = feishu_send_message(user_id, "收到你的消息: ");
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to send test reply: %d", err);
-    } else {
-        MIMI_LOGI(TAG, "Test reply sent successfully");
-    }
-#endif
-
-    /* Route through Input Processor */
-    router_handle_feishu(user_id, content);
-}
-
+/* Simple per-chat streaming state for agent turn status. */
 typedef struct {
-    char *buf;
-    size_t capacity;
-    size_t len;
-} feishu_payload_buf_t;
-
-typedef struct {
-    const uint8_t *buf;
-    size_t len;
-} feishu_bytes_t;
-
-typedef struct {
-    char key[64];
-    char value[256];
-} feishu_hdr_kv_t;
-
-typedef struct {
-    /* Extracted well-known fields (also stored in kvs) */
-    char type[16];        /* "event", "card", "ping", "pong" */
+    char chat_id[128];
     char message_id[128];
-    char trace_id[128];
-    int sum;
-    int seq;
+    bool active;
+    bool locked;
+    char timeline_md[8192];
+    size_t timeline_len;
+} feishu_stream_state_t;
 
-    /* Full header set for ACK echo */
-    feishu_hdr_kv_t kvs[48];
-    size_t kv_count;
-} feishu_frame_meta_t;
+/* Allow limited concurrent chats with streaming cards. */
+#define FEISHU_MAX_STREAM_STATES 16
+static feishu_stream_state_t s_stream_states[FEISHU_MAX_STREAM_STATES] = {0};
 
-static bool feishu_payload_encode_cb(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+bool feishu_stream_message_id_is_active(const char *message_id)
 {
-    const feishu_bytes_t *src = (const feishu_bytes_t *)(*arg);
-    if (!pb_encode_tag_for_field(stream, field)) {
-        return false;
+    if (!message_id || !message_id[0]) return false;
+    for (size_t i = 0; i < FEISHU_MAX_STREAM_STATES; i++) {
+        if (s_stream_states[i].active &&
+            s_stream_states[i].message_id[0] &&
+            strcmp(s_stream_states[i].message_id, message_id) == 0) {
+            return true;
+        }
     }
-    return pb_encode_string(stream, src->buf, src->len);
+    return false;
 }
 
-static bool feishu_str_decode_cb(pb_istream_t *stream, const pb_field_t *field, void **arg)
+void feishu_stream_lock_for_message_id(const char *message_id)
 {
-    (void)field;
-    feishu_payload_buf_t *dst = (feishu_payload_buf_t *)(*arg);
-    size_t to_read = stream->bytes_left;
-    if (to_read > dst->capacity - 1) {
-        to_read = dst->capacity - 1;
+    if (!message_id || !message_id[0]) return;
+    for (size_t i = 0; i < FEISHU_MAX_STREAM_STATES; i++) {
+        if (s_stream_states[i].active &&
+            s_stream_states[i].message_id[0] &&
+            strcmp(s_stream_states[i].message_id, message_id) == 0) {
+            s_stream_states[i].locked = true;
+            return;
+        }
     }
-    if (!pb_read(stream, (pb_byte_t *)dst->buf, to_read)) {
-        return false;
-    }
-    dst->len = to_read;
-    dst->buf[to_read] = '\0';
-    return true;
 }
 
-static bool feishu_headers_decode_cb(pb_istream_t *stream, const pb_field_t *field, void **arg)
+void feishu_stream_unlock_for_message_id(const char *message_id)
 {
-    (void)field;
-    feishu_frame_meta_t *out = (feishu_frame_meta_t *)(*arg);
-    if (!out) return false;
-
-    char key_buf[64] = {0};
-    feishu_payload_buf_t key = {.buf = key_buf, .capacity = sizeof(key_buf), .len = 0};
-    char val_buf[256] = {0};
-    feishu_payload_buf_t val = {.buf = val_buf, .capacity = sizeof(val_buf), .len = 0};
-
-    pbbp2_Header h = pbbp2_Header_init_zero;
-    h.key.funcs.decode = feishu_str_decode_cb;
-    h.key.arg = &key;
-    h.value.funcs.decode = feishu_str_decode_cb;
-    h.value.arg = &val;
-
-    if (!pb_decode(stream, pbbp2_Header_fields, &h)) {
-        return false;
+    if (!message_id || !message_id[0]) return;
+    for (size_t i = 0; i < FEISHU_MAX_STREAM_STATES; i++) {
+        if (s_stream_states[i].active &&
+            s_stream_states[i].message_id[0] &&
+            strcmp(s_stream_states[i].message_id, message_id) == 0) {
+            s_stream_states[i].locked = false;
+            return;
+        }
     }
-
-    /* Save full header list for ACK echo */
-    if (out->kv_count < (sizeof(out->kvs) / sizeof(out->kvs[0]))) {
-        feishu_hdr_kv_t *kv = &out->kvs[out->kv_count++];
-        strncpy(kv->key, key_buf, sizeof(kv->key) - 1);
-        kv->key[sizeof(kv->key) - 1] = '\0';
-        strncpy(kv->value, val_buf, sizeof(kv->value) - 1);
-        kv->value[sizeof(kv->value) - 1] = '\0';
-    }
-
-    if (strcmp(key_buf, "type") == 0) {
-        strncpy(out->type, val_buf, sizeof(out->type) - 1);
-        out->type[sizeof(out->type) - 1] = '\0';
-    } else if (strcmp(key_buf, "message_id") == 0) {
-        strncpy(out->message_id, val_buf, sizeof(out->message_id) - 1);
-        out->message_id[sizeof(out->message_id) - 1] = '\0';
-    } else if (strcmp(key_buf, "trace_id") == 0) {
-        strncpy(out->trace_id, val_buf, sizeof(out->trace_id) - 1);
-        out->trace_id[sizeof(out->trace_id) - 1] = '\0';
-    } else if (strcmp(key_buf, "sum") == 0) {
-        out->sum = atoi(val_buf);
-    } else if (strcmp(key_buf, "seq") == 0) {
-        out->seq = atoi(val_buf);
-    }
-
-    return true;
 }
 
-static bool feishu_headers_encode_cb(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+bool feishu_stream_is_locked_for_chat(const char *chat_id)
 {
-    const feishu_frame_meta_t *m = (const feishu_frame_meta_t *)(*arg);
-    if (!m) return true;
-
-    for (size_t i = 0; i < m->kv_count; i++) {
-        const feishu_hdr_kv_t *kv = &m->kvs[i];
-        if (!kv->key[0]) continue;
-
-        pbbp2_Header sub = pbbp2_Header_init_zero;
-        feishu_bytes_t kb = {.buf = (const uint8_t *)kv->key, .len = strlen(kv->key)};
-        feishu_bytes_t vb = {.buf = (const uint8_t *)kv->value, .len = strlen(kv->value)};
-        sub.key.funcs.encode = feishu_payload_encode_cb;
-        sub.key.arg = &kb;
-        sub.value.funcs.encode = feishu_payload_encode_cb;
-        sub.value.arg = &vb;
-
-        if (!pb_encode_tag_for_field(stream, field)) return false;
-        if (!pb_encode_submessage(stream, pbbp2_Header_fields, &sub)) return false;
+    if (!chat_id || !chat_id[0]) return false;
+    for (size_t i = 0; i < FEISHU_MAX_STREAM_STATES; i++) {
+        if (s_stream_states[i].active &&
+            s_stream_states[i].chat_id[0] &&
+            strcmp(s_stream_states[i].chat_id, chat_id) == 0) {
+            return s_stream_states[i].locked;
+        }
     }
-
-    /* Append biz_rt if missing */
-    bool has_biz_rt = false;
-    for (size_t i = 0; i < m->kv_count; i++) {
-        if (strcmp(m->kvs[i].key, "biz_rt") == 0) { has_biz_rt = true; break; }
-    }
-    if (!has_biz_rt) {
-        pbbp2_Header sub = pbbp2_Header_init_zero;
-        feishu_bytes_t kb = {.buf = (const uint8_t *)"biz_rt", .len = 6};
-        feishu_bytes_t vb = {.buf = (const uint8_t *)"0", .len = 1};
-        sub.key.funcs.encode = feishu_payload_encode_cb; sub.key.arg = &kb;
-        sub.value.funcs.encode = feishu_payload_encode_cb; sub.value.arg = &vb;
-        if (!pb_encode_tag_for_field(stream, field)) return false;
-        if (!pb_encode_submessage(stream, pbbp2_Header_fields, &sub)) return false;
-    }
-
-    return true;
+    return false;
 }
 
-static bool feishu_payload_decode_cb(pb_istream_t *stream, const pb_field_t *field, void **arg)
+static feishu_stream_state_t *feishu_stream_state_find(const char *chat_id, bool create)
 {
-    (void)field;
-    feishu_payload_buf_t *dst = (feishu_payload_buf_t *)(*arg);
-    size_t to_read = stream->bytes_left;
-    if (to_read > dst->capacity - 1) {
-        to_read = dst->capacity - 1;
+    if (!chat_id || !chat_id[0]) {
+        return NULL;
     }
-    if (!pb_read(stream, (pb_byte_t *)dst->buf, to_read)) {
-        return false;
+
+    /* First, look for existing state. */
+    for (size_t i = 0; i < FEISHU_MAX_STREAM_STATES; i++) {
+        if (s_stream_states[i].active &&
+            strncmp(s_stream_states[i].chat_id, chat_id, sizeof(s_stream_states[i].chat_id) - 1) == 0) {
+            return &s_stream_states[i];
+        }
     }
-    dst->len = to_read;
-    dst->buf[to_read] = '\0';
-    return true;
+
+    if (!create) {
+        return NULL;
+    }
+
+    /* Find a free slot. */
+    for (size_t i = 0; i < FEISHU_MAX_STREAM_STATES; i++) {
+        if (!s_stream_states[i].active) {
+            memset(&s_stream_states[i], 0, sizeof(s_stream_states[i]));
+            strncpy(s_stream_states[i].chat_id, chat_id, sizeof(s_stream_states[i].chat_id) - 1);
+            s_stream_states[i].active = true;
+            return &s_stream_states[i];
+        }
+    }
+
+    return NULL;
+}
+
+void feishu_stream_timeline_reset_for_chat(const char *chat_id, const char *initial_md)
+{
+    feishu_stream_state_t *st = feishu_stream_state_find(chat_id, false);
+    if (!st) return;
+    st->timeline_len = 0;
+    st->timeline_md[0] = '\0';
+    if (initial_md && initial_md[0]) {
+        strncpy(st->timeline_md, initial_md, sizeof(st->timeline_md) - 1);
+        st->timeline_md[sizeof(st->timeline_md) - 1] = '\0';
+        st->timeline_len = strlen(st->timeline_md);
+    }
+}
+
+static void timeline_append(feishu_stream_state_t *st, const char *md)
+{
+    if (!st || !md || !md[0]) return;
+    size_t cap = sizeof(st->timeline_md);
+    size_t cur = st->timeline_len;
+    if (cur >= cap - 1) return;
+
+    /* Separator between events */
+    const char *sep = "\n\n---\n\n";
+    size_t sep_len = strlen(sep);
+    if (cur > 0 && cur + sep_len < cap - 1) {
+        memcpy(st->timeline_md + cur, sep, sep_len);
+        cur += sep_len;
+        st->timeline_md[cur] = '\0';
+    }
+
+    size_t add = strlen(md);
+    if (add > cap - 1 - cur) add = cap - 1 - cur;
+    memcpy(st->timeline_md + cur, md, add);
+    cur += add;
+    st->timeline_md[cur] = '\0';
+    st->timeline_len = cur;
+}
+
+void feishu_stream_timeline_append_for_chat(const char *chat_id, const char *md, bool patch_if_unlocked)
+{
+    feishu_stream_state_t *st = feishu_stream_state_find(chat_id, false);
+    if (!st || !st->active || !st->message_id[0]) return;
+
+    timeline_append(st, md);
+
+    if (patch_if_unlocked && !st->locked) {
+        (void)feishu_stream_update(st->message_id, st->timeline_md);
+    }
+}
+
+const char *feishu_stream_timeline_get_for_message_id(const char *message_id)
+{
+    if (!message_id || !message_id[0]) return NULL;
+    for (size_t i = 0; i < FEISHU_MAX_STREAM_STATES; i++) {
+        if (s_stream_states[i].active &&
+            s_stream_states[i].message_id[0] &&
+            strcmp(s_stream_states[i].message_id, message_id) == 0) {
+            return s_stream_states[i].timeline_md;
+        }
+    }
+    return NULL;
 }
 
 /**
@@ -533,306 +211,9 @@ static bool feishu_payload_decode_cb(pb_istream_t *stream, const pb_field_t *fie
  * Receives raw protobuf Frame bytes, decodes payload JSON, then reuses existing logic.
  */
 static void on_ws_message(gateway_t *gw, const char *session_id,
-                         const char *content, size_t content_len, void *user_data)
+                          const char *content, size_t content_len, void *user_data)
 {
-    (void)gw;
-    (void)session_id;
-    (void)user_data;
-    
-    if (!content || content_len == 0) {
-        return;
-    }
-
-    const uint8_t *data = (const uint8_t *)content;
-    pb_istream_t stream = pb_istream_from_buffer(data, content_len);
-    pbbp2_Frame frame = pbbp2_Frame_init_zero;
-    feishu_frame_meta_t hdr = {0};
-    hdr.sum = 0;
-    hdr.seq = -1;
-    hdr.kv_count = 0;
-
-    char payload_buf[4096];
-    feishu_payload_buf_t payload = {
-        .buf = payload_buf,
-        .capacity = sizeof(payload_buf),
-        .len = 0
-    };
-
-    frame.payload.funcs.decode = feishu_payload_decode_cb;
-    frame.payload.arg = &payload;
-    frame.headers.funcs.decode = feishu_headers_decode_cb;
-    frame.headers.arg = &hdr;
-
-    if (!pb_decode(&stream, pbbp2_Frame_fields, &frame)) {
-        MIMI_LOGW(TAG, "Failed to decode Feishu Frame: %s", PB_GET_ERROR(&stream));
-        return;
-    }
-
-    if (payload.len == 0) {
-        MIMI_LOGW(TAG, "Feishu Frame has empty payload");
-        return;
-    }
-
-    /* Only handle + ACK event/card frames. Ignore control/unknown frames to avoid ACK loops. */
-    if (hdr.type[0] && strcmp(hdr.type, "event") != 0 && strcmp(hdr.type, "card") != 0) {
-        MIMI_LOGD(TAG, "Feishu WS frame type=%s ignored", hdr.type);
-        return;
-    }
-
-    MIMI_LOGI(TAG, "Feishu WS payload JSON: %.200s", payload.buf);
-
-    cJSON *root = cJSON_Parse(payload.buf);
-    if (!root) {
-        MIMI_LOGW(TAG, "Invalid Feishu payload JSON");
-        return;
-    }
-
-    /* If we receive an ACK/response payload (e.g. {"code":200}), do not ACK it again. */
-    {
-        cJSON *schema = cJSON_GetObjectItem(root, "schema");
-        cJSON *code = cJSON_GetObjectItem(root, "code");
-        if (!schema && code && cJSON_IsNumber(code)) {
-            MIMI_LOGD(TAG, "Feishu WS response payload received (code=%d), ignore", code->valueint);
-            cJSON_Delete(root);
-            return;
-        }
-    }
-
-    cJSON *header = cJSON_GetObjectItem(root, "header");
-    cJSON *event = cJSON_GetObjectItem(root, "event");
-
-    if (header && event) {
-        cJSON *event_type = cJSON_GetObjectItem(header, "event_type");
-        if (event_type && cJSON_IsString(event_type) && 
-            strcmp(event_type->valuestring, "im.message.receive_v1") == 0) {
-            
-            cJSON *sender = cJSON_GetObjectItem(event, "sender");
-            cJSON *message = cJSON_GetObjectItem(event, "message");
-            
-            if (sender && message) {
-                /* Get sender_id from sender.sender_id.open_id */
-                cJSON *sender_id_obj = cJSON_GetObjectItem(sender, "sender_id");
-                cJSON *sender_id = NULL;
-                if (sender_id_obj) {
-                    sender_id = cJSON_GetObjectItem(sender_id_obj, "open_id");
-                }
-                
-                /* Get chat_id from message.chat_id for p2p reply */
-                cJSON *chat_id = cJSON_GetObjectItem(message, "chat_id");
-                cJSON *chat_type = cJSON_GetObjectItem(message, "chat_type");
-                cJSON *message_type = cJSON_GetObjectItem(message, "message_type");
-                cJSON *message_id = cJSON_GetObjectItem(message, "message_id");
-                cJSON *msg_content = cJSON_GetObjectItem(message, "content");
-                
-                MIMI_LOGI(TAG, "Parsed: sender_id=%s, chat_id=%s, chat_type=%s",
-                          sender_id ? sender_id->valuestring : "(null)",
-                          chat_id ? chat_id->valuestring : "(null)",
-                          chat_type && cJSON_IsString(chat_type) ? chat_type->valuestring : "(null)");
-                
-                /* Use chat_id as user_id for reply (following Python SDK pattern) */
-                const char *reply_id = chat_id ? chat_id->valuestring : NULL;
-                
-                if (reply_id && msg_content && cJSON_IsString(msg_content)) {
-                    const char *mt = (message_type && cJSON_IsString(message_type)) ? message_type->valuestring : "unknown";
-                    const char *route_text = NULL;
-                    char route_buf[512] = {0};
-
-                    cJSON *content_obj = cJSON_Parse(msg_content->valuestring);
-                    if (!content_obj) {
-                        snprintf(route_buf, sizeof(route_buf), "[feishu:%s] (content parse failed)", mt);
-                        route_text = route_buf;
-                    } else if (strcmp(mt, "text") == 0) {
-                        cJSON *text = cJSON_GetObjectItem(content_obj, "text");
-                        if (text && cJSON_IsString(text)) {
-                            /* Trim whitespace from text content */
-                            const char *raw_text = text->valuestring;
-                            /* Skip leading whitespace */
-                            while (*raw_text && isspace((unsigned char)*raw_text)) {
-                                raw_text++;
-                            }
-                            /* Check if it's a command */
-                            if (raw_text[0] == '/') {
-                                route_text = raw_text;
-                            } else {
-                                route_text = text->valuestring;
-                            }
-                        } else {
-                            snprintf(route_buf, sizeof(route_buf), "[feishu:text] (missing text field)");
-                            route_text = route_buf;
-                        }
-                    } else if (strcmp(mt, "image") == 0) {
-                        cJSON *image_key = cJSON_GetObjectItem(content_obj, "image_key");
-                        if (image_key && cJSON_IsString(image_key)) {
-                            char dl_url[512];
-                            if (message_id && cJSON_IsString(message_id) && message_id->valuestring && message_id->valuestring[0]) {
-                                /* Prefer message resource API for media from messages */
-                                snprintf(dl_url, sizeof(dl_url),
-                                         "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s?type=image",
-                                         message_id->valuestring, image_key->valuestring);
-                            } else {
-                                snprintf(dl_url, sizeof(dl_url),
-                                         "https://open.feishu.cn/open-apis/im/v1/images/%s",
-                                         image_key->valuestring);
-                            }
-                            char out_base[512];
-                            snprintf(out_base, sizeof(out_base), "downloads/feishu/images/%s", image_key->valuestring);
-                            char saved_path[512];
-                            mimi_err_t derr = feishu_download_to_file(dl_url, out_base, s_priv.tenant_access_token,
-                                                                      saved_path, sizeof(saved_path));
-                            if (derr == MIMI_OK) {
-                                snprintf(route_buf, sizeof(route_buf),
-                                         "[feishu:image] saved=%.192s image_key=%.192s",
-                                         saved_path, image_key->valuestring);
-                            } else {
-                                snprintf(route_buf, sizeof(route_buf),
-                                         "[feishu:image] download_failed=%d image_key=%.192s",
-                                         derr, image_key->valuestring);
-                            }
-                        } else {
-                            snprintf(route_buf, sizeof(route_buf), "[feishu:image] (missing image_key)");
-                        }
-                        route_text = route_buf;
-                    } else if (strcmp(mt, "audio") == 0) {
-                        cJSON *file_key = cJSON_GetObjectItem(content_obj, "file_key");
-                        cJSON *duration = cJSON_GetObjectItem(content_obj, "duration");
-                        if (file_key && cJSON_IsString(file_key)) {
-                            char dl_url[512];
-                            if (message_id && cJSON_IsString(message_id) && message_id->valuestring && message_id->valuestring[0]) {
-                                snprintf(dl_url, sizeof(dl_url),
-                                         "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s?type=file",
-                                         message_id->valuestring, file_key->valuestring);
-                            } else {
-                                snprintf(dl_url, sizeof(dl_url),
-                                         "https://open.feishu.cn/open-apis/im/v1/files/%s",
-                                         file_key->valuestring);
-                            }
-                            char out_base[512];
-                            snprintf(out_base, sizeof(out_base), "downloads/feishu/audio/%s", file_key->valuestring);
-                            char saved_path[512];
-                            mimi_err_t derr = feishu_download_to_file(dl_url, out_base, s_priv.tenant_access_token,
-                                                                      saved_path, sizeof(saved_path));
-                            if (derr == MIMI_OK) {
-                                if (duration && cJSON_IsNumber(duration)) {
-                                    snprintf(route_buf, sizeof(route_buf),
-                                             "[feishu:audio] saved=%.192s duration=%d file_key=%.96s",
-                                             saved_path, duration->valueint, file_key->valuestring);
-                                } else {
-                                    snprintf(route_buf, sizeof(route_buf),
-                                             "[feishu:audio] saved=%.192s file_key=%.192s",
-                                             saved_path, file_key->valuestring);
-                                }
-                            } else {
-                                snprintf(route_buf, sizeof(route_buf),
-                                         "[feishu:audio] download_failed=%d file_key=%.192s",
-                                         derr, file_key->valuestring);
-                            }
-                        } else {
-                            snprintf(route_buf, sizeof(route_buf), "[feishu:audio] (missing file_key)");
-                        }
-                        route_text = route_buf;
-                    } else if (strcmp(mt, "file") == 0) {
-                        cJSON *file_key = cJSON_GetObjectItem(content_obj, "file_key");
-                        cJSON *file_name = cJSON_GetObjectItem(content_obj, "file_name");
-                        if (file_key && cJSON_IsString(file_key)) {
-                            char dl_url[512];
-                            if (message_id && cJSON_IsString(message_id) && message_id->valuestring && message_id->valuestring[0]) {
-                                snprintf(dl_url, sizeof(dl_url),
-                                         "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s?type=file",
-                                         message_id->valuestring, file_key->valuestring);
-                            } else {
-                                snprintf(dl_url, sizeof(dl_url),
-                                         "https://open.feishu.cn/open-apis/im/v1/files/%s",
-                                         file_key->valuestring);
-                            }
-                            char out_base[512];
-                            snprintf(out_base, sizeof(out_base), "downloads/feishu/files/%s", file_key->valuestring);
-                            char saved_path[512];
-                            mimi_err_t derr = feishu_download_to_file(dl_url, out_base, s_priv.tenant_access_token,
-                                                                      saved_path, sizeof(saved_path));
-                            if (derr == MIMI_OK) {
-                                if (file_name && cJSON_IsString(file_name)) {
-                                    snprintf(route_buf, sizeof(route_buf),
-                                             "[feishu:file] saved=%.192s file_name=%.96s file_key=%.96s",
-                                             saved_path, file_name->valuestring, file_key->valuestring);
-                                } else {
-                                    snprintf(route_buf, sizeof(route_buf),
-                                             "[feishu:file] saved=%.192s file_key=%.192s",
-                                             saved_path, file_key->valuestring);
-                                }
-                            } else {
-                                if (file_name && cJSON_IsString(file_name)) {
-                                    snprintf(route_buf, sizeof(route_buf),
-                                             "[feishu:file] download_failed=%d file_name=%.96s file_key=%.96s",
-                                             derr, file_name->valuestring, file_key->valuestring);
-                                } else {
-                                    snprintf(route_buf, sizeof(route_buf),
-                                             "[feishu:file] download_failed=%d file_key=%.192s",
-                                             derr, file_key->valuestring);
-                                }
-                            }
-                        } else {
-                            snprintf(route_buf, sizeof(route_buf), "[feishu:file] (missing file_key)");
-                        }
-                        route_text = route_buf;
-                    } else {
-                        snprintf(route_buf, sizeof(route_buf), "[feishu:%s] %s", mt, msg_content->valuestring);
-                        route_text = route_buf;
-                    }
-
-                    if (route_text) {
-                        MIMI_LOGI(TAG, "Feishu routed content for chat_id=%s: %s",
-                                  reply_id, route_text);
-                        handle_message(reply_id, route_text);
-                    }
-
-                    cJSON_Delete(content_obj);
-                } else {
-                    MIMI_LOGW(TAG, "Missing reply_id or msg_content");
-                }
-            } else {
-                MIMI_LOGW(TAG, "Missing sender or message in event");
-            }
-        }
-    }
-
-    /* Build minimal Response JSON and ACK frame back to Feishu for real events/cards. */
-    {
-        cJSON *resp = cJSON_CreateObject();
-        if (resp) {
-            cJSON_AddNumberToObject(resp, "code", 200);
-            char *resp_json = cJSON_PrintUnformatted(resp);
-            cJSON_Delete(resp);
-
-            if (resp_json) {
-                feishu_bytes_t resp_bytes = {
-                    .buf = (const uint8_t *)resp_json,
-                    .len = strlen(resp_json),
-                };
-
-                pbbp2_Frame ack = pbbp2_Frame_init_zero;
-                ack.SeqID = frame.SeqID;
-                ack.LogID = frame.LogID;
-                ack.service = frame.service;
-                ack.method = frame.method;
-                ack.headers.funcs.encode = feishu_headers_encode_cb;
-                ack.headers.arg = &hdr;
-                ack.payload.funcs.encode = feishu_payload_encode_cb;
-                ack.payload.arg = &resp_bytes;
-
-                uint8_t out_buf[1024];
-                pb_ostream_t out = pb_ostream_from_buffer(out_buf, sizeof(out_buf));
-                if (pb_encode(&out, pbbp2_Frame_fields, &ack)) {
-                    ws_client_gateway_send_raw(out_buf, out.bytes_written);
-                } else {
-                    MIMI_LOGW(TAG, "Failed to encode Feishu ACK Frame: %s", PB_GET_ERROR(&out));
-                }
-
-                free(resp_json);
-            }
-        }
-    }
-
-    cJSON_Delete(root);
+    feishu_on_ws_message(gw, session_id, content, content_len, user_data);
 }
 
 /**
@@ -848,20 +229,19 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     }
 
     /* Check if Feishu is enabled */
-    const mimi_config_t *config = mimi_config_get();
-    MIMI_LOGD(TAG, "Feishu config: enabled=%d, app_id=%s", config->feishu_enabled, config->feishu_app_id);
-    if (!config->feishu_enabled) {
+    mimi_cfg_obj_t feishu = mimi_cfg_named("channels", "feishu");
+    bool enabled = mimi_cfg_get_bool(feishu, "enabled", false);
+    const char *app_id = mimi_cfg_get_str(feishu, "appId", "");
+    MIMI_LOGD(TAG, "Feishu config: enabled=%d, app_id=%s", enabled, app_id ? app_id : "");
+    if (!enabled) {
         MIMI_LOGD(TAG, "Feishu Channel is disabled");
         return MIMI_ERR_NOT_SUPPORTED;
     }
 
     /* Load credentials from config */
-    if (config->feishu_app_id[0] != '\0') {
-        strncpy(s_priv.app_id, config->feishu_app_id, sizeof(s_priv.app_id) - 1);
-    }
-    if (config->feishu_app_secret[0] != '\0') {
-        strncpy(s_priv.app_secret, config->feishu_app_secret, sizeof(s_priv.app_secret) - 1);
-    }
+    const char *secret = mimi_cfg_get_str(feishu, "appSecret", "");
+    if (app_id && app_id[0] != '\0') strncpy(s_priv.app_id, app_id, sizeof(s_priv.app_id) - 1);
+    if (secret && secret[0] != '\0') strncpy(s_priv.app_secret, secret, sizeof(s_priv.app_secret) - 1);
 
     if (!s_priv.app_id[0] || !s_priv.app_secret[0]) {
         MIMI_LOGW(TAG, "Feishu credentials not configured");
@@ -1028,9 +408,9 @@ mimi_err_t feishu_channel_send_impl(channel_t *ch, const char *session_id,
             image_key, sizeof(image_key));
         if (err != MIMI_OK) {
             MIMI_LOGE(TAG, "Feishu image upload failed: %d, falling back to text", err);
-            return feishu_send_message(session_id, content);
+            return feishu_send_text(session_id, content);
         }
-        return feishu_send_image(session_id, image_key);
+        return feishu_send_image_key(session_id, image_key);
     }
 
     if (strncmp(content, FEISHU_AUDIO_PREFIX, sizeof(FEISHU_AUDIO_PREFIX) - 1) == 0) {
@@ -1041,12 +421,12 @@ mimi_err_t feishu_channel_send_impl(channel_t *ch, const char *session_id,
             file_key, sizeof(file_key));
         if (err != MIMI_OK) {
             MIMI_LOGE(TAG, "Feishu audio upload failed: %d, falling back to text", err);
-            return feishu_send_message(session_id, content);
+            return feishu_send_text(session_id, content);
         }
-        return feishu_send_audio(session_id, file_key);
+        return feishu_send_audio_key(session_id, file_key);
     }
 
-    return feishu_send_message(session_id, content);
+    return feishu_send_text(session_id, content);
 }
 
 /**
@@ -1099,6 +479,178 @@ static void feishu_set_on_disconnect(channel_t *ch,
 }
 
 /**
+ * Channel send_control implementation for Feishu: render confirmation as interactive card.
+ */
+static mimi_err_t feishu_channel_send_control(channel_t *ch, const char *session_id,
+                                              mimi_control_type_t control_type,
+                                              const char *request_id,
+                                              const char *target,
+                                              const char *data)
+{
+    (void)ch;
+    if (control_type != MIMI_CONTROL_TYPE_CONFIRM) {
+        /* For now, only confirmation requests are rendered as cards. */
+        return feishu_send_text(session_id,
+                                   "收到控制请求，但当前只支持确认类型 (CONFIRM)。");
+    }
+
+    /* Prefer fusing the confirmation UI into the active stream card if present. */
+    feishu_stream_state_t *st = feishu_stream_state_find(session_id, false);
+    if (st && st->active && st->message_id[0]) {
+        /* Keep timeline moving even while locked; but do not patch immediately. */
+        feishu_stream_timeline_append_for_chat(session_id, "🔐 **等待授权**", false);
+        char desc_buf[512];
+        snprintf(desc_buf, sizeof(desc_buf),
+                 "🔐 **需要确认工具调用**\n\n"
+                 "- 工具：`%s`\n"
+                 "- 请求ID：`%.40s`\n\n"
+                 "请在下方选择允许/拒绝。",
+                 (target && target[0]) ? target : "(unknown)",
+                 request_id ? request_id : "");
+
+        feishu_card_button_t buttons[] = {
+            { .text = "允许本次", .type = "primary", .value_action = "ACCEPT",        .value_request_id = request_id, .value_target = target },
+            { .text = "总是允许", .type = "primary", .value_action = "ACCEPT_ALWAYS", .value_request_id = request_id, .value_target = target },
+            { .text = "拒绝",     .type = NULL,      .value_action = "REJECT",        .value_request_id = request_id, .value_target = target },
+        };
+        const char *base_md = st->timeline_md[0] ? st->timeline_md : "";
+        char merged_md[8192];
+        size_t base_len = strlen(base_md);
+        size_t desc_len = strlen(desc_buf);
+        /* Keep within buffer: prefer preserving existing timeline. */
+        if (base_len + desc_len + 8 >= sizeof(merged_md)) {
+            snprintf(merged_md, sizeof(merged_md), "%s", base_md);
+        } else {
+            /* Two-step copy avoids -Wformat-truncation false positives. */
+            memcpy(merged_md, base_md, base_len);
+            merged_md[base_len] = '\0';
+            strncat(merged_md, "\n\n---\n\n", sizeof(merged_md) - strlen(merged_md) - 1);
+            strncat(merged_md, desc_buf, sizeof(merged_md) - strlen(merged_md) - 1);
+        }
+
+        feishu_card_block_t blocks[] = {
+            { .type = FEISHU_CARD_BLOCK_MARKDOWN, .markdown = { .md = merged_md } },
+            { .type = FEISHU_CARD_BLOCK_ACTIONS,  .actions  = { .buttons = buttons, .button_count = sizeof(buttons) / sizeof(buttons[0]) } },
+        };
+        feishu_card_model_t model = {
+            .wide_screen_mode = true,
+            .update_multi = true,
+            .title = "Mimi",
+            .subtitle = "等待授权",
+            .blocks = blocks,
+            .block_count = sizeof(blocks) / sizeof(blocks[0]),
+        };
+
+        mimi_err_t uerr = feishu_update_interactive(st->message_id, &model);
+        if (uerr == MIMI_OK) {
+            /* Prevent subsequent status updates from overwriting the buttons. */
+            feishu_stream_lock_for_message_id(st->message_id);
+            return MIMI_OK;
+        }
+        MIMI_LOGW(TAG, "Failed to fuse control into stream card (message_id=%s): %s",
+                  st->message_id, mimi_err_to_name(uerr));
+        /* Fall back to standalone control card below. */
+    }
+
+    return feishu_send_control_card(session_id, control_type, request_id, target, data);
+}
+
+static mimi_err_t feishu_channel_send_msg_impl(channel_t *ch, const mimi_msg_t *msg)
+{
+    (void)ch;
+    if (!msg || !msg->chat_id[0]) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    /* Map agent_turn STATUS messages to interactive stream cards so that
+     * the async agent loop can provide a streaming-style experience on
+     * Feishu without changing its core logic. */
+    if (msg->type == MIMI_MSG_TYPE_STATUS &&
+        msg->status_key[0] != '\0' &&
+        strcmp(msg->status_key, "agent_turn") == 0) {
+        if (msg->status_phase == MIMI_STATUS_PHASE_START) {
+            feishu_stream_state_t *st = feishu_stream_state_find(msg->chat_id, true);
+            if (!st) {
+                MIMI_LOGW(TAG, "No stream state slot available for chat_id=%s", msg->chat_id);
+                /* Fallback to plain text message. */
+                return feishu_channel_send_impl(ch, msg->chat_id, msg->content ? msg->content : "");
+            }
+
+            char msg_id[128] = {0};
+            const char *content_md = msg->content ? msg->content : "mimi is working...";
+            mimi_err_t err = feishu_stream_start(msg->chat_id, content_md, msg_id, sizeof(msg_id));
+            if (err == MIMI_OK && msg_id[0] != '\0') {
+                strncpy(st->message_id, msg_id, sizeof(st->message_id) - 1);
+                st->active = true;
+                st->locked = false;
+                feishu_stream_timeline_reset_for_chat(msg->chat_id, content_md);
+                MIMI_LOGD(TAG, "Feishu stream started for chat_id=%s, message_id=%s",
+                          msg->chat_id, st->message_id);
+                return MIMI_OK;
+            }
+
+            MIMI_LOGW(TAG, "Feishu stream_start failed for chat_id=%s, err=%s",
+                      msg->chat_id, mimi_err_to_name(err));
+            /* Fallback to plain text if card creation fails. */
+            return feishu_channel_send_impl(ch, msg->chat_id, msg->content ? msg->content : "");
+        } else if (msg->status_phase == MIMI_STATUS_PHASE_PROGRESS ||
+                   msg->status_phase == MIMI_STATUS_PHASE_DONE) {
+            feishu_stream_state_t *st = feishu_stream_state_find(msg->chat_id, false);
+            if (!st || !st->active || !st->message_id[0]) {
+                /* No active stream: ignore STATUS updates to avoid sending duplicate
+                 * plain-text messages when the final TEXT has already been delivered
+                 * via stream card update. */
+                return MIMI_OK;
+            }
+
+            const char *content_md = msg->content ? msg->content : "";
+            /* Always accumulate; patch only when not locked. */
+            timeline_append(st, content_md);
+            if (!st->locked || msg->status_phase == MIMI_STATUS_PHASE_DONE) {
+                mimi_err_t err = feishu_stream_update(st->message_id, st->timeline_md);
+                if (err != MIMI_OK) {
+                    MIMI_LOGW(TAG, "Feishu stream_update failed for chat_id=%s, message_id=%s, err=%s",
+                              msg->chat_id, st->message_id, mimi_err_to_name(err));
+                    /* Also try to send as plain text so user still sees something. */
+                    return feishu_channel_send_impl(ch, msg->chat_id, content_md);
+                }
+            }
+
+            if (msg->status_phase == MIMI_STATUS_PHASE_DONE) {
+                memset(st, 0, sizeof(*st));
+            }
+            return MIMI_OK;
+        }
+    }
+
+    /* If there is an active stream card for this chat and we now receive a
+     * final TEXT response from the agent, update the existing card instead
+     * of sending a separate message. This gives a natural streaming effect:
+     * START status creates the card, and the final answer replaces it. */
+    if (msg->type == MIMI_MSG_TYPE_TEXT) {
+        feishu_stream_state_t *st = feishu_stream_state_find(msg->chat_id, false);
+        if (st && st->active && st->message_id[0]) {
+            const char *content_md = msg->content ? msg->content : "";
+            timeline_append(st, content_md);
+            mimi_err_t err = feishu_stream_update(st->message_id, st->timeline_md);
+            if (err == MIMI_OK) {
+                MIMI_LOGD(TAG, "Feishu stream final update for chat_id=%s, message_id=%s",
+                          msg->chat_id, st->message_id);
+                memset(st, 0, sizeof(*st));
+                return MIMI_OK;
+            }
+
+            MIMI_LOGW(TAG, "Feishu stream final update failed for chat_id=%s, message_id=%s, err=%s",
+                      msg->chat_id, st->message_id, mimi_err_to_name(err));
+            /* Fall through to plain text on failure. */
+        }
+    }
+
+    /* For all other messages, treat as plain text. */
+    return feishu_channel_send_impl(ch, msg->chat_id, msg->content ? msg->content : "");
+}
+
+/**
  * Global Feishu Channel instance
  */
 channel_t g_feishu_channel = {
@@ -1110,11 +662,13 @@ channel_t g_feishu_channel = {
     .start = feishu_channel_start_impl,
     .stop = feishu_channel_stop_impl,
     .destroy = feishu_channel_destroy_impl,
-    .send = feishu_channel_send_impl,
+    .send_msg = feishu_channel_send_msg_impl,
     .is_running = feishu_is_running_impl,
     .set_on_message = feishu_set_on_message,
     .set_on_connect = feishu_set_on_connect,
     .set_on_disconnect = feishu_set_on_disconnect,
+    .send_control = feishu_channel_send_control,
+    .set_on_control_response = NULL,
     .priv_data = NULL,
     .is_initialized = false,
     .is_started = false

@@ -10,6 +10,7 @@
 #include "router/router.h"
 #include "commands/command.h"
 #include "config.h"
+#include "config_view.h"
 #include "bus/message_bus.h"
 #include "gateway/http/http_client_gateway.h"
 #include "gateway/gateway_manager.h"
@@ -157,16 +158,17 @@ mimi_err_t telegram_channel_init_impl(channel_t *ch, const channel_config_t *cfg
     }
 
     /* Check if Telegram is enabled */
-    const mimi_config_t *config = mimi_config_get();
-    if (!config->telegram_enabled) {
+    mimi_cfg_obj_t tg = mimi_cfg_named("channels", "telegram");
+    if (!mimi_cfg_get_bool(tg, "enabled", false)) {
         MIMI_LOGD(TAG, "Telegram Channel is disabled");
         return MIMI_ERR_NOT_SUPPORTED;
     }
 
     /* Load token from config */
     
-    if (config->telegram_token[0] != '\0') {
-        strncpy(s_priv.bot_token, config->telegram_token, sizeof(s_priv.bot_token) - 1);
+    const char *token = mimi_cfg_get_str(tg, "token", "");
+    if (token && token[0] != '\0') {
+        strncpy(s_priv.bot_token, token, sizeof(s_priv.bot_token) - 1);
         s_priv.bot_token[sizeof(s_priv.bot_token) - 1] = '\0';
     }
 
@@ -294,42 +296,6 @@ void telegram_channel_destroy_impl(channel_t *ch)
 }
 
 /**
- * Send message through Telegram Channel
- */
-mimi_err_t telegram_channel_send_impl(channel_t *ch, const char *session_id,
-                                       const char *content)
-{
-    (void)ch;
-
-    if (!s_priv.initialized || !s_priv.started) {
-        return MIMI_ERR_INVALID_STATE;
-    }
-
-    if (!session_id || !content) {
-        return MIMI_ERR_INVALID_ARG;
-    }
-
-    /* Build and send message */
-    cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "chat_id", session_id);
-    cJSON_AddStringToObject(body, "text", content);
-    char *json = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (!json) return MIMI_ERR_NO_MEM;
-
-    char response[8192];
-    mimi_err_t err = tg_http_call("sendMessage", json, response, sizeof(response));
-    free(json);
-    
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to send message: %d", err);
-        return err;
-    }
-
-    return MIMI_OK;
-}
-
-/**
  * Check if Telegram Channel is running
  */
 static bool telegram_is_running_impl(channel_t *ch)
@@ -378,6 +344,40 @@ static void telegram_set_on_disconnect(channel_t *ch,
     (void)user_data;
 }
 
+static mimi_err_t telegram_channel_send_msg_impl(channel_t *ch, const mimi_msg_t *msg)
+{
+    (void)ch;
+
+    if (!s_priv.initialized || !s_priv.started) {
+        return MIMI_ERR_INVALID_STATE;
+    }
+
+    if (!msg || !msg->chat_id[0]) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    const char *content = msg->content ? msg->content : "";
+
+    /* Build and send message */
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "chat_id", msg->chat_id);
+    cJSON_AddStringToObject(body, "text", content);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) return MIMI_ERR_NO_MEM;
+
+    char response[8192];
+    mimi_err_t err = tg_http_call("sendMessage", json, response, sizeof(response));
+    free(json);
+    
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to send message: %d", err);
+        return err;
+    }
+
+    return MIMI_OK;
+}
+
 /**
  * Global Telegram Channel instance
  */
@@ -390,7 +390,7 @@ channel_t g_telegram_channel = {
     .start = telegram_channel_start_impl,
     .stop = telegram_channel_stop_impl,
     .destroy = telegram_channel_destroy_impl,
-    .send = telegram_channel_send_impl,
+    .send_msg = telegram_channel_send_msg_impl,
     .is_running = telegram_is_running_impl,
     .set_on_message = telegram_set_on_message,
     .set_on_connect = telegram_set_on_connect,

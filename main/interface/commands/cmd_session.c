@@ -9,6 +9,7 @@
 #include "commands/command.h"
 #include "fs/fs.h"
 #include "config/config.h"
+#include "config_view.h"
 #include "log.h"
 #include <string.h>
 #include <stdio.h>
@@ -39,8 +40,8 @@ static int session_list_execute(const char **args, int arg_count,
         }
     }
 
-    const mimi_config_t *cfg = mimi_config_get();
-    const char *base_dir = cfg->session_dir[0] ? cfg->session_dir : "sessions";
+    mimi_cfg_obj_t files = mimi_cfg_section("files");
+    const char *base_dir = mimi_cfg_get_str(files, "sessionDir", "sessions");
 
     mimi_dir_t *dir = NULL;
     mimi_err_t err = mimi_fs_opendir(base_dir, &dir);

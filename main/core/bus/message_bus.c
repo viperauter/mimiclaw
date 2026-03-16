@@ -1,5 +1,6 @@
 #include "message_bus.h"
 #include "config.h"
+#include "config_view.h"
 #include "log.h"
 #include "queue.h"
 #include <string.h>
@@ -11,8 +12,9 @@ static mimi_queue_t *s_outbound_queue;
 
 mimi_err_t message_bus_init(void)
 {
-    const mimi_config_t *cfg = mimi_config_get();
-    int qlen = (cfg->bus_queue_len > 0) ? cfg->bus_queue_len : 16;
+    mimi_cfg_obj_t internal = mimi_cfg_section("internal");
+    int qlen = mimi_cfg_get_int(internal, "busQueueLen", 16);
+    if (qlen <= 0) qlen = 16;
 
     if (mimi_queue_create(&s_inbound_queue, sizeof(mimi_msg_t), (size_t)qlen) != MIMI_OK ||
         mimi_queue_create(&s_outbound_queue, sizeof(mimi_msg_t), (size_t)qlen) != MIMI_OK) {

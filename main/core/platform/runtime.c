@@ -1,6 +1,7 @@
 #include "runtime.h"
 #include "os/os.h"
 #include "config.h"
+#include "config_view.h"
 #include "log.h"
 #include "event/event_bus.h"
 #include "event/event_dispatcher.h"
@@ -107,9 +108,10 @@ mimi_err_t mimi_runtime_init(void)
         MIMI_LOGD(TAG, "Runtime DNS server set to %s (from environment)", s_dns_url);
     } else {
         /* Use DNS server from config */
-        const mimi_config_t *config = mimi_config_get();
-        if (config && config->dns_server[0]) {
-            snprintf(s_dns_url, sizeof(s_dns_url), "udp://%s:53", config->dns_server);
+        mimi_cfg_obj_t network = mimi_cfg_section("network");
+        const char *dns_cfg = mimi_cfg_get_str(network, "dnsServer", "");
+        if (dns_cfg && dns_cfg[0]) {
+            snprintf(s_dns_url, sizeof(s_dns_url), "udp://%s:53", dns_cfg);
             s_mgr.dns4.url = s_dns_url;
             MIMI_LOGD(TAG, "Runtime DNS server set to %s (from config)", s_dns_url);
         } else {

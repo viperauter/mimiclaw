@@ -10,7 +10,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Options: "openssl" or "builtin"
 # Can be set via: -DTLS_BACKEND=builtin or by modifying this file
 if(NOT DEFINED TLS_BACKEND)
-    set(TLS_BACKEND "builtin")
+    set(TLS_BACKEND "openssl")
 endif()
 
 # OpenSSL is required only when using OpenSSL TLS backend
@@ -24,7 +24,7 @@ endif()
 # Options: "posix" or "freertos"
 # Can be set via: -DOS_BACKEND=freertos or by modifying this file
 if(NOT DEFINED OS_BACKEND)
-    set(OS_BACKEND "freertos")
+    set(OS_BACKEND "posix")
 endif()
 
 # Windows: static link pthread to avoid DLL dependency
@@ -69,6 +69,7 @@ set(APP_SRC
 
     # Core modules (moved to core/ directory)
     main/core/config/config.c
+    main/core/config/config_view.c
     main/core/config/workspace_bootstrap.c
     main/core/bus/message_bus.c
     main/core/platform/mimi_err.c
@@ -113,7 +114,7 @@ list(APPEND APP_SRC
     main/agent/agent_async_loop.c
     main/agent/tools/tool_call_context.c
 )
-message(STATUS "Using asynchronous agent loop (configurable via MIMI_MEM_PROFILE)")
+message(STATUS "Using asynchronous agent loop with MIMI_MEM_PROFILE=${MIMI_MEM_PROFILE}")
 
 list(APPEND APP_SRC
     # Memory management
@@ -125,18 +126,23 @@ list(APPEND APP_SRC
 
     # Services (moved to services/ directory)
     main/services/llm/llm_proxy.c
+    main/services/llm/llm_trace.c
     main/services/cron/cron_service.c
     main/services/heartbeat/heartbeat.c
     main/services/proxy/http_proxy.c
 
-    # Agent modules (including control and tools)
+    # Agent modules (including control, subagents, and tools)
     main/agent/context_builder.c
+    main/agent/subagent/subagent_config.c
+    main/agent/subagent/subagent_runtime.c
     main/agent/control/control_manager.c
     main/agent/tools/tool_registry.c
     main/agent/tools/tool_files.c
     main/agent/tools/tool_cron.c
     main/agent/tools/tool_web_search.c
     main/agent/tools/tool_get_time.c
+    main/agent/tools/tool_bash.c
+    main/agent/tools/tool_subagent.c
 
     # Interface modules (moved to interface/ directory)
     main/interface/cli/editor.c
@@ -164,6 +170,10 @@ list(APPEND APP_SRC
     main/channels/telegram/telegram_channel.c
     main/channels/ws_service/ws_service_channel.c
     main/channels/feishu/feishu_channel.c
+    main/channels/feishu/feishu_startup.c
+    main/channels/feishu/feishu_cards.c
+    main/channels/feishu/feishu_card_model.c
+    main/channels/feishu/feishu_ws.c
     main/channels/feishu/feishu_media.c
     main/channels/qq/qq_channel.c
 )

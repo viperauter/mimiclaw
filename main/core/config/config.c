@@ -3,10 +3,12 @@
  */
 
 #include "config.h"
+#include "config_internal.h"
 #include "log.h"
 #include "cJSON.h"
 #include "fs/fs.h"
 #include "path_utils.h"
+#include "mimi_config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,30 @@ static const char *TAG = "config";
 
 static mimi_config_t s_config;
 static bool s_loaded;
+static cJSON *s_json_root; /* merged raw config JSON (source of truth for extensible sections) */
+
+static mimi_err_t write_text_file_vfs(const char *path, const char *data, size_t len)
+{
+    if (!path || path[0] == '\0' || (!data && len != 0)) return MIMI_ERR_INVALID_ARG;
+    mimi_file_t *f = NULL;
+    mimi_err_t err = mimi_fs_open(path, "w", &f);
+    if (err != MIMI_OK) return err;
+
+    size_t written = 0;
+    if (len > 0) {
+        err = mimi_fs_write(f, data, len, &written);
+        if (err != MIMI_OK || written != len) {
+            (void)mimi_fs_close(f);
+            return (err != MIMI_OK) ? err : MIMI_ERR_IO;
+        }
+    }
+
+    return mimi_fs_close(f);
+}
+
+/* Bump when the config JSON schema changes.
+ * Loader will auto-merge missing keys and write back merged config. */
+#define MIMI_CONFIG_SCHEMA_VERSION 1
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
 {
@@ -136,6 +162,15 @@ static void apply_defaults(void)
     
     /* Logging */
     safe_strcpy(s_config.log_level, sizeof(s_config.log_level), "info");
+
+    /* Tracing (disabled by default) */
+    s_config.llm_trace_enabled = false;
+    safe_strcpy(s_config.llm_trace_dir, sizeof(s_config.llm_trace_dir), "traces");
+    s_config.llm_trace_max_file_bytes = 10 * 1024 * 1024; /* 10MB */
+    s_config.llm_trace_max_field_bytes = 16 * 1024;       /* 16KB per field */
+
+    /* Subagents: none by default */
+    s_config.subagent_count = 0;
 }
 
 /* Copy string from cJSON; only if value is non-empty or allow_empty. */
@@ -157,13 +192,304 @@ static void parse_allow_from(cJSON *arr, char *buf, size_t buf_size)
     if (s) safe_strcpy(buf, buf_size, s);
 }
 
+static int json_get_int(const cJSON *obj, const char *key, int fallback)
+{
+    if (!obj || !cJSON_IsObject(obj) || !key) return fallback;
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive((cJSON *)obj, key);
+    if (v && cJSON_IsNumber(v)) return (int)v->valuedouble;
+    return fallback;
+}
+
+static int config_get_schema_version(const cJSON *root)
+{
+    int v = json_get_int(root, "schemaVersion", 0);
+    if (v <= 0) v = json_get_int(root, "configVersion", 0);
+    return v;
+}
+
+static bool json_any_missing_expected(const cJSON *expected, const cJSON *have)
+{
+    if (!expected) return false;
+
+    if (cJSON_IsObject(expected)) {
+        if (!have || !cJSON_IsObject(have)) return true;
+        for (const cJSON *child = expected->child; child; child = child->next) {
+            if (!child->string || child->string[0] == '\0') continue;
+            const cJSON *h = cJSON_GetObjectItemCaseSensitive((cJSON *)have, child->string);
+            if (!h) return true;
+            if (json_any_missing_expected(child, h)) return true;
+        }
+        return false;
+    }
+
+    if (cJSON_IsArray(expected)) {
+        return !(have && cJSON_IsArray(have));
+    }
+
+    return false;
+}
+
+static void json_merge_object_into(cJSON *dst_obj, const cJSON *src_obj)
+{
+    if (!dst_obj || !cJSON_IsObject(dst_obj) || !src_obj || !cJSON_IsObject(src_obj)) return;
+
+    for (const cJSON *src_child = src_obj->child; src_child; src_child = src_child->next) {
+        if (!src_child->string || src_child->string[0] == '\0') continue;
+
+        cJSON *dst_child = cJSON_GetObjectItemCaseSensitive(dst_obj, src_child->string);
+        if (!dst_child) {
+            cJSON *dup = cJSON_Duplicate((cJSON *)src_child, 1);
+            if (dup) cJSON_AddItemToObject(dst_obj, src_child->string, dup);
+            continue;
+        }
+
+        if (cJSON_IsObject(dst_child) && cJSON_IsObject(src_child)) {
+            json_merge_object_into(dst_child, src_child);
+            continue;
+        }
+
+        cJSON *dup = cJSON_Duplicate((cJSON *)src_child, 1);
+        if (dup) cJSON_ReplaceItemInObjectCaseSensitive(dst_obj, src_child->string, dup);
+    }
+}
+
+static cJSON *config_build_json_full_from_config(const mimi_config_t *cfg, int schema_version)
+{
+    if (!cfg) return NULL;
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return NULL;
+
+    cJSON_AddNumberToObject(root, "schemaVersion", schema_version);
+
+    cJSON *providers = cJSON_CreateObject();
+    if (providers) {
+        cJSON *prov = cJSON_CreateObject();
+        if (prov) {
+            cJSON_AddStringToObject(prov, "apiKey", cfg->api_key);
+            cJSON_AddStringToObject(prov, "apiBase", cfg->api_base);
+            cJSON_AddItemToObject(providers, cfg->provider[0] ? cfg->provider : "anthropic", prov);
+        }
+        cJSON_AddItemToObject(root, "providers", providers);
+    }
+
+    cJSON *agents = cJSON_CreateObject();
+    cJSON *defaults = cJSON_CreateObject();
+    if (agents && defaults) {
+        cJSON_AddStringToObject(defaults, "workspace", cfg->workspace);
+        cJSON_AddStringToObject(defaults, "timezone", cfg->timezone);
+        cJSON_AddStringToObject(defaults, "model", cfg->model);
+        cJSON_AddStringToObject(defaults, "provider", cfg->provider);
+        cJSON_AddStringToObject(defaults, "apiProtocol", cfg->api_protocol);
+        cJSON_AddNumberToObject(defaults, "maxTokens", cfg->max_tokens);
+        cJSON_AddNumberToObject(defaults, "temperature", cfg->temperature);
+        cJSON_AddNumberToObject(defaults, "maxToolIterations", cfg->max_tool_iterations);
+        cJSON_AddNumberToObject(defaults, "memoryWindow", cfg->memory_window);
+        cJSON_AddStringToObject(defaults, "apiUrl", cfg->api_url);
+        cJSON_AddBoolToObject(defaults, "sendWorkingStatus", cfg->send_working_status);
+        cJSON_AddItemToObject(agents, "defaults", defaults);
+        cJSON_AddItemToObject(root, "agents", agents);
+    }
+
+    cJSON *channels = cJSON_CreateObject();
+    if (channels) {
+        cJSON *tg = cJSON_CreateObject();
+        if (tg) {
+            cJSON_AddBoolToObject(tg, "enabled", cfg->telegram_enabled);
+            cJSON_AddStringToObject(tg, "token", cfg->telegram_token);
+            cJSON *arr = cJSON_CreateArray();
+            if (arr) {
+                if (cfg->telegram_allow_from[0]) {
+                    cJSON_AddItemToArray(arr, cJSON_CreateString(cfg->telegram_allow_from));
+                }
+                cJSON_AddItemToObject(tg, "allowFrom", arr);
+            }
+            cJSON_AddItemToObject(channels, "telegram", tg);
+        }
+
+        cJSON *feishu = cJSON_CreateObject();
+        if (feishu) {
+            cJSON_AddBoolToObject(feishu, "enabled", cfg->feishu_enabled);
+            cJSON_AddStringToObject(feishu, "appId", cfg->feishu_app_id);
+            cJSON_AddStringToObject(feishu, "appSecret", cfg->feishu_app_secret);
+            cJSON_AddItemToObject(channels, "feishu", feishu);
+        }
+
+        cJSON *qq = cJSON_CreateObject();
+        if (qq) {
+            cJSON_AddBoolToObject(qq, "enabled", cfg->qq_enabled);
+            cJSON_AddStringToObject(qq, "appId", cfg->qq_app_id);
+            cJSON_AddStringToObject(qq, "secret", cfg->qq_token);
+            cJSON_AddItemToObject(channels, "qq", qq);
+        }
+
+        cJSON_AddItemToObject(root, "channels", channels);
+    }
+
+    cJSON *proxy = cJSON_CreateObject();
+    if (proxy) {
+        cJSON_AddStringToObject(proxy, "host", cfg->proxy_host);
+        cJSON_AddStringToObject(proxy, "port", cfg->proxy_port);
+        cJSON_AddStringToObject(proxy, "type", cfg->proxy_type);
+        cJSON_AddItemToObject(root, "proxy", proxy);
+    }
+
+    cJSON *tools = cJSON_CreateObject();
+    cJSON *search = cJSON_CreateObject();
+    if (tools && search) {
+        cJSON_AddStringToObject(search, "apiKey", cfg->search_api_key);
+        cJSON_AddItemToObject(tools, "search", search);
+        cJSON_AddItemToObject(root, "tools", tools);
+    }
+
+    cJSON *logging = cJSON_CreateObject();
+    if (logging) {
+        cJSON_AddStringToObject(logging, "level", cfg->log_level);
+        cJSON_AddItemToObject(root, "logging", logging);
+    }
+
+    cJSON *tracing = cJSON_CreateObject();
+    if (tracing) {
+        cJSON_AddBoolToObject(tracing, "enabled", cfg->llm_trace_enabled);
+        cJSON_AddStringToObject(tracing, "dir", cfg->llm_trace_dir);
+        cJSON_AddNumberToObject(tracing, "maxFileBytes", cfg->llm_trace_max_file_bytes);
+        cJSON_AddNumberToObject(tracing, "maxFieldBytes", cfg->llm_trace_max_field_bytes);
+        cJSON_AddItemToObject(root, "tracing", tracing);
+    }
+
+    cJSON *network = cJSON_CreateObject();
+    if (network) {
+        cJSON_AddStringToObject(network, "dnsServer", cfg->dns_server);
+        cJSON_AddItemToObject(root, "network", network);
+    }
+
+    /* Internal tunables (kept in JSON so config_view can be the single access layer). */
+    cJSON *internal = cJSON_CreateObject();
+    if (internal) {
+        cJSON_AddNumberToObject(internal, "busQueueLen", cfg->bus_queue_len);
+        cJSON_AddNumberToObject(internal, "wsPort", cfg->ws_port);
+        cJSON_AddNumberToObject(internal, "heartbeatIntervalMs", cfg->heartbeat_interval_ms);
+        cJSON_AddNumberToObject(internal, "cronCheckIntervalMs", cfg->cron_check_interval_ms);
+        cJSON_AddItemToObject(root, "internal", internal);
+    }
+
+    /* Workspace files/dirs (also kept in JSON for unified access). */
+    cJSON *files = cJSON_CreateObject();
+    if (files) {
+        cJSON_AddStringToObject(files, "heartbeatFile", cfg->heartbeat_file);
+        cJSON_AddStringToObject(files, "cronFile", cfg->cron_file);
+        cJSON_AddStringToObject(files, "memoryFile", cfg->memory_file);
+        cJSON_AddStringToObject(files, "soulFile", cfg->soul_file);
+        cJSON_AddStringToObject(files, "userFile", cfg->user_file);
+        cJSON_AddStringToObject(files, "skillsPrefix", cfg->skills_prefix);
+        cJSON_AddStringToObject(files, "sessionDir", cfg->session_dir);
+        cJSON_AddItemToObject(root, "files", files);
+    }
+
+    return root;
+}
+
+static void config_inject_default_subagents(cJSON *root)
+{
+#if !MIMI_ENABLE_SUBAGENT
+    (void)root;
+    return;
+#else
+    if (!root || !cJSON_IsObject(root)) return;
+
+    cJSON *agents = cJSON_GetObjectItem(root, "agents");
+    if (!agents || !cJSON_IsObject(agents)) {
+        agents = cJSON_CreateObject();
+        if (!agents) return;
+        cJSON_AddItemToObject(root, "agents", agents);
+    }
+
+    /* Ensure agents.defaults exists and set runtime enable flag (default true). */
+    cJSON *defaults = cJSON_GetObjectItem(agents, "defaults");
+    if (!defaults || !cJSON_IsObject(defaults)) {
+        defaults = cJSON_CreateObject();
+        if (!defaults) return;
+        cJSON_AddItemToObject(agents, "defaults", defaults);
+    }
+    if (!cJSON_GetObjectItem(defaults, "subagentsEnabled")) {
+        cJSON_AddBoolToObject(defaults, "subagentsEnabled", true);
+    }
+
+    /* Only inject if agents.subagents is missing or empty. */
+    cJSON *subagents = cJSON_GetObjectItem(agents, "subagents");
+    if (subagents && cJSON_IsArray(subagents) && cJSON_GetArraySize(subagents) > 0) {
+        return;
+    }
+    if (subagents && !cJSON_IsArray(subagents)) {
+        /* If user has a non-array type here, don't clobber it. */
+        return;
+    }
+    if (!subagents) {
+        subagents = cJSON_CreateArray();
+        if (!subagents) return;
+        cJSON_AddItemToObject(agents, "subagents", subagents);
+    }
+
+    /* planner */
+    cJSON *planner = cJSON_CreateObject();
+    if (planner) {
+        cJSON_AddStringToObject(planner, "name", "planner");
+        cJSON_AddStringToObject(planner, "role", "planner");
+        cJSON_AddStringToObject(planner, "type", "inproc");
+        cJSON_AddStringToObject(planner, "systemPromptFile", "agents/planner/SYSTEM.md");
+        cJSON *tools = cJSON_CreateArray();
+        if (tools) {
+            cJSON_AddItemToArray(tools, cJSON_CreateString("read_file"));
+            cJSON_AddItemToArray(tools, cJSON_CreateString("list_dir"));
+            cJSON_AddItemToObject(planner, "tools", tools);
+        }
+        cJSON_AddNumberToObject(planner, "maxIters", 10);
+        cJSON_AddNumberToObject(planner, "timeoutSec", 300);
+        cJSON_AddItemToArray(subagents, planner);
+    }
+
+    /* coder (executor) */
+    cJSON *coder = cJSON_CreateObject();
+    if (coder) {
+        cJSON_AddStringToObject(coder, "name", "coder");
+        cJSON_AddStringToObject(coder, "role", "coder");
+        cJSON_AddStringToObject(coder, "type", "inproc");
+        cJSON_AddStringToObject(coder, "systemPromptFile", "agents/coder/SYSTEM.md");
+        cJSON *tools = cJSON_CreateArray();
+        if (tools) {
+            cJSON_AddItemToArray(tools, cJSON_CreateString("read_file"));
+            cJSON_AddItemToArray(tools, cJSON_CreateString("write_file"));
+            cJSON_AddItemToArray(tools, cJSON_CreateString("bash"));
+            cJSON_AddItemToObject(coder, "tools", tools);
+        }
+        cJSON_AddNumberToObject(coder, "maxIters", 20);
+        cJSON_AddNumberToObject(coder, "timeoutSec", 600);
+        cJSON_AddItemToArray(subagents, coder);
+    }
+#endif
+}
+
+/* Internal raw JSON root getter for config_view.c.
+ * Not exposed publicly: keep JSON out of most modules. */
+const cJSON *mimi_config_json_root_internal(void)
+{
+    return s_json_root;
+}
+
 mimi_err_t mimi_config_load(const char *path)
 {
     apply_defaults();
     s_loaded = true;
 
+    /* Reset raw JSON root; will be repopulated below. */
+    if (s_json_root) {
+        cJSON_Delete(s_json_root);
+        s_json_root = NULL;
+    }
+
     if (!path || path[0] == '\0') {
         MIMI_LOGI(TAG, "No config path; using defaults");
+        s_json_root = config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
         return MIMI_OK;
     }
 
@@ -174,6 +500,7 @@ mimi_err_t mimi_config_load(const char *path)
     if (ferr != MIMI_OK) {
         if (ferr == MIMI_ERR_NOT_FOUND) {
             MIMI_LOGI(TAG, "Config file not found: %s (using defaults)", path);
+            s_json_root = config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
             return MIMI_OK;
         }
         MIMI_LOGE(TAG, "Cannot open config: %s", path);
@@ -205,9 +532,31 @@ mimi_err_t mimi_config_load(const char *path)
     if (!root || !cJSON_IsObject(root)) {
         if (root) cJSON_Delete(root);
         MIMI_LOGW(TAG, "Invalid JSON in %s; using defaults", path);
+        s_json_root = config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
         return MIMI_OK;
     }
     MIMI_LOGD(TAG, "Config JSON parsed successfully");
+
+    /* Schema/versioned merge:
+     * - Build a full "current schema" JSON from defaults
+     * - Deep-merge user's file over it (user values win)
+     * - If user's file is missing keys or schemaVersion is old/missing, write back merged result */
+    cJSON *file_root = root;
+    int file_ver = config_get_schema_version(file_root);
+    cJSON *merged_root = config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
+    bool should_write_back = false;
+    if (merged_root && cJSON_IsObject(merged_root)) {
+        bool missing_keys = json_any_missing_expected(merged_root, file_root);
+        bool version_mismatch = (file_ver != MIMI_CONFIG_SCHEMA_VERSION);
+        should_write_back = missing_keys || version_mismatch;
+        json_merge_object_into(merged_root, file_root);
+        root = merged_root;
+    } else {
+        merged_root = NULL;
+    }
+
+    /* Persist merged raw JSON for extensible sections (providers/tools/channels/plugins). */
+    s_json_root = cJSON_Duplicate(root, 1);
 
     /* agents.defaults (nanobot-style) */
     cJSON *agents = cJSON_GetObjectItem(root, "agents");
@@ -243,6 +592,69 @@ mimi_err_t mimi_config_load(const char *path)
     char normalized_workspace[512];
     if (mimi_path_normalize(s_config.workspace, normalized_workspace, sizeof(normalized_workspace)) == 0) {
         safe_strcpy(s_config.workspace, sizeof(s_config.workspace), normalized_workspace);
+    }
+
+    /* agents.subagents: load static subagent configs (inproc/future fork/tcp) */
+    s_config.subagent_count = 0;
+    if (agents && cJSON_IsObject(agents)) {
+        cJSON *subagents = cJSON_GetObjectItem(agents, "subagents");
+        if (cJSON_IsArray(subagents)) {
+            int count = cJSON_GetArraySize(subagents);
+            for (int i = 0; i < count && s_config.subagent_count < (int)(sizeof(s_config.subagents) / sizeof(s_config.subagents[0])); i++) {
+                cJSON *sa = cJSON_GetArrayItem(subagents, i);
+                if (!cJSON_IsObject(sa)) continue;
+
+                mimi_subagent_config_t *dst = &s_config.subagents[s_config.subagent_count];
+                memset(dst, 0, sizeof(*dst));
+
+                json_str_to_buf(cJSON_GetObjectItem(sa, "name"), dst->name, sizeof(dst->name), false);
+                json_str_to_buf(cJSON_GetObjectItem(sa, "role"), dst->role, sizeof(dst->role), true);
+                json_str_to_buf(cJSON_GetObjectItem(sa, "type"), dst->type, sizeof(dst->type), true);
+                json_str_to_buf(cJSON_GetObjectItem(sa, "systemPromptFile"),
+                                dst->system_prompt_file, sizeof(dst->system_prompt_file), true);
+
+                /* tools: JSON array -> comma-separated list for now */
+                cJSON *tools_arr = cJSON_GetObjectItem(sa, "tools");
+                if (cJSON_IsArray(tools_arr)) {
+                    size_t off = 0;
+                    dst->tools[0] = '\0';
+                    int tcount = cJSON_GetArraySize(tools_arr);
+                    for (int ti = 0; ti < tcount; ti++) {
+                        cJSON *t = cJSON_GetArrayItem(tools_arr, ti);
+                        const char *name = cJSON_GetStringValue(t);
+                        if (!name || !name[0]) continue;
+                        size_t name_len = strnlen(name, sizeof(dst->tools) - 1);
+                        if (off + name_len + 1 >= sizeof(dst->tools)) break;
+                        if (off > 0) {
+                            dst->tools[off++] = ',';
+                        }
+                        memcpy(dst->tools + off, name, name_len);
+                        off += name_len;
+                        dst->tools[off] = '\0';
+                    }
+                }
+
+                cJSON *mi = cJSON_GetObjectItem(sa, "maxIters");
+                if (mi && cJSON_IsNumber(mi) && mi->valuedouble > 0) {
+                    dst->max_iters = (int)mi->valuedouble;
+                }
+
+                cJSON *to = cJSON_GetObjectItem(sa, "timeoutSec");
+                if (to && cJSON_IsNumber(to) && to->valuedouble > 0) {
+                    dst->timeout_sec = (int)to->valuedouble;
+                }
+
+                /* Defaults for missing fields */
+                if (dst->type[0] == '\0') {
+                    safe_strcpy(dst->type, sizeof(dst->type), "inproc");
+                }
+                if (dst->max_iters <= 0) {
+                    dst->max_iters = s_config.max_tool_iterations;
+                }
+
+                s_config.subagent_count++;
+            }
+        }
     }
 
     /* providers.* — pick apiKey/apiBase by provider name */
@@ -333,165 +745,91 @@ mimi_err_t mimi_config_load(const char *path)
     cJSON *logging = cJSON_GetObjectItem(root, "logging");
     if (cJSON_IsObject(logging))
         json_str_to_buf(cJSON_GetObjectItem(logging, "level"), s_config.log_level, sizeof(s_config.log_level), true);
+
+    /* tracing */
+    cJSON *tracing = cJSON_GetObjectItem(root, "tracing");
+    if (cJSON_IsObject(tracing)) {
+        cJSON *en = cJSON_GetObjectItem(tracing, "enabled");
+        if (en && (cJSON_IsBool(en) || cJSON_IsNumber(en))) {
+            s_config.llm_trace_enabled = cJSON_IsTrue(en) || (cJSON_IsNumber(en) && en->valueint != 0);
+        }
+        json_str_to_buf(cJSON_GetObjectItem(tracing, "dir"), s_config.llm_trace_dir, sizeof(s_config.llm_trace_dir), true);
+        cJSON *mfb = cJSON_GetObjectItem(tracing, "maxFileBytes");
+        if (mfb && cJSON_IsNumber(mfb) && mfb->valuedouble >= 0) {
+            s_config.llm_trace_max_file_bytes = (int)mfb->valuedouble;
+        }
+        cJSON *mfd = cJSON_GetObjectItem(tracing, "maxFieldBytes");
+        if (mfd && cJSON_IsNumber(mfd) && mfd->valuedouble >= 0) {
+            s_config.llm_trace_max_field_bytes = (int)mfd->valuedouble;
+        }
+    }
     
     /* network */
     cJSON *network = cJSON_GetObjectItem(root, "network");
     if (cJSON_IsObject(network))
         json_str_to_buf(cJSON_GetObjectItem(network, "dnsServer"), s_config.dns_server, sizeof(s_config.dns_server), true);
 
-    cJSON_Delete(root);
+    if (should_write_back) {
+        if (file_ver > MIMI_CONFIG_SCHEMA_VERSION) {
+            MIMI_LOGW(TAG, "Config schemaVersion=%d is newer than supported=%d; writing may drop unknown fields",
+                      file_ver, MIMI_CONFIG_SCHEMA_VERSION);
+        }
+        char *json_str = cJSON_Print(root);
+        if (json_str) {
+            mimi_err_t werr = write_text_file_vfs(path, json_str, strlen(json_str));
+            if (werr == MIMI_OK) {
+                MIMI_LOGI(TAG, "Merged config written back to %s (schemaVersion %d -> %d)",
+                          path, file_ver, MIMI_CONFIG_SCHEMA_VERSION);
+            } else {
+                MIMI_LOGW(TAG, "Failed to write merged config to %s: %s", path, mimi_err_to_name(werr));
+            }
+            free(json_str);
+        }
+    }
+
+    if (merged_root) cJSON_Delete(merged_root);
+    cJSON_Delete(file_root);
     MIMI_LOGD(TAG, "Loaded config from %s (workspace=%s provider=%s model=%s)",
               path, s_config.workspace, s_config.provider, s_config.model);
     return MIMI_OK;
-}
-
-const mimi_config_t *mimi_config_get(void)
-{
-    if (!s_loaded)
-        apply_defaults();
-    return &s_config;
 }
 
 mimi_err_t mimi_config_save(const char *path)
 {
     if (!path || path[0] == '\0') return MIMI_ERR_INVALID_ARG;
 
-    cJSON *root = cJSON_CreateObject();
+    /* Prefer saving the raw merged JSON root so unknown/plugin fields aren't lost. */
+    cJSON *root = s_json_root ? cJSON_Duplicate(s_json_root, 1)
+                              : config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
     if (!root) return MIMI_ERR_NO_MEM;
 
-    cJSON *providers = cJSON_CreateObject();
-    if (providers) {
-        cJSON *prov = cJSON_CreateObject();
-        if (prov) {
-            cJSON_AddStringToObject(prov, "apiKey", s_config.api_key);
-            if (s_config.api_base[0]) cJSON_AddStringToObject(prov, "apiBase", s_config.api_base);
-            cJSON_AddItemToObject(providers, s_config.provider[0] ? s_config.provider : "anthropic", prov);
-        }
-        cJSON_AddItemToObject(root, "providers", providers);
-    }
+    char *json_str = cJSON_Print(root);
+    cJSON_Delete(root);
+    if (!json_str) return MIMI_ERR_NO_MEM;
 
-    cJSON *agents = cJSON_CreateObject();
-    cJSON *defaults = cJSON_CreateObject();
-    if (agents && defaults) {
-        cJSON_AddStringToObject(defaults, "workspace", s_config.workspace);
-        cJSON_AddStringToObject(defaults, "timezone", s_config.timezone);
-        cJSON_AddStringToObject(defaults, "model", s_config.model);
-        cJSON_AddStringToObject(defaults, "provider", s_config.provider);
-        if (s_config.api_protocol[0]) {
-            cJSON_AddStringToObject(defaults, "apiProtocol", s_config.api_protocol);
-        }
-        cJSON_AddNumberToObject(defaults, "maxTokens", s_config.max_tokens);
-        cJSON_AddNumberToObject(defaults, "temperature", s_config.temperature);
-        cJSON_AddNumberToObject(defaults, "maxToolIterations", s_config.max_tool_iterations);
-        cJSON_AddNumberToObject(defaults, "memoryWindow", s_config.memory_window);
-        if (s_config.api_url[0]) cJSON_AddStringToObject(defaults, "apiUrl", s_config.api_url);
-        cJSON_AddBoolToObject(defaults, "sendWorkingStatus", s_config.send_working_status);
-        cJSON_AddItemToObject(agents, "defaults", defaults);
-        cJSON_AddItemToObject(root, "agents", agents);
-    }
+    mimi_err_t err = write_text_file_vfs(path, json_str, strlen(json_str));
+    free(json_str);
+    return err;
+}
 
-    cJSON *channels = cJSON_CreateObject();
-    if (channels) {
-        /* telegram */
-        cJSON *tg = cJSON_CreateObject();
-        if (tg) {
-            cJSON_AddBoolToObject(tg, "enabled", s_config.telegram_enabled);
-            cJSON_AddStringToObject(tg, "token", s_config.telegram_token);
-            if (s_config.telegram_allow_from[0]) {
-                cJSON *arr = cJSON_CreateArray();
-                if (arr) {
-                    cJSON_AddItemToArray(arr, cJSON_CreateString(s_config.telegram_allow_from));
-                    cJSON_AddItemToObject(tg, "allowFrom", arr);
-                }
-            }
-            cJSON_AddItemToObject(channels, "telegram", tg);
-        }
+mimi_err_t mimi_config_save_starter(const char *path, bool with_default_subagents)
+{
+    if (!path || path[0] == '\0') return MIMI_ERR_INVALID_ARG;
 
-        /* feishu */
-        cJSON *feishu = cJSON_CreateObject();
-        if (feishu) {
-            cJSON_AddBoolToObject(feishu, "enabled", s_config.feishu_enabled);
-            cJSON_AddStringToObject(feishu, "appId", s_config.feishu_app_id);
-            cJSON_AddStringToObject(feishu, "appSecret", s_config.feishu_app_secret);
-            cJSON_AddItemToObject(channels, "feishu", feishu);
-        }
+    /* Prefer saving the raw merged JSON root so unknown/plugin fields aren't lost. */
+    cJSON *root = s_json_root ? cJSON_Duplicate(s_json_root, 1)
+                              : config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
+    if (!root) return MIMI_ERR_NO_MEM;
 
-        /* qq */
-        cJSON *qq = cJSON_CreateObject();
-        if (qq) {
-            cJSON_AddBoolToObject(qq, "enabled", s_config.qq_enabled);
-            cJSON_AddStringToObject(qq, "appId", s_config.qq_app_id);
-            cJSON_AddStringToObject(qq, "secret", s_config.qq_token);
-            cJSON_AddItemToObject(channels, "qq", qq);
-        }
-
-        cJSON_AddItemToObject(root, "channels", channels);
-    }
-
-    cJSON *proxy = cJSON_CreateObject();
-    if (proxy) {
-        cJSON_AddStringToObject(proxy, "host", s_config.proxy_host);
-        cJSON_AddStringToObject(proxy, "port", s_config.proxy_port);
-        cJSON_AddStringToObject(proxy, "type", s_config.proxy_type);
-        cJSON_AddItemToObject(root, "proxy", proxy);
-    }
-
-    cJSON *tools = cJSON_CreateObject();
-    cJSON *search = cJSON_CreateObject();
-    if (tools && search) {
-        cJSON_AddStringToObject(search, "apiKey", s_config.search_api_key);
-        cJSON_AddItemToObject(tools, "search", search);
-        cJSON_AddItemToObject(root, "tools", tools);
-    }
-    
-    /* logging */
-    cJSON *logging = cJSON_CreateObject();
-    if (logging) {
-        cJSON_AddStringToObject(logging, "level", s_config.log_level);
-        cJSON_AddItemToObject(root, "logging", logging);
-    }
-    
-    /* network */
-    if (s_config.dns_server[0]) {
-        cJSON *network = cJSON_CreateObject();
-        if (network) {
-            cJSON_AddStringToObject(network, "dnsServer", s_config.dns_server);
-            cJSON_AddItemToObject(root, "network", network);
-        }
+    if (with_default_subagents) {
+        config_inject_default_subagents(root);
     }
 
     char *json_str = cJSON_Print(root);
     cJSON_Delete(root);
     if (!json_str) return MIMI_ERR_NO_MEM;
 
-    /* Use standard POSIX file operations for absolute paths outside VFS */
-#ifdef _WIN32
-    /* Convert UTF-8 path to wide string for Windows */
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-    if (wlen <= 0) {
-        free(json_str);
-        return MIMI_ERR_IO;
-    }
-    wchar_t *wpath = (wchar_t *)malloc(wlen * sizeof(wchar_t));
-    if (!wpath) {
-        free(json_str);
-        return MIMI_ERR_NO_MEM;
-    }
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
-    
-    FILE *fp = _wfopen(wpath, L"w");
-    free(wpath);
-#else
-    FILE *fp = fopen(path, "w");
-#endif
-    
-    if (!fp) {
-        free(json_str);
-        return MIMI_ERR_IO;
-    }
-    size_t len = strlen(json_str);
-    size_t written = fwrite(json_str, 1, len, fp);
-    fclose(fp);
+    mimi_err_t err = write_text_file_vfs(path, json_str, strlen(json_str));
     free(json_str);
-    return (written == len) ? MIMI_OK : MIMI_ERR_IO;
+    return err;
 }

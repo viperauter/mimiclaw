@@ -88,14 +88,14 @@ struct channel {
     /* Message sending and receiving */
     
     /**
-     * Send message to client
+     * Extended send API with full bus message context.
+     * Channels that care about message type, status_phase, etc. can implement
+     * this; otherwise they can leave it NULL and the dispatcher will skip.
      * @param ch Channel object
-     * @param session_id Session ID
-     * @param content Message content
+     * @param msg Full message from the bus
      * @return MIMI_OK on success, error code otherwise
      */
-    mimi_err_t (*send)(channel_t *ch, const char *session_id, 
-                       const char *content);
+    mimi_err_t (*send_msg)(channel_t *ch, const mimi_msg_t *msg);
     
     /**
      * Check if channel is running
@@ -224,13 +224,10 @@ void channel_stop_all(void);
 
 /**
  * Send message through channel
- * @param channel_name Channel name
- * @param session_id Session ID
- * @param content Message content
+ * @param msg Message to send
  * @return MIMI_OK on success, error code otherwise
  */
-mimi_err_t channel_send(const char *channel_name, const char *session_id, 
-                        const char *content);
+mimi_err_t channel_send(const mimi_msg_t *msg);
 
 /**
  * Get number of registered channels
