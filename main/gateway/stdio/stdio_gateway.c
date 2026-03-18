@@ -12,6 +12,10 @@
 #include "os/os.h"
 #include "runtime.h"
 
+#if defined(MIMICLAW_ENABLE_LOWDOWN)
+#include "lowdown_render.h"
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -34,6 +38,12 @@ typedef struct {
     bool initialized;
     bool started;
     app_terminal_t *terminal;
+
+#if defined(MIMICLAW_ENABLE_LOWDOWN)
+    bool lowdown_enabled;
+    int lowdown_width;
+    bool lowdown_ansi;
+#endif
 
 #ifdef _WIN32
     DWORD old_mode;
@@ -224,12 +234,43 @@ static mimi_err_t stdio_terminal_init(stdio_gateway_priv_t *priv)
 
 static mimi_err_t stdio_gateway_init_impl(gateway_t *gw, const gateway_config_t *cfg)
 {
-    (void)cfg;
-
     if (s_priv.initialized) {
         MIMI_LOGW(TAG, "STDIO Gateway already initialized");
         return MIMI_OK;
     }
+
+#if defined(MIMICLAW_ENABLE_LOWDOWN)
+    s_priv.lowdown_enabled = false;
+    s_priv.lowdown_width = 80;
+    s_priv.lowdown_ansi = true;
+
+    if (cfg) {
+        s_priv.lowdown_enabled = cfg->config.stdio.lowdown_enabled;
+        s_priv.lowdown_width = cfg->config.stdio.lowdown_width;
+        s_priv.lowdown_ansi = cfg->config.stdio.lowdown_ansi;
+    }
+
+    if (s_priv.lowdown_enabled) {
+        lowdown_config_t ld_config = {
+            .enabled = true,
+            .terminal_width = s_priv.lowdown_width,
+            .use_ansi = s_priv.lowdown_ansi,
+            .escape_special = false,
+            .features = 0,
+            .output_flags = 0
+        };
+        int ret = lowdown_render_init(&ld_config);
+        if (ret == 0) {
+            MIMI_LOGI(TAG, "Lowdown rendering enabled (width=%d, ansi=%d)",
+                      s_priv.lowdown_width, s_priv.lowdown_ansi);
+        } else {
+            MIMI_LOGW(TAG, "Failed to init lowdown, falling back to plain text");
+            s_priv.lowdown_enabled = false;
+        }
+    }
+#else
+    (void)cfg;
+#endif
 
     /* Initialize terminal settings */
     mimi_err_t err = stdio_terminal_init(&s_priv);
@@ -331,6 +372,13 @@ static void stdio_gateway_destroy_impl(gateway_t *gw)
 {
     (void)gw;
     stdio_gateway_stop_impl(gw);
+
+#if defined(MIMICLAW_ENABLE_LOWDOWN)
+    if (s_priv.lowdown_enabled) {
+        lowdown_render_free();
+    }
+#endif
+
     memset(&s_priv, 0, sizeof(s_priv));
     MIMI_LOGI(TAG, "STDIO Gateway destroyed");
 }
@@ -349,14 +397,34 @@ static mimi_err_t stdio_gateway_send_impl(gateway_t *gw, const char *session_id,
         return MIMI_ERR_INVALID_ARG;
     }
 
-    size_t len = strlen(content);
-    if (len > 0 && content[len - 1] == '\n') {
+#if defined(MIMICLAW_ENABLE_LOWDOWN)
+    if (s_priv.lowdown_enabled && lowdown_is_markdown(content)) {
+        char rendered[8192];
+        int rlen = lowdown_render(content, rendered, sizeof(rendered));
+        if (rlen > 0) {
+            app_terminal_output(s_priv.terminal, rendered);
+        } else {
+            if (strlen(content) > 0 && content[strlen(content) - 1] == '\n') {
+                app_terminal_output(s_priv.terminal, content);
+            } else {
+                app_terminal_output_ln(s_priv.terminal, content);
+            }
+        }
+    } else {
+        if (strlen(content) > 0 && content[strlen(content) - 1] == '\n') {
+            app_terminal_output(s_priv.terminal, content);
+        } else {
+            app_terminal_output_ln(s_priv.terminal, content);
+        }
+    }
+#else
+    if (strlen(content) > 0 && content[strlen(content) - 1] == '\n') {
         app_terminal_output(s_priv.terminal, content);
     } else {
         app_terminal_output_ln(s_priv.terminal, content);
     }
+#endif
 
-    /* Print prompt after sending message */
     app_terminal_print_prompt(s_priv.terminal);
 
     return MIMI_OK;

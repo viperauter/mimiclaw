@@ -231,19 +231,98 @@ void llm_response_free(llm_response_t *resp)
 static cJSON *convert_tools_openai(const char *tools_json);
 static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages);
 
+/* Extract a JSON array slice starting at '['.
+ * Scans to the matching closing ']' while respecting JSON string escaping.
+ * Returns a heap string the caller must free, or NULL if no closed array found.
+ */
+static char *extract_json_array_slice(const char *start)
+{
+    if (!start || *start != '[') return NULL;
+    int depth = 0;
+    bool in_str = false;
+    bool esc = false;
+    const char *p = start;
+    for (; *p; p++) {
+        char c = *p;
+        if (in_str) {
+            if (esc) {
+                esc = false;
+                continue;
+            }
+            if (c == '\\') {
+                esc = true;
+                continue;
+            }
+            if (c == '"') {
+                in_str = false;
+                continue;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_str = true;
+            continue;
+        }
+        if (c == '[') {
+            depth++;
+            continue;
+        }
+        if (c == ']') {
+            depth--;
+            if (depth == 0) {
+                size_t len = (size_t)(p - start + 1);
+                char *slice = (char *)malloc(len + 1);
+                if (!slice) return NULL;
+                memcpy(slice, start, len);
+                slice[len] = '\0';
+                return slice;
+            }
+        }
+    }
+    return NULL;
+}
+
 static void try_extract_tool_calls_from_text_json(llm_response_t *resp)
 {
     if (!resp || resp->call_count > 0 || !resp->text || resp->text_len == 0) {
         return;
     }
 
+    /* Some prompts / models may accidentally emit tool call wiring as plain text.
+     * Support a few common non-API encodings so we can still execute tools:
+     * 1) Full JSON object: {"tool_calls":[...]}
+     * 2) A prefixed line: "tool_calls: [...]"
+     * 3) A raw JSON array: [...]
+     */
     cJSON *root = cJSON_Parse(resp->text);
-    if (!root || !cJSON_IsObject(root)) {
-        cJSON_Delete(root);
-        return;
+    cJSON *tool_calls = NULL;
+
+    if (root && cJSON_IsObject(root)) {
+        tool_calls = cJSON_GetObjectItem(root, "tool_calls");
+    } else if (root && cJSON_IsArray(root)) {
+        tool_calls = root; /* Treat as tool_calls array directly */
+    } else {
+        /* Fallback: look for "tool_calls:" prefix then parse the following JSON array. */
+        const char *p = strstr(resp->text, "tool_calls");
+        if (p) {
+            const char *bracket = strchr(p, '[');
+            if (bracket) {
+                char *slice = extract_json_array_slice(bracket);
+                if (slice) {
+                    cJSON *arr = cJSON_Parse(slice);
+                    free(slice);
+                    if (arr && cJSON_IsArray(arr)) {
+                        root = arr;
+                        tool_calls = root;
+                    } else {
+                        cJSON_Delete(arr);
+                    }
+                }
+            }
+        }
     }
 
-    cJSON *tool_calls = cJSON_GetObjectItem(root, "tool_calls");
     if (!tool_calls || !cJSON_IsArray(tool_calls)) {
         cJSON_Delete(root);
         return;
@@ -291,6 +370,7 @@ static void try_extract_tool_calls_from_text_json(llm_response_t *resp)
 
     if (resp->call_count > 0) {
         resp->tool_use = true;
+        MIMI_LOGI(TAG, "Extracted %d tool calls from message.content text fallback", resp->call_count);
         /* Avoid forwarding the JSON blob as user-visible text later */
         free(resp->text);
         resp->text = NULL;
@@ -823,6 +903,8 @@ static void llm_http_callback(mimi_err_t result, mimi_http_response_t *hresp, vo
                 }
             }
         }
+        /* Fallback: some models return tool_calls JSON inside message.content string */
+        try_extract_tool_calls_from_text_json(resp);
     } else {
         cJSON *stop_reason = cJSON_GetObjectItem(root, "stop_reason");
         if (stop_reason && cJSON_IsString(stop_reason)) {

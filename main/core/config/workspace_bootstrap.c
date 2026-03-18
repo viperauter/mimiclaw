@@ -52,13 +52,13 @@ static void bootstrap_vfs_layout(void)
 {
     mimi_cfg_obj_t files = mimi_cfg_section("files");
 
-    const char *soul_file = mimi_cfg_get_str(files, "soulFile", "config/SOUL.md");
-    const char *user_file = mimi_cfg_get_str(files, "userFile", "config/USER.md");
-    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", "memory/MEMORY.md");
-    const char *heartbeat_file = mimi_cfg_get_str(files, "heartbeatFile", "HEARTBEAT.md");
-    const char *cron_file = mimi_cfg_get_str(files, "cronFile", "cron.json");
-    const char *skills_prefix = mimi_cfg_get_str(files, "skillsPrefix", "skills/");
-    const char *session_dir = mimi_cfg_get_str(files, "sessionDir", "sessions");
+    const char *soul_file = mimi_cfg_get_str(files, "soulFile", MIMI_DEFAULT_SOUL_FILE);
+    const char *user_file = mimi_cfg_get_str(files, "userFile", MIMI_DEFAULT_USER_FILE);
+    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", MIMI_DEFAULT_MEMORY_FILE);
+    const char *heartbeat_file = mimi_cfg_get_str(files, "heartbeatFile", MIMI_DEFAULT_HEARTBEAT_FILE);
+    const char *cron_file = mimi_cfg_get_str(files, "cronFile", MIMI_DEFAULT_CRON_FILE);
+    const char *skills_prefix = mimi_cfg_get_str(files, "skillsPrefix", MIMI_DEFAULT_SKILLS_PREFIX);
+    const char *session_dir = mimi_cfg_get_str(files, "sessionDir", MIMI_DEFAULT_SESSION_DIR);
 
     /* Ensure directories for configured files exist (POSIX only). */
     (void)ensure_parent_dir_for_file(soul_file);
@@ -128,17 +128,28 @@ static void bootstrap_vfs_layout(void)
 
     /* Helpful extra docs (not currently consumed by the agent loop).
      * Use relative paths - VFS will resolve them against workspace base. */
-    (void)write_file_if_missing("AGENTS.md",
+    (void)write_file_if_missing(MIMI_DEFAULT_AGENTS_FILE,
         "# AGENTS\n\n"
-        "Guidelines for the assistant.\n"
+        "System template and guidelines for the assistant.\n\n"
+        "## Role\n"
+        "- You are MimiClaw, a personal AI assistant.\n"
+        "- Be helpful, accurate, and concise.\n\n"
+        "## Tooling discipline\n"
+        "- State intent before tool calls, but NEVER predict or claim results before receiving them.\n"
+        "- Before modifying a file, read it first.\n"
+        "- If a tool call fails, analyze the error before retrying with a different approach.\n"
+        "- To use a skill, read its full skill file first.\n"
+        "- Do not print tool-call JSON or tool wiring as plain text.\n\n"
+        "## Conversation style\n"
         "- Prefer clarity over verbosity.\n"
         "- Ask concise questions only when necessary.\n");
 
-    (void)write_file_if_missing("TOOLS.md",
+    (void)write_file_if_missing(MIMI_DEFAULT_TOOLS_FILE,
         "# TOOLS\n\n"
-        "Tool usage notes.\n"
-        "- Use web_search for real-time info.\n"
-        "- Use get_current_time for date/time.\n");
+        "Human-facing notes about available tools.\n\n"
+        "- Tools are dynamically registered by the runtime; rely on their JSON schema, not hardcoded names.\n"
+        "- Use web_search for real-time info when configured.\n"
+        "- Use get_current_time when you need the current time or date.\n");
 
 #if MIMI_ENABLE_SUBAGENT
     /* Bootstrap subagent SYSTEM prompts (never overwrite). */

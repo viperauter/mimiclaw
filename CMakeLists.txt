@@ -147,6 +147,7 @@ list(APPEND APP_SRC
     # Interface modules (moved to interface/ directory)
     main/interface/cli/editor.c
     main/interface/cli/cli_terminal.c
+    main/interface/cli/lowdown_render.c
     main/interface/commands/command_registry.c
     main/interface/commands/cmd_help.c
     main/interface/commands/cmd_session.c
@@ -191,6 +192,7 @@ add_executable(mimiclaw
 target_include_directories(mimiclaw PRIVATE
     main
     main/app
+    main/interface/cli
     main/core/platform
     main/core/config
     third_party
@@ -207,6 +209,12 @@ target_link_libraries(mimiclaw
     feishu_pb
     pthread
 )
+
+# Optional lowdown markdown rendering for STDIO.
+if(MIMICLAW_ENABLE_LOWDOWN)
+    target_link_libraries(mimiclaw PRIVATE lowdown)
+    target_compile_definitions(mimiclaw PRIVATE MIMICLAW_ENABLE_LOWDOWN)
+endif()
 
 # TLS backend specific dependencies
 if(TLS_BACKEND STREQUAL "openssl")

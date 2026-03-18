@@ -119,6 +119,23 @@ static void http_async_free_owned(http_async_req_t *ctx)
     ctx->req.body_len = 0;
 }
 
+static void http_async_destroy_timeout_timer(http_async_req_t *ctx)
+{
+    if (!ctx || !ctx->timeout_timer) return;
+    /* During shutdown, mg_mgr_free() frees all timers, sets mgr->timers = NULL,
+     * and only then triggers MG_EV_CLOSE via mg_mgr_poll(). In that path we must
+     * not touch or free timers here (otherwise we risk double-free), and we must
+     * also avoid calling runtime APIs that take locks (MG_EV_CLOSE may run while
+     * runtime holds its state mutex during deinit). */
+    if (ctx->mgr && ctx->mgr->timers == NULL) {
+        ctx->timeout_timer = NULL;
+        return;
+    }
+    if (ctx->mgr) mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
+    free(ctx->timeout_timer);
+    ctx->timeout_timer = NULL;
+}
+
 static void http_async_post_complete(http_async_req_t *ctx)
 {
     if (!ctx || ctx->posted) return;
@@ -156,11 +173,7 @@ static void http_async_finish(http_async_req_t *ctx, mimi_err_t result)
     ctx->done = true;
     ctx->result = result;
     /* Stop timeout timer as soon as we know the final outcome. */
-    if (ctx->mgr && ctx->timeout_timer) {
-        mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
-        free(ctx->timeout_timer);
-        ctx->timeout_timer = NULL;
-    }
+    http_async_destroy_timeout_timer(ctx);
     if (ctx->conn) ctx->conn->is_closing = 1;
 }
 
@@ -281,11 +294,7 @@ static void http_ev_direct_async(struct mg_connection *c, int ev, void *ev_data)
         c->is_closing = 1;
     } else if (ev == MG_EV_CLOSE) {
         /* Cancel timeout timer */
-        if (ctx->mgr && ctx->timeout_timer) {
-            mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
-            free(ctx->timeout_timer);
-            ctx->timeout_timer = NULL;
-        }
+        http_async_destroy_timeout_timer(ctx);
 
         if (!ctx->done) {
             MIMI_LOGE("http_posix", "Connection closed before response (host=%s)",
@@ -408,11 +417,7 @@ static void http_ev_proxy_async(struct mg_connection *c, int ev, void *ev_data)
         http_async_finish(ctx, MIMI_ERR_IO);
         c->is_closing = 1;
     } else if (ev == MG_EV_CLOSE) {
-        if (ctx->mgr && ctx->timeout_timer) {
-            mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
-            free(ctx->timeout_timer);
-            ctx->timeout_timer = NULL;
-        }
+        http_async_destroy_timeout_timer(ctx);
 
         if (!ctx->done) {
             MIMI_LOGE("http_posix", "Connection closed before response (proxy)");
@@ -832,21 +837,13 @@ mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_respon
         http_proxy_config_t cfg;
         mimi_err_t perr = http_proxy_get_config(&cfg);
         if (perr != MIMI_OK) {
-            if (ctx->timeout_timer) {
-                mg_timer_free(&mgr->timers, ctx->timeout_timer);
-                free(ctx->timeout_timer);
-                ctx->timeout_timer = NULL;
-            }
+            http_async_destroy_timeout_timer(ctx);
             http_async_free_owned(ctx);
             free(ctx);
             return perr;
         }
         if (strcmp(cfg.type, "http") != 0) {
-            if (ctx->timeout_timer) {
-                mg_timer_free(&mgr->timers, ctx->timeout_timer);
-                free(ctx->timeout_timer);
-                ctx->timeout_timer = NULL;
-            }
+            http_async_destroy_timeout_timer(ctx);
             http_async_free_owned(ctx);
             free(ctx);
             return MIMI_ERR_NOT_SUPPORTED;
@@ -862,11 +859,7 @@ mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_respon
     }
 
     if (!ctx->conn) {
-        if (ctx->timeout_timer) {
-            mg_timer_free(&mgr->timers, ctx->timeout_timer);
-            free(ctx->timeout_timer);
-            ctx->timeout_timer = NULL;
-        }
+        http_async_destroy_timeout_timer(ctx);
         http_async_free_owned(ctx);
         free(ctx);
         return MIMI_ERR_IO;

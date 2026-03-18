@@ -32,58 +32,30 @@ static size_t append_file(char *buf, size_t size, size_t offset, const char *pat
 mimi_err_t context_build_system_prompt(char *buf, size_t size)
 {
     mimi_cfg_obj_t files = mimi_cfg_section("files");
-    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", "memory/MEMORY.md");
-    const char *skills_prefix = mimi_cfg_get_str(files, "skillsPrefix", "skills/");
-    const char *soul_file = mimi_cfg_get_str(files, "soulFile", "config/SOUL.md");
-    const char *user_file = mimi_cfg_get_str(files, "userFile", "config/USER.md");
+    const char *memory_file = mimi_cfg_get_str(files, "memoryFile", MIMI_DEFAULT_MEMORY_FILE);
+    const char *skills_prefix = mimi_cfg_get_str(files, "skillsPrefix", MIMI_DEFAULT_SKILLS_PREFIX);
+    const char *soul_file = mimi_cfg_get_str(files, "soulFile", MIMI_DEFAULT_SOUL_FILE);
+    const char *user_file = mimi_cfg_get_str(files, "userFile", MIMI_DEFAULT_USER_FILE);
     size_t off = 0;
 
     off += snprintf(buf + off, size - off,
         "# MimiClaw\n\n"
-        "You are MimiClaw, a personal AI assistant running on an ESP32-S3 device.\n"
-        "You communicate through Telegram and WebSocket.\n\n"
-        "Be helpful, accurate, and concise.\n\n"
-        "## Available Tools\n"
-        "You have access to the following tools:\n"
-        "- web_search: Search the web for current information. "
-        "Use this when you need up-to-date facts, news, weather, or anything beyond your training data.\n"
-        "- get_current_time: Get the current date and time. "
-        "You do NOT have an internal clock — always use this tool when you need to know the time or date.\n"
-        "- read_file: Read a file (path must not contain '..').\n"
-        "- write_file: Write/overwrite a file.\n"
-        "- edit_file: Find-and-replace edit a file.\n"
-        "- list_dir: List files, optionally filter by prefix.\n"
-        "- cron_add: Schedule a recurring or one-shot task. The message will trigger an agent turn when the job fires.\n"
-        "- cron_list: List all scheduled cron jobs.\n"
-        "- cron_remove: Remove a scheduled cron job by ID.\n\n"
-        "When using cron_add for Telegram delivery, always set channel='telegram' and a valid numeric chat_id.\n\n"
-        "## Tool Calling Format\n"
-        "When you need to use a tool, you MUST use the OpenAI function calling format. "
-        "The system will provide tools in the 'tools' parameter of the API request. "
-        "To call a tool, respond with a JSON object in the 'tool_calls' field, NOT as XML tags.\n\n"
-        "Correct format (use this):\n"
-        "tool_calls: [{\"id\": \"call_xxx\", \"type\": \"function\", \"function\": {\"name\": \"write_file\", \"arguments\": \"{\\\"path\\\": \\\"test.txt\\\", \\\"content\\\": \\\"hello\\\"}\"}}]\n\n"
-        "INCORRECT format (do NOT use XML):\n"
-        "<tool_call><function=write_file><parameter=path>test.txt</parameter>...</function></tool_call>\n\n"
-        "Use tools when needed. Provide your final answer as text after using tools.\n\n"
-        "## Memory\n"
-        "You have persistent memory stored on local flash:\n"
+        "You are MimiClaw, a personal AI assistant.\n"
+        "Be helpful, accurate, and concise.\n");
+
+    /* Agent guidelines (workspace root, created by bootstrap; ignore if missing). */
+    off = append_file(buf, size, off, MIMI_DEFAULT_AGENTS_FILE, "Agent Guidelines");
+
+    /* Short memory / skills pointers (details live in policies and files). */
+    off += snprintf(buf + off, size - off,
+        "\n## Memory\n\n"
         "- Long-term memory: %s\n"
         "- Daily notes: %s/daily/<YYYY-MM-DD>.md\n\n"
-        "IMPORTANT: Actively use memory to remember things across conversations.\n"
-        "- When you learn something new about the user (name, preferences, habits, context), write it to MEMORY.md.\n"
-        "- When something noteworthy happens in a conversation, append it to today's daily note.\n"
-        "- Always read_file MEMORY.md before writing, so you can edit_file to update without losing existing content.\n"
-        "- Use get_current_time to know today's date before writing daily notes.\n"
-        "- Keep MEMORY.md concise and organized — summarize, don't dump raw conversation.\n"
-        "- You should proactively save memory without being asked. If the user tells you their name, preferences, or important facts, persist them immediately.\n\n"
-        "## Skills\n"
-        "Skills are specialized instruction files stored under %s.\n"
-        "When a task matches a skill, read the full skill file for detailed instructions.\n"
-        "You can create new skills using write_file to %s<name>.md.\n",
+        "Use memory to retain durable user facts and preferences.\n\n"
+        "## Skills\n\n"
+        "Skills live under %s. When relevant, load the skill file before acting.\n",
         memory_file,
         "memory",
-        skills_prefix,
         skills_prefix);
 
     /* Bootstrap files */

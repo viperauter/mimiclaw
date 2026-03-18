@@ -142,13 +142,13 @@ static void apply_defaults(void)
     s_config.cron_check_interval_ms = 60 * 1000;
 
     /* Files/directories (treated as real paths; may be absolute or relative) */
-    safe_strcpy(s_config.heartbeat_file, sizeof(s_config.heartbeat_file), "HEARTBEAT.md");
-    safe_strcpy(s_config.cron_file, sizeof(s_config.cron_file), "cron.json");
-    safe_strcpy(s_config.memory_file, sizeof(s_config.memory_file), "memory/MEMORY.md");
-    safe_strcpy(s_config.soul_file, sizeof(s_config.soul_file), "config/SOUL.md");
-    safe_strcpy(s_config.user_file, sizeof(s_config.user_file), "config/USER.md");
-    safe_strcpy(s_config.skills_prefix, sizeof(s_config.skills_prefix), "skills/");
-    safe_strcpy(s_config.session_dir, sizeof(s_config.session_dir), "sessions");
+    safe_strcpy(s_config.heartbeat_file, sizeof(s_config.heartbeat_file), MIMI_DEFAULT_HEARTBEAT_FILE);
+    safe_strcpy(s_config.cron_file, sizeof(s_config.cron_file), MIMI_DEFAULT_CRON_FILE);
+    safe_strcpy(s_config.memory_file, sizeof(s_config.memory_file), MIMI_DEFAULT_MEMORY_FILE);
+    safe_strcpy(s_config.soul_file, sizeof(s_config.soul_file), MIMI_DEFAULT_SOUL_FILE);
+    safe_strcpy(s_config.user_file, sizeof(s_config.user_file), MIMI_DEFAULT_USER_FILE);
+    safe_strcpy(s_config.skills_prefix, sizeof(s_config.skills_prefix), MIMI_DEFAULT_SKILLS_PREFIX);
+    safe_strcpy(s_config.session_dir, sizeof(s_config.session_dir), MIMI_DEFAULT_SESSION_DIR);
 
     /* WiFi (embedded) */
     s_config.wifi_ssid[0] = '\0';

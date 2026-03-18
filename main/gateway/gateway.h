@@ -35,7 +35,10 @@ typedef struct {
     /* Type-specific configuration */
     union {
         struct {
-            /* STDIO has no config */
+            /* Optional terminal markdown rendering (only used when compiled with lowdown). */
+            bool lowdown_enabled;
+            int lowdown_width;
+            bool lowdown_ansi;
         } stdio;
         
         struct {
