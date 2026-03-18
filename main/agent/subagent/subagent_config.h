@@ -7,12 +7,12 @@
 /* Subagent static config (loaded from config.json via config_view). */
 typedef struct {
     char name[64];
-    char role[64];
     char type[16];
-    char system_prompt_file[256];
     char tools[256];
+    char description[512];
     int  max_iters;
     int  timeout_sec;
+    bool isolated_context;
 } mimi_subagent_config_t;
 
 typedef struct {
