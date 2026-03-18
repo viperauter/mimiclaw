@@ -150,10 +150,6 @@ static void apply_defaults(void)
     safe_strcpy(s_config.skills_prefix, sizeof(s_config.skills_prefix), MIMI_DEFAULT_SKILLS_PREFIX);
     safe_strcpy(s_config.session_dir, sizeof(s_config.session_dir), MIMI_DEFAULT_SESSION_DIR);
 
-    /* WiFi (embedded) */
-    s_config.wifi_ssid[0] = '\0';
-    s_config.wifi_pass[0] = '\0';
-    
     /* Network
      * Leave empty by default so Mongoose uses system DNS.
      * Override via config.network.dnsServer or env MIMI_DNS_SERVER.
@@ -371,19 +367,6 @@ static cJSON *config_build_json_full_from_config(const mimi_config_t *cfg, int s
         cJSON_AddNumberToObject(internal, "heartbeatIntervalMs", cfg->heartbeat_interval_ms);
         cJSON_AddNumberToObject(internal, "cronCheckIntervalMs", cfg->cron_check_interval_ms);
         cJSON_AddItemToObject(root, "internal", internal);
-    }
-
-    /* Workspace files/dirs (also kept in JSON for unified access). */
-    cJSON *files = cJSON_CreateObject();
-    if (files) {
-        cJSON_AddStringToObject(files, "heartbeatFile", cfg->heartbeat_file);
-        cJSON_AddStringToObject(files, "cronFile", cfg->cron_file);
-        cJSON_AddStringToObject(files, "memoryFile", cfg->memory_file);
-        cJSON_AddStringToObject(files, "soulFile", cfg->soul_file);
-        cJSON_AddStringToObject(files, "userFile", cfg->user_file);
-        cJSON_AddStringToObject(files, "skillsPrefix", cfg->skills_prefix);
-        cJSON_AddStringToObject(files, "sessionDir", cfg->session_dir);
-        cJSON_AddItemToObject(root, "files", files);
     }
 
     return root;

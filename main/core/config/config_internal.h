@@ -75,9 +75,6 @@ typedef struct mimi_config {
     char skills_prefix[128];
     char session_dir[128];
 
-    char wifi_ssid[64];
-    char wifi_pass[64];
-
     char dns_server[64];
     char log_level[16];
 

@@ -175,62 +175,29 @@ target_link_libraries(feishu_pb PUBLIC nanopb)
 option(MIMICLAW_ENABLE_LOWDOWN "Enable lowdown markdown rendering for STDIO" ON)
 
 if(MIMICLAW_ENABLE_LOWDOWN)
-    set(LOWDOWN_DIR ${THIRD_PARTY_DIR}/lowdown)
-
-    if(EXISTS ${LOWDOWN_DIR}/lowdown.h)
-        message(STATUS "Using lowdown source: ${LOWDOWN_DIR}")
-        set(lowdown_SOURCE_DIR ${LOWDOWN_DIR})
+    # Try to find lowdown library using pkg-config
+    find_package(PkgConfig)
+    pkg_check_modules(LOWDOWN QUIET lowdown)
+    
+    if(LOWDOWN_FOUND)
+        message(STATUS "Found lowdown library: ${LOWDOWN_LIBRARIES}")
+        add_library(lowdown INTERFACE)
+        target_link_libraries(lowdown INTERFACE ${LOWDOWN_LIBRARIES})
+        target_include_directories(lowdown INTERFACE ${LOWDOWN_INCLUDE_DIRS})
     else()
-        message(FATAL_ERROR "lowdown source not found at ${LOWDOWN_DIR}. Disable with -DMIMICLAW_ENABLE_LOWDOWN=OFF")
-    endif()
-
-    set(LOWDOWN_SOURCES
-        ${lowdown_SOURCE_DIR}/autolink.c
-        ${lowdown_SOURCE_DIR}/buffer.c
-        ${lowdown_SOURCE_DIR}/compats.c
-        ${lowdown_SOURCE_DIR}/diff.c
-        ${lowdown_SOURCE_DIR}/document.c
-        ${lowdown_SOURCE_DIR}/entity.c
-        ${lowdown_SOURCE_DIR}/gemini.c
-        ${lowdown_SOURCE_DIR}/gemini_escape.c
-        ${lowdown_SOURCE_DIR}/html.c
-        ${lowdown_SOURCE_DIR}/html_escape.c
-        ${lowdown_SOURCE_DIR}/latex.c
-        ${lowdown_SOURCE_DIR}/latex_escape.c
-        ${lowdown_SOURCE_DIR}/libdiff.c
-        ${lowdown_SOURCE_DIR}/library.c
-        ${lowdown_SOURCE_DIR}/odt.c
-        ${lowdown_SOURCE_DIR}/roff.c
-        ${lowdown_SOURCE_DIR}/roff_escape.c
-        ${lowdown_SOURCE_DIR}/roff_manpage.c
-        ${lowdown_SOURCE_DIR}/smartypants.c
-        ${lowdown_SOURCE_DIR}/template.c
-        ${lowdown_SOURCE_DIR}/term.c
-        ${lowdown_SOURCE_DIR}/tests.c
-        ${lowdown_SOURCE_DIR}/tree.c
-        ${lowdown_SOURCE_DIR}/util.c
-    )
-
-    add_library(lowdown STATIC
-        ${LOWDOWN_SOURCES}
-    )
-
-    target_include_directories(lowdown PUBLIC
-        ${lowdown_SOURCE_DIR}
-        ${CMAKE_SOURCE_DIR}/third_party
-        /usr/include
-    )
-
-    target_compile_definitions(lowdown PUBLIC
-        LOWDOWN_VERSION=3
-    )
-
-    # lowdown's diff implementation uses libm (log/ceil).
-    target_link_libraries(lowdown PUBLIC m)
-
-    # Some lowdown compat code may use crypto primitives.
-    if(TLS_BACKEND STREQUAL "openssl")
-        target_link_libraries(lowdown PUBLIC OpenSSL::Crypto)
+        # Fallback to local build if system library not found
+        set(LOWDOWN_DIR ${THIRD_PARTY_DIR}/lowdown)
+        if(EXISTS ${LOWDOWN_DIR}/liblowdown.a)
+            message(STATUS "Using prebuilt lowdown library: ${LOWDOWN_DIR}/liblowdown.a")
+            add_library(lowdown STATIC IMPORTED)
+            set_target_properties(lowdown PROPERTIES
+                IMPORTED_LOCATION ${LOWDOWN_DIR}/liblowdown.a
+                INTERFACE_INCLUDE_DIRECTORIES ${LOWDOWN_DIR}
+            )
+            target_link_libraries(lowdown INTERFACE m)
+        else()
+            message(FATAL_ERROR "lowdown library not found. Please install liblowdown-dev or build it manually.")
+        endif()
     endif()
 endif()
 
