@@ -1,35 +1,30 @@
 #pragma once
 
 #include "mimi_err.h"
+#include <stdbool.h>
 
-#include <stdint.h>
-
-/* Subagent static config (loaded from config.json via config_view). */
+/* Loaded from config.json under agents.subagents[]. */
 typedef struct {
-    char name[64];
-    char type[16];
-    char tools[256];
-    char description[512];
+    char name[64];              /* human readable */
+    char profile[64];           /* lookup key used by subagents.spawn.profile */
+    char system_prompt_file[256];
+    char tools_csv[256];        /* optional override: comma-separated allowlist (legacy-friendly) */
     int  max_iters;
     int  timeout_sec;
     bool isolated_context;
-} mimi_subagent_config_t;
+} subagent_profile_t;
 
 typedef struct {
-    mimi_subagent_config_t cfg;   /* static config from config.json */
-    char system_prompt[8192];     /* loaded from SYSTEM.md (or similar) */
-    char *tools_json;             /* filtered tools schema JSON (owned by this struct) */
-} subagent_runtime_config_t;
+    subagent_profile_t cfg;
+    char system_prompt[8192];   /* file contents */
+    char *tools_json;           /* filtered tools schema JSON, owned (nullable) */
+} subagent_profile_runtime_t;
 
-/**
- * Initialize subagent runtime configs from global config + filesystem.
- * Should be called once during startup after mimi_config_load().
- */
+/* Initialize profiles from global config + filesystem. */
 mimi_err_t subagent_config_init(void);
 
-/**
- * Look up a subagent runtime config by role (preferred) or name.
- * Returns NULL if not found.
- */
-const subagent_runtime_config_t *subagent_get_by_role(const char *role);
+/* Look up by profile key. Returns NULL if not found. */
+const subagent_profile_runtime_t *subagent_profile_get(const char *profile);
 
+/* Release tools_json allocations (optional). */
+void subagent_config_deinit(void);

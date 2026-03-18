@@ -134,7 +134,8 @@ list(APPEND APP_SRC
     # Agent modules (including control, subagents, and tools)
     main/agent/context_builder.c
     main/agent/subagent/subagent_config.c
-    main/agent/subagent/subagent_runtime.c
+    main/agent/subagent/subagent_manager.c
+    main/agent/subagent/subagent_task.c
     main/agent/control/control_manager.c
     main/agent/tools/tool_registry.c
     main/agent/tools/tool_files.c
@@ -142,7 +143,7 @@ list(APPEND APP_SRC
     main/agent/tools/tool_web_search.c
     main/agent/tools/tool_get_time.c
     main/agent/tools/tool_bash.c
-    main/agent/tools/tool_subagent.c
+    main/agent/tools/tool_subagents.c
 
     # Interface modules (moved to interface/ directory)
     main/interface/cli/editor.c

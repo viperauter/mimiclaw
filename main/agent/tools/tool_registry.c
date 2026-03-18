@@ -7,8 +7,9 @@
 #include "tools/tool_bash.h"
 #include "mimi_config.h"
 
-#if MIMI_ENABLE_TOOL_SUBAGENT
-#include "tools/tool_subagent.h"
+#if MIMI_ENABLE_SUBAGENT
+#include "tools/tool_subagents.h"
+#include "agent/subagent/subagent_manager.h"
 #endif
 
 #include <string.h>
@@ -221,23 +222,15 @@ mimi_err_t tool_registry_init(void)
     };
     register_tool(&bash);
 
-#if MIMI_ENABLE_TOOL_SUBAGENT
-    /* Register subagent_run */
+#if MIMI_ENABLE_SUBAGENT
+    /* Subagent orchestration: spawn/join/cancel/list/steer */
+    (void)subagent_manager_init();
     mimi_tool_t sa = {
-        .name = "subagent_run",
-        .description = "Run a named subagent (planner/coder/...).",
-        .input_schema_json =
-            "{"
-            "\"type\":\"object\","
-            "\"properties\":{"
-            "\"role\":{\"type\":\"string\",\"description\":\"Subagent role to run (e.g. planner, coder)\"},"
-            "\"task\":{\"type\":\"string\",\"description\":\"Main task for the subagent\"},"
-            "\"context\":{\"type\":\"string\",\"description\":\"Optional additional context\",\"default\":\"\"}"
-            "},"
-            "\"required\":[\"role\",\"task\"]"
-            "}",
+        .name = "subagents",
+        .description = "Spawn, list, steer, join, or cancel in-proc subagents for this requester session.",
+        .input_schema_json = tool_subagents_schema_json(),
         .requires_confirmation = false,
-        .execute = tool_subagent_run_execute,
+        .execute = tool_subagents_execute,
     };
     register_tool(&sa);
 #endif

@@ -30,6 +30,7 @@
 
 #if MIMI_ENABLE_SUBAGENT
 #include "agent/subagent/subagent_config.h"
+#include "agent/subagent/subagent_manager.h"
 #endif
 
 #include "llm/llm_proxy.h"
@@ -187,11 +188,6 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         MIMI_LOGW("app", "http_proxy_init failed");
     }
 
-    /* Initialize subagent configs (if any) */
-#if MIMI_ENABLE_SUBAGENT
-    subagent_config_init();
-#endif
-
     if (message_bus_init() != MIMI_OK) {
         MIMI_LOGE("app", "message_bus_init failed");
         return MIMI_ERR_FAIL;
@@ -238,6 +234,14 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         MIMI_LOGE("app", "tool_registry_init failed");
         return MIMI_ERR_FAIL;
     }
+
+    /* Initialize subagent configs (if any) after tools are registered (needed for tools_json filtering). */
+#if MIMI_ENABLE_SUBAGENT
+    subagent_config_init();
+    /* Manager is used by the subagents tool and may be used by internal code. */
+    subagent_manager_init();
+#endif
+
     if (llm_proxy_init() != MIMI_OK) {
         MIMI_LOGE("app", "llm_proxy_init failed");
         return MIMI_ERR_FAIL;

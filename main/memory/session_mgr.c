@@ -31,7 +31,15 @@ void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out)
     if (msg->channel[0] && msg->chat_id[0]) {
         snprintf(out->workspace_root, sizeof(out->workspace_root),
                  "workspaces/%s_%s", msg->channel, msg->chat_id);
+
+        /* Default session keys for non-subagent calls. */
+        snprintf(out->requester_session_key, sizeof(out->requester_session_key),
+                 "%s:%s", msg->channel, msg->chat_id);
+        strncpy(out->caller_session_key, out->requester_session_key,
+                sizeof(out->caller_session_key) - 1);
     }
+    out->caller_is_subagent = false;
+    out->subagent_id[0] = '\0';
 }
 
 mimi_err_t session_mgr_init(void)

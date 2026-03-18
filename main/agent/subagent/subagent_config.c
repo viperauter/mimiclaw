@@ -12,10 +12,10 @@
 
 static const char *TAG = "subagent_cfg";
 
-#define MAX_SUBAGENTS_RUNTIME 8
+#define MAX_SUBAGENT_PROFILES 16
 
-static subagent_runtime_config_t s_subagents[MAX_SUBAGENTS_RUNTIME];
-static int s_subagent_runtime_count = 0;
+static subagent_profile_runtime_t s_profiles[MAX_SUBAGENT_PROFILES];
+static int s_profile_count = 0;
 
 static size_t read_file_into_buffer(const char *path, char *buf, size_t buf_size)
 {
@@ -36,7 +36,7 @@ static size_t read_file_into_buffer(const char *path, char *buf, size_t buf_size
     return n;
 }
 
-/* Build a filtered tools_json array for a subagent based on a comma-separated tool list. */
+/* Build a filtered tools_json array based on a comma-separated tool list. */
 static char *build_filtered_tools_json(const char *tools_csv)
 {
     const char *all_tools_json = tool_registry_get_tools_json();
@@ -117,10 +117,12 @@ static void tools_array_to_csv(const mimi_cfg_obj_t *tools_arr, char *out, size_
 mimi_err_t subagent_config_init(void)
 {
 #if !MIMI_ENABLE_SUBAGENT
-    s_subagent_runtime_count = 0;
+    s_profile_count = 0;
     return MIMI_OK;
 #else
-    s_subagent_runtime_count = 0;
+    subagent_config_deinit();
+    s_profile_count = 0;
+
     mimi_cfg_obj_t defaults = mimi_cfg_get_obj(mimi_cfg_section("agents"), "defaults");
     /* Runtime switch: allow disabling subagents even when compiled in. */
     bool enabled = mimi_cfg_get_bool(defaults, "subagentsEnabled", true);
@@ -128,37 +130,37 @@ mimi_err_t subagent_config_init(void)
         MIMI_LOGI(TAG, "Subagents disabled by config (agents.defaults.subagentsEnabled=false)");
         return MIMI_OK;
     }
-    int default_max_iters = mimi_cfg_get_int(defaults, "maxToolIterations", 40);
+    int default_max_iters = mimi_cfg_get_int(defaults, "defaultMaxIters", 40);
+    if (default_max_iters <= 0) default_max_iters = mimi_cfg_get_int(defaults, "maxToolIterations", 40);
     if (default_max_iters <= 0) default_max_iters = 40;
 
     /* Prefer JSON-backed dynamic list: agents.subagents[] can be user-defined and unbounded. */
     mimi_cfg_obj_t agents = mimi_cfg_section("agents");
     mimi_cfg_obj_t arr = mimi_cfg_get_arr(agents, "subagents");
     int total = mimi_cfg_arr_size(arr);
-    for (int i = 0; i < total && s_subagent_runtime_count < MAX_SUBAGENTS_RUNTIME; i++) {
+    for (int i = 0; i < total && s_profile_count < MAX_SUBAGENT_PROFILES; i++) {
         mimi_cfg_obj_t sa = mimi_cfg_arr_get(arr, i);
         if (!mimi_cfg_is_object(sa)) continue;
 
-        subagent_runtime_config_t *dst = &s_subagents[s_subagent_runtime_count];
+        subagent_profile_runtime_t *dst = &s_profiles[s_profile_count];
         memset(dst, 0, sizeof(*dst));
-        memset(&dst->cfg, 0, sizeof(dst->cfg));
 
         /* Parse known fields (ignore unknown fields for forward compatibility). */
         const char *name = mimi_cfg_get_str(sa, "name", "");
-        const char *role = mimi_cfg_get_str(sa, "role", "");
-        const char *type = mimi_cfg_get_str(sa, "type", "inproc");
+        const char *profile = mimi_cfg_get_str(sa, "profile", NULL);
+        if (!profile || !profile[0]) profile = mimi_cfg_get_str(sa, "role", ""); /* legacy compat */
         const char *system_file = mimi_cfg_get_str(sa, "systemPromptFile", "");
 
         strncpy(dst->cfg.name, name, sizeof(dst->cfg.name) - 1);
-        strncpy(dst->cfg.role, role, sizeof(dst->cfg.role) - 1);
-        strncpy(dst->cfg.type, type, sizeof(dst->cfg.type) - 1);
+        strncpy(dst->cfg.profile, profile, sizeof(dst->cfg.profile) - 1);
         strncpy(dst->cfg.system_prompt_file, system_file, sizeof(dst->cfg.system_prompt_file) - 1);
 
         mimi_cfg_obj_t tools_arr = mimi_cfg_get_arr(sa, "tools");
-        tools_array_to_csv(&tools_arr, dst->cfg.tools, sizeof(dst->cfg.tools));
+        tools_array_to_csv(&tools_arr, dst->cfg.tools_csv, sizeof(dst->cfg.tools_csv));
 
         dst->cfg.max_iters = mimi_cfg_get_int(sa, "maxIters", 0);
         dst->cfg.timeout_sec = mimi_cfg_get_int(sa, "timeoutSec", 0);
+        dst->cfg.isolated_context = mimi_cfg_get_bool(sa, "isolatedContext", true);
 
         if (dst->cfg.max_iters <= 0) dst->cfg.max_iters = default_max_iters;
 
@@ -178,33 +180,43 @@ mimi_err_t subagent_config_init(void)
         }
 
         /* Build tools_json filtered by tools CSV, if provided. */
-        dst->tools_json = build_filtered_tools_json(dst->cfg.tools);
+        dst->tools_json = build_filtered_tools_json(dst->cfg.tools_csv);
 
-        MIMI_LOGI(TAG, "Subagent loaded: name=%s role=%s type=%s system_prompt_len=%zu",
-                  dst->cfg.name, dst->cfg.role, dst->cfg.type, strlen(dst->system_prompt));
-        s_subagent_runtime_count++;
+        MIMI_LOGI(TAG, "Subagent profile loaded: name=%s profile=%s prompt_len=%zu tools_filtered=%s",
+                  dst->cfg.name,
+                  dst->cfg.profile,
+                  strlen(dst->system_prompt),
+                  (dst->tools_json ? "yes" : "no"));
+        s_profile_count++;
     }
 
     return MIMI_OK;
 #endif
 }
 
-const subagent_runtime_config_t *subagent_get_by_role(const char *role)
+const subagent_profile_runtime_t *subagent_profile_get(const char *profile)
 {
-    if (!role || !role[0]) return NULL;
+    if (!profile || !profile[0]) return NULL;
 #if !MIMI_ENABLE_SUBAGENT
-    (void)role;
+    (void)profile;
     return NULL;
 #else
-    for (int i = 0; i < s_subagent_runtime_count; i++) {
-        if (s_subagents[i].cfg.role[0] && strcmp(s_subagents[i].cfg.role, role) == 0) {
-            return &s_subagents[i];
-        }
-        if (s_subagents[i].cfg.name[0] && strcmp(s_subagents[i].cfg.name, role) == 0) {
-            return &s_subagents[i];
+    for (int i = 0; i < s_profile_count; i++) {
+        if (s_profiles[i].cfg.profile[0] && strcmp(s_profiles[i].cfg.profile, profile) == 0) {
+            return &s_profiles[i];
         }
     }
     return NULL;
 #endif
+}
+
+void subagent_config_deinit(void)
+{
+    for (int i = 0; i < s_profile_count; i++) {
+        free(s_profiles[i].tools_json);
+        s_profiles[i].tools_json = NULL;
+        memset(&s_profiles[i], 0, sizeof(s_profiles[i]));
+    }
+    s_profile_count = 0;
 }
 
