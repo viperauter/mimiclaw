@@ -1,0 +1,74 @@
+:project:
+  :name: mimiclaw
+  :build_root: build/ceedling
+  :use_exceptions: FALSE
+  :use_test_preprocessor: TRUE
+  :use_auxiliary_dependencies: TRUE
+  :use_deep_dependencies: TRUE
+  :test_file_prefix: test_
+  :default_tasks:
+    - test:all
+
+:paths:
+  :test:
+    - +:test/**
+  :support:
+    - test/support
+  :source:
+    - main
+    - main/core
+    - main/core/platform
+    - main/core/config
+    - main/core/platform/fs
+    - main/core/platform/fs/posix_impl
+    - main/agent
+    - main/agent/tools
+    - main/memory
+    - third_party
+    - third_party/cjson
+
+:files:
+  :source:
+    - main/agent/tools/tool_files.c
+    - main/agent/tools/tool_cron.c
+    - main/agent/tools/tool_get_time.c
+    - main/agent/tools/tool_web_search.c
+    - main/agent/tools/tool_exec.c
+    - main/agent/tools/tool_registry.c
+  :support:
+    - test/support/tool_registry_stubs.c
+    # Always-linked deps for tools under test
+    - third_party/cjson/cJSON.c
+    - main/core/platform/mimi_err.c
+    - main/core/platform/log.c
+    - main/core/platform/path_utils.c
+    - main/core/platform/fs/fs.c
+    - main/core/platform/fs/posix_impl/fs_posix.c
+
+:defines:
+  :common: &common_defines []
+  :test:
+    - *common_defines
+    - TEST
+    - MIMI_ENABLE_SUBAGENT=0
+
+:tools_test_compiler:
+  :arguments:
+    - -std=c11
+    - -Wall
+    - -Wextra
+    - -O0
+
+:libraries:
+  :placement: :end
+  :flag: "-l${1}"
+  :path_flag: "-L ${1}"
+  :system:
+    - m
+    - pthread
+  :test: []
+  :release: []
+
+:plugins:
+  :enabled:
+    - stdout_pretty_tests_report

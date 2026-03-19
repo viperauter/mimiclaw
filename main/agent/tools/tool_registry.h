@@ -9,6 +9,7 @@ typedef struct {
     const char *name;
     const char *description;
     const char *input_schema_json;  /* JSON Schema string for input */
+    const char *(*schema_json)(void); /* Optional self-described schema */
     bool requires_confirmation;     /* Whether tool requires user confirmation */
     mimi_err_t (*execute)(const char *input_json, char *output, size_t output_size,
                           const mimi_session_ctx_t *session_ctx);

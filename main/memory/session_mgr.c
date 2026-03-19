@@ -46,6 +46,12 @@ mimi_err_t session_mgr_init(void)
 {
     mimi_cfg_obj_t files = mimi_cfg_section("files");
     const char *dir = mimi_cfg_get_str(files, "sessionDir", "sessions");
+    /* Ensure session directory exists; session_append() assumes it. */
+    mimi_err_t err = mimi_fs_mkdir_p(dir);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to create session directory %s: %s", dir, mimi_err_to_name(err));
+        return err;
+    }
     MIMI_LOGD(TAG, "Session manager initialized at %s", dir);
     return MIMI_OK;
 }

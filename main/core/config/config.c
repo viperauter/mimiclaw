@@ -280,6 +280,9 @@ static cJSON *config_build_json_full_from_config(const mimi_config_t *cfg, int s
         cJSON_AddNumberToObject(defaults, "maxTokens", cfg->max_tokens);
         cJSON_AddNumberToObject(defaults, "temperature", cfg->temperature);
         cJSON_AddNumberToObject(defaults, "maxToolIterations", cfg->max_tool_iterations);
+        /* Preferred name for subagent iteration cap.
+         * Backward compatible with maxToolIterations (used as fallback). */
+        cJSON_AddNumberToObject(defaults, "defaultMaxIters", cfg->max_tool_iterations);
         cJSON_AddNumberToObject(defaults, "memoryWindow", cfg->memory_window);
         cJSON_AddStringToObject(defaults, "apiUrl", cfg->api_url);
         cJSON_AddBoolToObject(defaults, "sendWorkingStatus", cfg->send_working_status);
@@ -413,41 +416,22 @@ static void config_inject_default_subagents(cJSON *root)
         cJSON_AddItemToObject(agents, "subagents", subagents);
     }
 
-    /* planner */
-    cJSON *planner = cJSON_CreateObject();
-    if (planner) {
-        cJSON_AddStringToObject(planner, "name", "planner");
-        cJSON_AddStringToObject(planner, "role", "planner");
-        cJSON_AddStringToObject(planner, "type", "inproc");
-        cJSON_AddStringToObject(planner, "systemPromptFile", "agents/planner/SYSTEM.md");
-        cJSON *tools = cJSON_CreateArray();
-        if (tools) {
-            cJSON_AddItemToArray(tools, cJSON_CreateString("read_file"));
-            cJSON_AddItemToArray(tools, cJSON_CreateString("list_dir"));
-            cJSON_AddItemToObject(planner, "tools", tools);
-        }
-        cJSON_AddNumberToObject(planner, "maxIters", 10);
-        cJSON_AddNumberToObject(planner, "timeoutSec", 300);
-        cJSON_AddItemToArray(subagents, planner);
-    }
+    /* Default subagent profile (OpenClaw-style): one generic profile with tools allowlist. */
+    cJSON *def = cJSON_CreateObject();
+    if (def) {
+        cJSON_AddBoolToObject(def, "isolatedContext", true);
 
-    /* coder (executor) */
-    cJSON *coder = cJSON_CreateObject();
-    if (coder) {
-        cJSON_AddStringToObject(coder, "name", "coder");
-        cJSON_AddStringToObject(coder, "role", "coder");
-        cJSON_AddStringToObject(coder, "type", "inproc");
-        cJSON_AddStringToObject(coder, "systemPromptFile", "agents/coder/SYSTEM.md");
         cJSON *tools = cJSON_CreateArray();
         if (tools) {
             cJSON_AddItemToArray(tools, cJSON_CreateString("read_file"));
             cJSON_AddItemToArray(tools, cJSON_CreateString("write_file"));
-            cJSON_AddItemToArray(tools, cJSON_CreateString("bash"));
-            cJSON_AddItemToObject(coder, "tools", tools);
+            cJSON_AddItemToArray(tools, cJSON_CreateString("list_dir"));
+            cJSON_AddItemToArray(tools, cJSON_CreateString("exec"));
+            cJSON_AddItemToObject(def, "tools", tools);
         }
-        cJSON_AddNumberToObject(coder, "maxIters", 20);
-        cJSON_AddNumberToObject(coder, "timeoutSec", 600);
-        cJSON_AddItemToArray(subagents, coder);
+        cJSON_AddNumberToObject(def, "maxIters", 20);
+        cJSON_AddNumberToObject(def, "timeoutSec", 600);
+        cJSON_AddItemToArray(subagents, def);
     }
 #endif
 }

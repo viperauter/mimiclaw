@@ -4,6 +4,13 @@
 #include "memory/session_mgr.h"
 #include <stddef.h>
 
+const char *tool_cron_add_schema_json(void);
+const char *tool_cron_add_description(void);
+const char *tool_cron_list_schema_json(void);
+const char *tool_cron_list_description(void);
+const char *tool_cron_remove_schema_json(void);
+const char *tool_cron_remove_description(void);
+
 /**
  * Add a scheduled cron job.
  * Input JSON: { name, schedule_type ("every"/"at"), interval_s, at_epoch, message, channel?, chat_id? }

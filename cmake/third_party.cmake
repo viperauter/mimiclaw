@@ -175,29 +175,51 @@ target_link_libraries(feishu_pb PUBLIC nanopb)
 option(MIMICLAW_ENABLE_LOWDOWN "Enable lowdown markdown rendering for STDIO" ON)
 
 if(MIMICLAW_ENABLE_LOWDOWN)
-    # Try to find lowdown library using pkg-config
-    find_package(PkgConfig)
-    pkg_check_modules(LOWDOWN QUIET lowdown)
-    
-    if(LOWDOWN_FOUND)
-        message(STATUS "Found lowdown library: ${LOWDOWN_LIBRARIES}")
-        add_library(lowdown INTERFACE)
-        target_link_libraries(lowdown INTERFACE ${LOWDOWN_LIBRARIES})
-        target_include_directories(lowdown INTERFACE ${LOWDOWN_INCLUDE_DIRS})
+    # We vendor lowdown and include it as "lowdown/lowdown.h" from ${THIRD_PARTY_DIR}.
+    # To avoid header/library version mismatches (common with system lowdown packages),
+    # always build from the vendored sources or use a prebuilt vendored archive.
+    set(LOWDOWN_DIR ${THIRD_PARTY_DIR}/lowdown)
+
+    if(EXISTS ${LOWDOWN_DIR}/liblowdown.a)
+        message(STATUS "Using prebuilt vendored lowdown: ${LOWDOWN_DIR}/liblowdown.a")
+        add_library(lowdown STATIC IMPORTED)
+        set_target_properties(lowdown PROPERTIES
+            IMPORTED_LOCATION ${LOWDOWN_DIR}/liblowdown.a
+            INTERFACE_INCLUDE_DIRECTORIES ${THIRD_PARTY_DIR}
+        )
+        target_link_libraries(lowdown INTERFACE m)
     else()
-        # Fallback to local build if system library not found
-        set(LOWDOWN_DIR ${THIRD_PARTY_DIR}/lowdown)
-        if(EXISTS ${LOWDOWN_DIR}/liblowdown.a)
-            message(STATUS "Using prebuilt lowdown library: ${LOWDOWN_DIR}/liblowdown.a")
-            add_library(lowdown STATIC IMPORTED)
-            set_target_properties(lowdown PROPERTIES
-                IMPORTED_LOCATION ${LOWDOWN_DIR}/liblowdown.a
-                INTERFACE_INCLUDE_DIRECTORIES ${LOWDOWN_DIR}
-            )
-            target_link_libraries(lowdown INTERFACE m)
-        else()
-            message(FATAL_ERROR "lowdown library not found. Please install liblowdown-dev or build it manually.")
-        endif()
+        message(STATUS "Building vendored lowdown from source: ${LOWDOWN_DIR}")
+        add_library(lowdown STATIC
+            ${LOWDOWN_DIR}/autolink.c
+            ${LOWDOWN_DIR}/buffer.c
+            ${LOWDOWN_DIR}/compats.c
+            ${LOWDOWN_DIR}/diff.c
+            ${LOWDOWN_DIR}/document.c
+            ${LOWDOWN_DIR}/entity.c
+            ${LOWDOWN_DIR}/gemini.c
+            ${LOWDOWN_DIR}/gemini_escape.c
+            ${LOWDOWN_DIR}/html.c
+            ${LOWDOWN_DIR}/html_escape.c
+            ${LOWDOWN_DIR}/latex.c
+            ${LOWDOWN_DIR}/latex_escape.c
+            ${LOWDOWN_DIR}/library.c
+            ${LOWDOWN_DIR}/libdiff.c
+            ${LOWDOWN_DIR}/odt.c
+            ${LOWDOWN_DIR}/roff.c
+            ${LOWDOWN_DIR}/roff_escape.c
+            ${LOWDOWN_DIR}/roff_manpage.c
+            ${LOWDOWN_DIR}/smartypants.c
+            ${LOWDOWN_DIR}/template.c
+            ${LOWDOWN_DIR}/term.c
+            ${LOWDOWN_DIR}/tree.c
+            ${LOWDOWN_DIR}/util.c
+        )
+        target_include_directories(lowdown PUBLIC
+            ${THIRD_PARTY_DIR}
+            ${LOWDOWN_DIR}
+        )
+        target_link_libraries(lowdown PUBLIC m)
     endif()
 endif()
 

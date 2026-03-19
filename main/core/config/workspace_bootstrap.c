@@ -147,12 +147,25 @@ static void bootstrap_vfs_layout(void)
     (void)write_file_if_missing(MIMI_DEFAULT_TOOLS_FILE,
         "# TOOLS\n\n"
         "Human-facing notes about available tools.\n\n"
-        "- Tools are dynamically registered by the runtime; rely on their JSON schema, not hardcoded names.\n"
+        "- Tools are dynamically registered by the runtime/provider layer; rely on their JSON schema, not hardcoded names.\n"
+        "- Third-party tools can be exposed via providers (for example MCP stdio servers).\n"
         "- Use web_search for real-time info when configured.\n"
         "- Use get_current_time when you need the current time or date.\n");
 
 #if MIMI_ENABLE_SUBAGENT
     /* Bootstrap subagent SYSTEM prompts (never overwrite). */
+    /* Always ensure a default SYSTEM prompt exists for the minimal-config UX. */
+    {
+        char system_path[512];
+        mimi_path_join(workspace, "agents/default/SYSTEM.md", system_path, sizeof(system_path));
+        (void)write_file_if_missing(system_path,
+            "# SubAgent SYSTEM\n\n"
+            "Role: default\n\n"
+            "Guidelines:\n"
+            "- You are an in-proc subagent spawned by the parent session.\n"
+            "- Return structured, actionable output.\n");
+    }
+
     mimi_cfg_obj_t sub_arr = mimi_cfg_get_arr(mimi_cfg_section("agents"), "subagents");
     int sa_n = mimi_cfg_arr_size(sub_arr);
     for (int i = 0; i < sa_n; i++) {

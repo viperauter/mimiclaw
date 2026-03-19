@@ -3,7 +3,19 @@
 #include "mimi_err.h"
 #include <stdbool.h>
 
-/* Loaded from config.json under agents.subagents[]. */
+/**
+ * Subagent profile configuration.
+ *
+ * Profiles are loaded from `config.json` under `agents.subagents[]` and provide
+ * the runtime defaults for subagent execution:
+ * - profile key / display name
+ * - system prompt file (loaded into memory)
+ * - tool allowlist (compiled into a filtered tools schema)
+ * - iteration/time limits
+ *
+ * Minimal-config UX: callers may omit name/profile/systemPromptFile in JSON; the loader
+ * will default to profile="default" and systemPromptFile="agents/default/SYSTEM.md".
+ */
 typedef struct {
     char name[64];              /* human readable */
     char profile[64];           /* lookup key used by subagents.spawn.profile */
@@ -20,11 +32,21 @@ typedef struct {
     char *tools_json;           /* filtered tools schema JSON, owned (nullable) */
 } subagent_profile_runtime_t;
 
-/* Initialize profiles from global config + filesystem. */
+/**
+ * Initialize and load profiles from global config + filesystem.
+ *
+ * Respects runtime enable switch `agents.defaults.subagentsEnabled`. When disabled,
+ * no profiles are loaded and spawning will fail.
+ */
 mimi_err_t subagent_config_init(void);
 
-/* Look up by profile key. Returns NULL if not found. */
+/**
+ * Look up a profile by key.
+ *
+ * @param profile Profile lookup key (e.g. "default").
+ * @return Pointer to runtime profile on success, NULL if not found.
+ */
 const subagent_profile_runtime_t *subagent_profile_get(const char *profile);
 
-/* Release tools_json allocations (optional). */
+/** Release any owned allocations (e.g. filtered tools_json). */
 void subagent_config_deinit(void);

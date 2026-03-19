@@ -14,6 +14,13 @@
 #include "cJSON.h"
 
 static const char *TAG = "tool_time_posix";
+static const char *TOOL_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}";
+static const char *TOOL_DESCRIPTION =
+    "Get the current date and time. Also sets the system clock. Call this when you need to know what time or date it is.";
+
+const char *tool_get_time_schema_json(void) { return TOOL_SCHEMA; }
+const char *tool_get_time_description(void) { return TOOL_DESCRIPTION; }
 
 static bool set_clock_from_epoch(long long epoch, char *out, size_t out_size)
 {

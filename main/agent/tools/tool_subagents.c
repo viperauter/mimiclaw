@@ -19,18 +19,21 @@ static const char *SCHEMA =
       "\"waitMs\":{\"type\":\"integer\",\"minimum\":0,\"default\":0},"
       "\"recentMinutes\":{\"type\":\"integer\",\"minimum\":1},"
       "\"message\":{\"type\":\"string\"},"
-      "\"profile\":{\"type\":\"string\"},"
       "\"task\":{\"type\":\"string\"},"
       "\"context\":{\"type\":\"string\"},"
       "\"maxIters\":{\"type\":\"integer\",\"minimum\":1},"
       "\"timeoutSec\":{\"type\":\"integer\",\"minimum\":1},"
-      "\"tools\":{\"type\":\"string\",\"description\":\"Optional allowlist override as CSV\"}"
+      "\"tools\":{\"type\":\"string\",\"description\":\"Optional allowlist override as CSV. Use 'exec' for one-shot commands and 'process' for session control.\"}"
     "},"
     "\"required\":[],"
     "\"additionalProperties\":false"
     "}";
 
 const char *tool_subagents_schema_json(void) { return SCHEMA; }
+const char *tool_subagents_description(void)
+{
+    return "Spawn, list, steer, join, or cancel in-proc subagents for this requester session.";
+}
 
 static void write_json(char *output, size_t output_size, cJSON *obj, mimi_err_t fallback_err)
 {
@@ -78,14 +81,15 @@ mimi_err_t tool_subagents_execute(const char *input_json,
         int maxIters = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(root, "maxIters"));
         int timeoutSec = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(root, "timeoutSec"));
 
-        if (!profile || !profile[0] || !task || !task[0]) {
+        if (!task || !task[0]) {
             cJSON_AddStringToObject(resp, "status", "error");
-            cJSON_AddStringToObject(resp, "error", "profile and task are required");
+            cJSON_AddStringToObject(resp, "error", "task is required");
             write_json(output, output_size, resp, MIMI_ERR_INVALID_ARG);
             cJSON_Delete(resp);
             cJSON_Delete(root);
             return MIMI_ERR_INVALID_ARG;
         }
+        if (!profile || !profile[0]) profile = "default";
 
         subagent_spawn_spec_t spec;
         memset(&spec, 0, sizeof(spec));
@@ -128,6 +132,7 @@ mimi_err_t tool_subagents_execute(const char *input_json,
             cJSON_AddBoolToObject(resp, "ok", jr.ok);
             cJSON_AddBoolToObject(resp, "truncated", jr.truncated);
             cJSON_AddStringToObject(resp, "content", jr.content);
+            cJSON_AddStringToObject(resp, "final", jr.final_text);
             cJSON_AddStringToObject(resp, "error", jr.error);
         } else {
             cJSON_AddStringToObject(resp, "status", (err == MIMI_ERR_PERMISSION_DENIED) ? "forbidden" : "error");

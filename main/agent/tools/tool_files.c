@@ -12,6 +12,23 @@
 #include "fs/fs.h"
 
 static const char *TAG = "tool_files";
+static const char *READ_FILE_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"}},\"required\":[\"path\"],\"additionalProperties\":false}";
+static const char *WRITE_FILE_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"},\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}";
+static const char *EDIT_FILE_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"},\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"},\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}},\"required\":[\"path\",\"old_string\",\"new_string\"],\"additionalProperties\":false}";
+static const char *LIST_DIR_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter (e.g. memory/)\"}},\"required\":[],\"additionalProperties\":false}";
+
+const char *tool_read_file_schema_json(void) { return READ_FILE_SCHEMA; }
+const char *tool_read_file_description(void) { return "Read a file from storage. Path must not contain '..'."; }
+const char *tool_write_file_schema_json(void) { return WRITE_FILE_SCHEMA; }
+const char *tool_write_file_description(void) { return "Write or overwrite a file on storage. Path must not contain '..'."; }
+const char *tool_edit_file_schema_json(void) { return EDIT_FILE_SCHEMA; }
+const char *tool_edit_file_description(void) { return "Find and replace text in a file on SPIFFS. Replaces first occurrence of old_string with new_string."; }
+const char *tool_list_dir_schema_json(void) { return LIST_DIR_SCHEMA; }
+const char *tool_list_dir_description(void) { return "List files on storage, optionally filtered by path prefix."; }
 
 #define MAX_FILE_SIZE (32 * 1024)
 #define MAX_RESOLVED_PATH 512

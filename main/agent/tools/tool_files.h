@@ -4,6 +4,15 @@
 #include "memory/session_mgr.h"
 #include <stddef.h>
 
+const char *tool_read_file_schema_json(void);
+const char *tool_read_file_description(void);
+const char *tool_write_file_schema_json(void);
+const char *tool_write_file_description(void);
+const char *tool_edit_file_schema_json(void);
+const char *tool_edit_file_description(void);
+const char *tool_list_dir_schema_json(void);
+const char *tool_list_dir_description(void);
+
 /**
  * Read a file from storage. With session_ctx, relative paths resolve to session workspace.
  */

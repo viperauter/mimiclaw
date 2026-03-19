@@ -45,12 +45,9 @@ Add profiles under `agents.subagents`:
     "defaults": { "defaultMaxIters": 40 },
     "subagents": [
       {
-        "name": "planner",
-        "profile": "planner",
-        "systemPromptFile": "agents/planner/SYSTEM.md",
-        "tools": ["read_file", "list_dir"],
-        "maxIters": 10,
-        "timeoutSec": 300,
+        "tools": ["read_file", "write_file", "list_dir", "bash"],
+        "maxIters": 20,
+        "timeoutSec": 600,
         "isolatedContext": true
       }
     ]
@@ -60,12 +57,9 @@ Add profiles under `agents.subagents`:
 
 ### Fields
 
-- `name`: human-readable label.
-- `profile`: lookup key used by `subagents.spawn.profile`.
-  - Backward-compat: if `profile` is missing, `role` is accepted as the lookup key.
-- `systemPromptFile`: path to the system prompt file.
-  - If **relative**, it is treated as **relative to `agents.defaults.workspace`**.
-  - If **absolute**, it is used as-is.
+- `name` / `profile` / `systemPromptFile`: optional for the default profile.
+  - If missing, they default to `profile="default"` and `systemPromptFile="agents/default/SYSTEM.md"`.
+  - The `subagents` tool schema intentionally does not advertise `profile` to keep the default UX simple; advanced callers may still pass it.
 - `tools`: tool allowlist (array of tool names).
 - `maxIters`: iteration cap for the subagent.
 - `timeoutSec`: wall-clock timeout (best-effort).
@@ -86,7 +80,7 @@ Add profiles under `agents.subagents`:
 Spawn:
 
 ```json
-{ "action":"spawn", "profile":"planner", "task":"Analyze this project architecture", "context":"Optional extra context..." }
+{ "action":"spawn", "task":"Analyze this project architecture", "context":"Optional extra context..." }
 ```
 
 Join:

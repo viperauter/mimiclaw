@@ -4,7 +4,9 @@
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
 #include "tools/tool_cron.h"
-#include "tools/tool_bash.h"
+#include "tools/tool_exec.h"
+#include "tools/tool_provider.h"
+#include "tools/providers/mcp_stdio_provider.h"
 #include "mimi_config.h"
 
 #if MIMI_ENABLE_SUBAGENT
@@ -51,8 +53,21 @@ static void register_tool(const mimi_tool_t *tool)
         MIMI_LOGE(TAG, "Tool registry full");
         return;
     }
-    s_tools[s_tool_count++] = *tool;
+    if (!tool->input_schema_json && tool->schema_json) {
+        mimi_tool_t t = *tool;
+        t.input_schema_json = t.schema_json();
+        s_tools[s_tool_count++] = t;
+    } else {
+        s_tools[s_tool_count++] = *tool;
+    }
     MIMI_LOGD(TAG, "Registered tool: %s", tool->name);
+}
+
+static const char *tool_schema_json(const mimi_tool_t *tool)
+{
+    if (!tool) return NULL;
+    if (tool->schema_json) return tool->schema_json();
+    return tool->input_schema_json;
 }
 
 static void build_tools_json(void)
@@ -64,13 +79,25 @@ static void build_tools_json(void)
         cJSON_AddStringToObject(tool, "name", s_tools[i].name);
         cJSON_AddStringToObject(tool, "description", s_tools[i].description);
 
-        cJSON *schema = cJSON_Parse(s_tools[i].input_schema_json);
+        cJSON *schema = cJSON_Parse(tool_schema_json(&s_tools[i]));
         if (schema) {
             cJSON_AddItemToObject(tool, "input_schema", schema);
         }
 
         cJSON_AddItemToArray(arr, tool);
     }
+
+    const char *provider_tools = tool_provider_get_all_tools_json();
+    cJSON *provider_arr = provider_tools ? cJSON_Parse(provider_tools) : NULL;
+    if (provider_arr && cJSON_IsArray(provider_arr)) {
+        int n = cJSON_GetArraySize(provider_arr);
+        for (int i = 0; i < n; i++) {
+            cJSON *it = cJSON_GetArrayItem(provider_arr, i);
+            if (!it) continue;
+            cJSON_AddItemToArray(arr, cJSON_Duplicate(it, 1));
+        }
+    }
+    cJSON_Delete(provider_arr);
 
     free(s_tools_json);
     s_tools_json = cJSON_PrintUnformatted(arr);
@@ -82,13 +109,15 @@ static void build_tools_json(void)
 mimi_err_t tool_registry_init(void)
 {
     s_tool_count = 0;
+    (void)tool_provider_registry_init();
+    (void)tool_provider_register(mcp_stdio_provider_get());
 
     /* Register web_search */
     tool_web_search_init();
     mimi_tool_t ws = {
         .name = "web_search",
-        .description = "Search the web for current information. Use this when you need up-to-date facts, news, weather, or anything beyond your training data.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The search query\"}},\"required\":[\"query\"]}",
+        .description = tool_web_search_description(),
+        .schema_json = tool_web_search_schema_json,
         .requires_confirmation = false,
         .execute = tool_web_search_execute,
     };
@@ -97,11 +126,8 @@ mimi_err_t tool_registry_init(void)
     /* Register get_current_time */
     mimi_tool_t gt = {
         .name = "get_current_time",
-        .description = "Get the current date and time. Also sets the system clock. Call this when you need to know what time or date it is.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{}," 
-            "\"required\":[]}",
+        .description = tool_get_time_description(),
+        .schema_json = tool_get_time_schema_json,
         .requires_confirmation = false,
         .execute = tool_get_time_execute,
     };
@@ -110,11 +136,8 @@ mimi_err_t tool_registry_init(void)
     /* Register read_file */
     mimi_tool_t rf = {
         .name = "read_file",
-        .description = "Read a file from storage. Path must not contain '..'.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"}}," 
-            "\"required\":[\"path\"]}",
+        .description = tool_read_file_description(),
+        .schema_json = tool_read_file_schema_json,
         .requires_confirmation = false,
         .execute = tool_read_file_execute,
     };
@@ -123,12 +146,8 @@ mimi_err_t tool_registry_init(void)
     /* Register write_file */
     mimi_tool_t wf = {
         .name = "write_file",
-        .description = "Write or overwrite a file on storage. Path must not contain '..'.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"}," 
-            "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}}," 
-            "\"required\":[\"path\",\"content\"]}",
+        .description = tool_write_file_description(),
+        .schema_json = tool_write_file_schema_json,
         .requires_confirmation = true,
         .execute = tool_write_file_execute,
     };
@@ -137,13 +156,8 @@ mimi_err_t tool_registry_init(void)
     /* Register edit_file */
     mimi_tool_t ef = {
         .name = "edit_file",
-        .description = "Find and replace text in a file on SPIFFS. Replaces first occurrence of old_string with new_string.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Filesystem path (absolute or relative, no .. segments)\"}," 
-            "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"}," 
-            "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}}," 
-            "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
+        .description = tool_edit_file_description(),
+        .schema_json = tool_edit_file_schema_json,
         .requires_confirmation = true,
         .execute = tool_edit_file_execute,
     };
@@ -152,11 +166,8 @@ mimi_err_t tool_registry_init(void)
     /* Register list_dir */
     mimi_tool_t ld = {
         .name = "list_dir",
-        .description = "List files on storage, optionally filtered by path prefix.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter (e.g. memory/)\"}}," 
-            "\"required\":[]}",
+        .description = tool_list_dir_description(),
+        .schema_json = tool_list_dir_schema_json,
         .requires_confirmation = false,
         .execute = tool_list_dir_execute,
     };
@@ -165,19 +176,8 @@ mimi_err_t tool_registry_init(void)
     /* Register cron_add */
     mimi_tool_t ca = {
         .name = "cron_add",
-        .description = "Schedule a recurring or one-shot task. The message will trigger an agent turn when the job fires.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{" 
-            "\"name\":{\"type\":\"string\",\"description\":\"Short name for the job\"}," 
-            "\"schedule_type\":{\"type\":\"string\",\"description\":\"'every' for recurring interval or 'at' for one-shot at a unix timestamp\"}," 
-            "\"interval_s\":{\"type\":\"integer\",\"description\":\"Interval in seconds (required for 'every')\"}," 
-            "\"at_epoch\":{\"type\":\"integer\",\"description\":\"Unix timestamp to fire at (required for 'at')\"}," 
-            "\"message\":{\"type\":\"string\",\"description\":\"Message to inject when the job fires, triggering an agent turn\"}," 
-            "\"channel\":{\"type\":\"string\",\"description\":\"Optional reply channel (e.g. 'telegram'). If omitted, current turn channel is used when available\"}," 
-            "\"chat_id\":{\"type\":\"string\",\"description\":\"Optional reply chat_id. Required when channel='telegram'. If omitted during a Telegram turn, current chat_id is used\"}" 
-            "}," 
-            "\"required\":[\"name\",\"schedule_type\",\"message\"]}",
+        .description = tool_cron_add_description(),
+        .schema_json = tool_cron_add_schema_json,
         .requires_confirmation = true,
         .execute = tool_cron_add_execute,
     };
@@ -186,11 +186,8 @@ mimi_err_t tool_registry_init(void)
     /* Register cron_list */
     mimi_tool_t cl = {
         .name = "cron_list",
-        .description = "List all scheduled cron jobs with their status, schedule, and IDs.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{}," 
-            "\"required\":[]}",
+        .description = tool_cron_list_description(),
+        .schema_json = tool_cron_list_schema_json,
         .requires_confirmation = false,
         .execute = tool_cron_list_execute,
     };
@@ -199,36 +196,30 @@ mimi_err_t tool_registry_init(void)
     /* Register cron_remove */
     mimi_tool_t cr = {
         .name = "cron_remove",
-        .description = "Remove a scheduled cron job by its ID.",
-        .input_schema_json =
-            "{\"type\":\"object\"," 
-            "\"properties\":{\"job_id\":{\"type\":\"string\",\"description\":\"The 8-character job ID to remove\"}}," 
-            "\"required\":[\"job_id\"]}",
+        .description = tool_cron_remove_description(),
+        .schema_json = tool_cron_remove_schema_json,
         .requires_confirmation = false,
         .execute = tool_cron_remove_execute,
     };
     register_tool(&cr);
 
-    /* Register bash */
-    mimi_tool_t bash = {
-        .name = "bash",
-        .description = "Execute a bash command in the workspace. Use this to run shell commands, scripts, or system operations. Commands are executed in the session's workspace directory.",
-        .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The bash command to execute\"}},"
-            "\"required\":[\"command\"]}",
+    /* Register exec (one-shot) */
+    mimi_tool_t exec = {
+        .name = "exec",
+        .description = tool_exec_description(),
+        .schema_json = tool_exec_schema_json,
         .requires_confirmation = true,
-        .execute = tool_bash_execute,
+        .execute = tool_exec_execute,
     };
-    register_tool(&bash);
+    register_tool(&exec);
 
 #if MIMI_ENABLE_SUBAGENT
     /* Subagent orchestration: spawn/join/cancel/list/steer */
     (void)subagent_manager_init();
     mimi_tool_t sa = {
         .name = "subagents",
-        .description = "Spawn, list, steer, join, or cancel in-proc subagents for this requester session.",
-        .input_schema_json = tool_subagents_schema_json(),
+        .description = tool_subagents_description(),
+        .schema_json = tool_subagents_schema_json,
         .requires_confirmation = false,
         .execute = tool_subagents_execute,
     };
@@ -258,6 +249,10 @@ mimi_err_t tool_registry_execute(const char *name, const char *input_json,
     }
 
     MIMI_LOGW(TAG, "Unknown tool: %s", name);
+    mimi_err_t perr = tool_provider_execute(name, input_json, output, output_size, session_ctx);
+    if (perr != MIMI_ERR_NOT_FOUND) {
+        return perr;
+    }
     snprintf(output, output_size, "Error: unknown tool '%s'", name);
     return MIMI_ERR_NOT_FOUND;
 }
@@ -465,8 +460,8 @@ bool tool_registry_requires_confirmation(const char *tool_name)
             return s_tools[i].requires_confirmation;
         }
     }
-    
-    return false;
+
+    return tool_provider_requires_confirmation(tool_name, false);
 }
 
 mimi_err_t tool_registry_deinit(void)
@@ -476,6 +471,7 @@ mimi_err_t tool_registry_deinit(void)
     // Cleanup other resources
     free(s_tools_json);
     s_tools_json = NULL;
+    tool_provider_registry_deinit();
     
     MIMI_LOGD(TAG, "Tool registry deinitialized");
     return MIMI_OK;

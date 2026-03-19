@@ -10,6 +10,19 @@
 #include "cJSON.h"
 
 static const char *TAG = "tool_cron";
+static const char *CRON_ADD_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Short name for the job\"},\"schedule_type\":{\"type\":\"string\",\"description\":\"'every' for recurring interval or 'at' for one-shot at a unix timestamp\"},\"interval_s\":{\"type\":\"integer\",\"description\":\"Interval in seconds (required for 'every')\"},\"at_epoch\":{\"type\":\"integer\",\"description\":\"Unix timestamp to fire at (required for 'at')\"},\"message\":{\"type\":\"string\",\"description\":\"Message to inject when the job fires, triggering an agent turn\"},\"channel\":{\"type\":\"string\",\"description\":\"Optional reply channel (e.g. 'telegram'). If omitted, current turn channel is used when available\"},\"chat_id\":{\"type\":\"string\",\"description\":\"Optional reply chat_id. Required when channel='telegram'. If omitted during a Telegram turn, current chat_id is used\"}},\"required\":[\"name\",\"schedule_type\",\"message\"],\"additionalProperties\":false}";
+static const char *CRON_LIST_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}";
+static const char *CRON_REMOVE_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{\"job_id\":{\"type\":\"string\",\"description\":\"The 8-character job ID to remove\"}},\"required\":[\"job_id\"],\"additionalProperties\":false}";
+
+const char *tool_cron_add_schema_json(void) { return CRON_ADD_SCHEMA; }
+const char *tool_cron_add_description(void) { return "Schedule a recurring or one-shot task. The message will trigger an agent turn when the job fires."; }
+const char *tool_cron_list_schema_json(void) { return CRON_LIST_SCHEMA; }
+const char *tool_cron_list_description(void) { return "List all scheduled cron jobs with their status, schedule, and IDs."; }
+const char *tool_cron_remove_schema_json(void) { return CRON_REMOVE_SCHEMA; }
+const char *tool_cron_remove_description(void) { return "Remove a scheduled cron job by its ID."; }
 
 /* ── cron_add ─────────────────────────────────────────────────── */
 

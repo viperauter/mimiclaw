@@ -73,6 +73,7 @@ static void set_finished_locked(subagent_task_t *t,
                                 subagent_terminal_reason_t reason,
                                 bool ok,
                                 const char *content,
+                                const char *final_text,
                                 const char *error,
                                 bool truncated)
 {
@@ -85,6 +86,10 @@ static void set_finished_locked(subagent_task_t *t,
     t->join.ok = ok;
     t->join.truncated = truncated;
 
+    if (final_text && final_text[0]) {
+        strncpy(t->join.final_text, final_text, sizeof(t->join.final_text) - 1);
+        t->join.final_text[sizeof(t->join.final_text) - 1] = '\0';
+    }
     if (content && content[0]) {
         strncpy(t->join.content, content, sizeof(t->join.content) - 1);
         t->join.content[sizeof(t->join.content) - 1] = '\0';
@@ -189,14 +194,14 @@ static void llm_cb(mimi_err_t result, llm_response_t *resp, void *user_data)
     }
 
     if (t->cancel_kill) {
-        set_finished_locked(t, SUBAGENT_REASON_KILLED, false, "", "killed", false);
+        set_finished_locked(t, SUBAGENT_REASON_KILLED, false, "", "", "killed", false);
         mimi_mutex_unlock(t->mu);
         llm_response_free(resp);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
         return;
     }
     if (t->cancel_soft) {
-        set_finished_locked(t, SUBAGENT_REASON_CANCELLED, false, "", "cancelled", false);
+        set_finished_locked(t, SUBAGENT_REASON_CANCELLED, false, "", "", "cancelled", false);
         mimi_mutex_unlock(t->mu);
         llm_response_free(resp);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
@@ -207,7 +212,7 @@ static void llm_cb(mimi_err_t result, llm_response_t *resp, void *user_data)
         const char *err = llm_get_last_error();
         char buf[256];
         snprintf(buf, sizeof(buf), "llm error: %s", mimi_err_to_name(result));
-        set_finished_locked(t, SUBAGENT_REASON_FAILED, false, "", err && err[0] ? err : buf, false);
+        set_finished_locked(t, SUBAGENT_REASON_FAILED, false, "", "", err && err[0] ? err : buf, false);
         mimi_mutex_unlock(t->mu);
         llm_response_free(resp);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
@@ -223,7 +228,7 @@ static void llm_cb(mimi_err_t result, llm_response_t *resp, void *user_data)
             excerpt[sizeof(excerpt) - 1] = '\0';
             if (strlen(text) >= sizeof(excerpt) - 1) trunc = true;
         }
-        set_finished_locked(t, SUBAGENT_REASON_COMPLETED, true, excerpt, "", trunc);
+        set_finished_locked(t, SUBAGENT_REASON_COMPLETED, true, excerpt, text, "", trunc);
         mimi_mutex_unlock(t->mu);
         llm_response_free(resp);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
@@ -323,27 +328,27 @@ static void subagent_step_llm(subagent_task_t *t)
         return;
     }
     if (t->cancel_kill) {
-        set_finished_locked(t, SUBAGENT_REASON_KILLED, false, "", "killed", false);
+        set_finished_locked(t, SUBAGENT_REASON_KILLED, false, "", "", "killed", false);
         mimi_mutex_unlock(t->mu);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
         return;
     }
     if (t->cancel_soft) {
-        set_finished_locked(t, SUBAGENT_REASON_CANCELLED, false, "", "cancelled", false);
+        set_finished_locked(t, SUBAGENT_REASON_CANCELLED, false, "", "", "cancelled", false);
         mimi_mutex_unlock(t->mu);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
         return;
     }
 
     if (t->deadline_ms > 0 && mimi_time_ms() > t->deadline_ms) {
-        set_finished_locked(t, SUBAGENT_REASON_TIMED_OUT, false, "", "timed out", false);
+        set_finished_locked(t, SUBAGENT_REASON_TIMED_OUT, false, "", "", "timed out", false);
         mimi_mutex_unlock(t->mu);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
         return;
     }
 
     if (t->rec.iters_used >= t->max_iters) {
-        set_finished_locked(t, SUBAGENT_REASON_RESOURCE_EXHAUSTED, false, "", "max iterations reached", false);
+        set_finished_locked(t, SUBAGENT_REASON_RESOURCE_EXHAUSTED, false, "", "", "max iterations reached", false);
         mimi_mutex_unlock(t->mu);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
         return;
@@ -366,7 +371,7 @@ static void subagent_step_llm(subagent_task_t *t)
     if (err != MIMI_OK) {
         mimi_mutex_lock(t->mu);
         t->llm_inflight = false;
-        set_finished_locked(t, SUBAGENT_REASON_FAILED, false, "", "failed to dispatch llm call", false);
+        set_finished_locked(t, SUBAGENT_REASON_FAILED, false, "", "", "failed to dispatch llm call", false);
         mimi_mutex_unlock(t->mu);
         if (t->on_finish) t->on_finish(t, t->on_finish_ud);
     }

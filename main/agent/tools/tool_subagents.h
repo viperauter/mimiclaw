@@ -9,4 +9,5 @@ mimi_err_t tool_subagents_execute(const char *input_json,
                                  const mimi_session_ctx_t *session_ctx);
 
 const char *tool_subagents_schema_json(void);
+const char *tool_subagents_description(void);
 

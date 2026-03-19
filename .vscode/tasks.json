@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "jsonl: render to markdown (fold long fields)",
+      "type": "shell",
+      "command": "FILE=\"${file}\"; OUTDIR=\"${workspaceFolder}/traces_logs\"; mkdir -p \"$OUTDIR\"; OUT=\"$OUTDIR/${fileBasename}.md\"; python3 \"${workspaceFolder}/scripts/jsonl_to_md.py\" \"$FILE\" -o \"$OUT\" && echo \"Output written to $OUT\"",
+      "problemMatcher": []
+    }
+  ]
+}

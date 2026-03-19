@@ -145,11 +145,15 @@ mimi_err_t subagent_config_init(void)
         subagent_profile_runtime_t *dst = &s_profiles[s_profile_count];
         memset(dst, 0, sizeof(*dst));
 
-        /* Parse known fields (ignore unknown fields for forward compatibility). */
+        /* Parse known fields (ignore unknown fields for forward compatibility).
+         * Provide minimal-config defaults so users can treat subagents as "just there". */
         const char *name = mimi_cfg_get_str(sa, "name", "");
         const char *profile = mimi_cfg_get_str(sa, "profile", NULL);
         if (!profile || !profile[0]) profile = mimi_cfg_get_str(sa, "role", ""); /* legacy compat */
+        if (!profile || !profile[0]) profile = "default";
         const char *system_file = mimi_cfg_get_str(sa, "systemPromptFile", "");
+        if (!system_file || !system_file[0]) system_file = "agents/default/SYSTEM.md";
+        if (!name || !name[0]) name = profile;
 
         strncpy(dst->cfg.name, name, sizeof(dst->cfg.name) - 1);
         strncpy(dst->cfg.profile, profile, sizeof(dst->cfg.profile) - 1);

@@ -86,6 +86,7 @@ set(APP_SRC
     main/core/platform/websocket/mg_impl/ws_client.c
     main/core/platform/websocket/mg_impl/ws_server.c
     main/core/platform/path_utils.c
+    main/core/platform/exec.c
 )
 
 # OS backend specific files
@@ -138,11 +139,13 @@ list(APPEND APP_SRC
     main/agent/subagent/subagent_task.c
     main/agent/control/control_manager.c
     main/agent/tools/tool_registry.c
+    main/agent/tools/tool_provider.c
+    main/agent/tools/providers/mcp_stdio_provider.c
     main/agent/tools/tool_files.c
     main/agent/tools/tool_cron.c
     main/agent/tools/tool_web_search.c
     main/agent/tools/tool_get_time.c
-    main/agent/tools/tool_bash.c
+    main/agent/tools/tool_exec.c
     main/agent/tools/tool_subagents.c
 
     # Interface modules (moved to interface/ directory)

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 /* ── Trace routing (best-effort) ─────────────────────────────── */
 
@@ -81,6 +82,36 @@ static char *dup_truncated(const char *s, size_t max_bytes)
     memcpy(out, s, keep);
     out[keep] = '\0';
     return out;
+}
+
+static void add_ts_fields(cJSON *obj, uint64_t ts_ms)
+{
+    if (!obj) return;
+    cJSON_AddNumberToObject(obj, "ts_ms", (double)ts_ms);
+
+    /* Human-friendly time for quick scanning (keeps ts_ms as source of truth). */
+    char buf[32];
+    buf[0] = '\0';
+    time_t sec = (time_t)(ts_ms / 1000ULL);
+    unsigned ms = (unsigned)(ts_ms % 1000ULL);
+
+#ifdef _WIN32
+    struct tm tm_info;
+    if (localtime_s(&tm_info, &sec) == 0) {
+        snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03u",
+                 tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec, ms);
+    }
+#else
+    struct tm tm_info;
+    if (localtime_r(&sec, &tm_info) != NULL) {
+        snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03u",
+                 tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec, ms);
+    }
+#endif
+
+    if (buf[0]) {
+        cJSON_AddStringToObject(obj, "ts", buf);
+    }
 }
 
 static mimi_err_t ensure_trace_dir(char *dir_out, size_t dir_out_size)
@@ -245,7 +276,7 @@ mimi_err_t llm_trace_event_kv(const char *trace_id,
     cJSON *obj = cJSON_CreateObject();
     if (!obj) return MIMI_ERR_NO_MEM;
 
-    cJSON_AddNumberToObject(obj, "ts_ms", (double)mimi_time_ms());
+    add_ts_fields(obj, mimi_time_ms());
     cJSON_AddStringToObject(obj, "trace_id", trace_id ? trace_id : "");
     cJSON_AddStringToObject(obj, "event", event ? event : "");
 
@@ -270,7 +301,7 @@ mimi_err_t llm_trace_event_json(const char *trace_id,
     cJSON *obj = cJSON_CreateObject();
     if (!obj) return MIMI_ERR_NO_MEM;
 
-    cJSON_AddNumberToObject(obj, "ts_ms", (double)mimi_time_ms());
+    add_ts_fields(obj, mimi_time_ms());
     cJSON_AddStringToObject(obj, "trace_id", trace_id ? trace_id : "");
     cJSON_AddStringToObject(obj, "event", event ? event : "");
 

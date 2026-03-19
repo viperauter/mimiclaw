@@ -7,6 +7,8 @@
  * Initialize web search tool.
  */
 mimi_err_t tool_web_search_init(void);
+const char *tool_web_search_schema_json(void);
+const char *tool_web_search_description(void);
 
 /**
  * Execute a web search.

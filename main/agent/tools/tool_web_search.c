@@ -11,10 +11,17 @@
 #include "cJSON.h"
 
 static const char *TAG = "web_search_posix";
+static const char *TOOL_SCHEMA =
+    "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The search query\"}},\"required\":[\"query\"],\"additionalProperties\":false}";
+static const char *TOOL_DESCRIPTION =
+    "Search the web for current information. Use this when you need up-to-date facts, news, weather, or anything beyond your training data.";
 
 static char s_search_key[128] = {0};
 
 #define SEARCH_RESULT_COUNT 5
+
+const char *tool_web_search_schema_json(void) { return TOOL_SCHEMA; }
+const char *tool_web_search_description(void) { return TOOL_DESCRIPTION; }
 
 static size_t url_encode(const char *src, char *dst, size_t dst_size)
 {
