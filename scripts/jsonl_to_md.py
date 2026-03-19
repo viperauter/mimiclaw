@@ -146,6 +146,7 @@ def _write_kv(out, k: str, v: Any) -> None:
             summary = f"{k}: {_one_line(v, 100)}" if v.strip() else k
             out.write("<details>\n")
             out.write(f"<summary><code>{summary}</code></summary>\n\n")
+            out.write("<div style=\"margin-left: 1em;\">\n\n")
             if parsed is not None and not isinstance(parsed, str):
                 txt = _format_json(parsed)
                 fence = _best_fence(txt)
@@ -153,6 +154,7 @@ def _write_kv(out, k: str, v: Any) -> None:
             else:
                 fence = _best_fence(v)
                 out.write(f"{fence}text\n{v}\n{fence}\n\n")
+            out.write("</div>\n\n")
             out.write("</details>\n\n")
             return
 
@@ -179,11 +181,9 @@ def _write_record_details(out, rec: Record) -> None:
 
     # Minimal meta (avoid repeating what is already in section title/table)
     meta_bits: List[str] = []
+    # Skip ts_ms - already shown in the summary line
     if isinstance(obj.get("ts"), str) and obj.get("ts"):
         meta_bits.append(f"**ts**={obj.get('ts')}")
-    ts_fmt = _format_ts_ms(obj.get("ts_ms"))
-    if ts_fmt:
-        meta_bits.append(f"**ts_ms**={ts_fmt.split(' (', 1)[1].rstrip(')')}")
     if isinstance(obj.get("channel"), str) and obj.get("channel"):
         meta_bits.append(f"**channel**={obj.get('channel')}")
     if isinstance(obj.get("chat_id"), str) and obj.get("chat_id"):
@@ -196,7 +196,6 @@ def _write_record_details(out, rec: Record) -> None:
         v = obj.get(k)
         if isinstance(v, str) and v.strip():
             out.write(f"- **{k}**: {_one_line(v, 220)}\n")
-    out.write("\n")
 
     # Payload keys: skip common/meta keys so record content is not repetitive
     skip = set(PREVIEW_KEYS) | {"event", "trace_id", "ts_ms", "ts", "channel", "chat_id", "iteration"}
@@ -205,14 +204,39 @@ def _write_record_details(out, rec: Record) -> None:
         _write_kv(out, k, obj.get(k))
 
 
+def _has_substantial_content(obj: Dict[str, Any]) -> bool:
+    """Check if record has content worth expanding (beyond just ts_ms)."""
+    if not isinstance(obj, dict):
+        return True
+    skip = {"event", "trace_id", "ts_ms", "ts", "channel", "chat_id", "iteration"}
+    for k in obj.keys():
+        if k not in skip:
+            return True
+    return False
+
+
 def _write_trace_group(out, trace_id: str, recs: List[Record]) -> None:
     recs_sorted = sorted(recs, key=lambda r: (r.ts_ms is None, r.ts_ms or 0, r.line))
 
+    # Calculate summary info for the trace
+    ts_list = sorted([r.ts_ms for r in recs if r.ts_ms is not None])
+    start = ""
+    dur = ""
+    if ts_list:
+        start = (_format_ts_ms(ts_list[0]) or "").split(" (", 1)[0]
+        if len(ts_list) >= 2:
+            dur = f"{ts_list[-1] - ts_list[0]} ms"
+
+    # Fold entire trace group by default (with anchor for linking - use hidden span for better compatibility)
+    anchor_id = trace_id.replace(":", "_").replace(".", "_").replace("-", "_") if trace_id else "none"
+    out.write(f'<span id="trace-{anchor_id}"></span>\n')
+    out.write("<details>\n")
+    out.write(f"<summary><code>trace_id: {trace_id or '(none)'}</code> · <strong>{len(recs)} events</strong> · start: {start} · duration: {dur}</summary>\n\n")
+
     out.write(f"## trace_id: `{trace_id or '(none)'}`\n\n")
 
-    # Timeline table (scannable)
-    out.write("| line | time | Δms | event | preview |\n")
-    out.write("|---:|---|---:|---|---|\n")
+    # Timeline: each record as a collapsible item with rich summary
+    # No separate table - the summary line itself contains all scannable info
     prev: Optional[int] = None
     for r in recs_sorted:
         o = r.obj if isinstance(r.obj, dict) else {}
@@ -220,7 +244,7 @@ def _write_trace_group(out, trace_id: str, recs: List[Record]) -> None:
         ts_short = ts_fmt.split(" (", 1)[0] if ts_fmt else ""
         delta = ""
         if r.ts_ms is not None and prev is not None:
-            delta = str(r.ts_ms - prev)
+            delta = f"+{r.ts_ms - prev}ms"
         if r.ts_ms is not None:
             prev = r.ts_ms
         preview = ""
@@ -228,31 +252,61 @@ def _write_trace_group(out, trace_id: str, recs: List[Record]) -> None:
             for k in PREVIEW_KEYS:
                 v = o.get(k)
                 if isinstance(v, str) and v.strip():
-                    preview = f"{k}={_one_line(v, 80)}"
+                    preview = f" · {_one_line(v, 60)}"
                     break
-        out.write(f"| {r.line} | {ts_short} | {delta} | `{r.event}` | {preview} |\n")
-    out.write("\n")
 
-    # Fold each record details by default
-    for r in recs_sorted:
+        # Level 2 indent: wrap each event (inside trace group) with 1em indent
+        out.write("<div style=\"margin-left: 1em;\">\n")
+
+        # Always use <details> for visual consistency, even if no content
+        has_content = _has_substantial_content(o)
         out.write("<details>\n")
-        out.write(f"<summary><code>L{r.line} {_record_title(r.obj if isinstance(r.obj, dict) else {}, r.line)}</code></summary>\n\n")
-        _write_record_details(out, r)
+        out.write(f"<summary><code>L{r.line}</code> {ts_short} <code>{delta:>6}</code> <strong><code>{r.event}</code></strong>{preview}</summary>\n\n")
+        if has_content:
+            # Level 3 indent: content inside each event
+            out.write("<div style=\"margin-left: 1em;\">\n\n")
+            _write_record_details(out, r)
+            out.write("</div>\n\n")
+        else:
+            # No content: show a subtle indicator
+            out.write("<div style=\"margin-left: 1em; color: #666; font-style: italic;\">\n")
+            out.write("(无额外内容)\n\n")
+            out.write("</div>\n")
         out.write("</details>\n\n")
+
+        out.write("</div>\n")
+
+    out.write("</details>\n\n")
+
+
+def _get_user_input(recs: List[Record]) -> str:
+    """Get user_input preview from the first request_start event in a trace."""
+    for r in recs:
+        if isinstance(r.obj, dict) and r.obj.get("event") == "request_start":
+            user_input = r.obj.get("user_input")
+            if isinstance(user_input, str) and user_input.strip():
+                return _one_line(user_input, 100)
+    return ""
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Render JSONL into a trace-friendly Markdown file.")
     ap.add_argument("input", help="Path to .jsonl")
-    ap.add_argument("-o", "--output", default="", help="Output .md path (default: .vscode/jsonl_out/<basename>.md)")
+    ap.add_argument("-o", "--output", default="", help="Output .md path or directory (default: traces_logs/<basename>.md)")
     args = ap.parse_args()
 
     inp = os.path.abspath(args.input)
+    base = os.path.basename(inp)
+
     if args.output:
         outp = os.path.abspath(args.output)
+        # If output is a directory, generate filename inside it
+        if os.path.isdir(outp):
+            outp = os.path.join(outp, f"{base}.md")
     else:
-        base = os.path.basename(inp)
-        out_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".vscode", "jsonl_out")
+        # Default: output to traces_logs directory under workspace root
+        script_dir = os.path.dirname(os.path.dirname(__file__))
+        out_dir = os.path.join(script_dir, "traces_logs")
         outp = os.path.join(out_dir, f"{base}.md")
 
     os.makedirs(os.path.dirname(outp), exist_ok=True)
@@ -267,8 +321,8 @@ def main() -> int:
         out.write(f"# LLM trace render\n\n- **input**: `{inp}`\n- **generated**: `{now}`\n\n")
 
         out.write("## Summary\n\n")
-        out.write("| trace_id | events | start | end | duration |\n")
-        out.write("|---|---:|---|---|---:|\n")
+        out.write("| trace_id | events | start | end | duration | preview |\n")
+        out.write("|---|---:|---|---|---:|---|\n")
         for tid, recs in sorted(by_tid.items(), key=lambda kv: kv[0]):
             ts_list = sorted([r.ts_ms for r in recs if r.ts_ms is not None])
             start = ""
@@ -279,7 +333,9 @@ def main() -> int:
                 end = (_format_ts_ms(ts_list[-1]) or "").split(" (", 1)[0]
                 if len(ts_list) >= 2:
                     dur = f"{ts_list[-1] - ts_list[0]} ms"
-            out.write(f"| `{tid or '(none)'}` | {len(recs)} | {start} | {end} | {dur} |\n")
+            user_input = _get_user_input(recs)
+            anchor_id = tid.replace(":", "_").replace(".", "_").replace("-", "_") if tid else "none"
+            out.write(f"| [`{tid or '(none)'}`](#trace-{anchor_id}) | {len(recs)} | {start} | {end} | {dur} | {user_input} |\n")
 
         out.write("\n---\n\n")
 

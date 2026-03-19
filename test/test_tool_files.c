@@ -1,4 +1,5 @@
 #include "unity.h"
+TEST_SOURCE_FILE("main/agent/tools/tool_files.c")
 #include "tools/tool_files.h"
 #include "fs/fs.h"
 #include <stdio.h>

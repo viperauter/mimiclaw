@@ -2,7 +2,7 @@
   :name: mimiclaw
   :build_root: build/ceedling
   :use_exceptions: FALSE
-  :use_test_preprocessor: TRUE
+  :use_test_preprocessor: :none
   :use_auxiliary_dependencies: TRUE
   :use_deep_dependencies: TRUE
   :test_file_prefix: test_
@@ -12,8 +12,6 @@
 :paths:
   :test:
     - +:test/**
-  :support:
-    - test/support
   :source:
     - main
     - main/core
@@ -26,8 +24,22 @@
     - main/memory
     - third_party
     - third_party/cjson
+  :include:
+    - main
+    - main/agent
+    - main/agent/tools
+    - main/core
+    - main/core/config
+    - main/core/platform
+    - main/core/platform/os
+    - main/services
+    - third_party
+    - third_party/cjson
+    - test/test_support
 
 :files:
+  :test:
+    - +:test/**
   :source:
     - main/agent/tools/tool_files.c
     - main/agent/tools/tool_cron.c
@@ -36,14 +48,14 @@
     - main/agent/tools/tool_exec.c
     - main/agent/tools/tool_registry.c
   :support:
-    - test/support/tool_registry_stubs.c
-    # Always-linked deps for tools under test
+    # Common support files for all tests
     - third_party/cjson/cJSON.c
     - main/core/platform/mimi_err.c
     - main/core/platform/log.c
     - main/core/platform/path_utils.c
     - main/core/platform/fs/fs.c
     - main/core/platform/fs/posix_impl/fs_posix.c
+    - main/core/platform/exec.c
 
 :defines:
   :common: &common_defines []
@@ -58,6 +70,8 @@
     - -Wall
     - -Wextra
     - -O0
+    - -D_POSIX_C_SOURCE=200809L
+    - -D_GNU_SOURCE
 
 :libraries:
   :placement: :end
@@ -66,9 +80,22 @@
   :system:
     - m
     - pthread
+    - util
   :test: []
   :release: []
 
 :plugins:
   :enabled:
-    - stdout_pretty_tests_report
+    - fff
+    - report_tests_gtestlike_stdout
+
+:cmock:
+  :mock_prefix: mock_
+  :when_no_prototypes: :warn
+  :enforce_strict_ordering: TRUE
+  :when_ptr: :compare_ptr
+  :treat_as_void:
+    - mimi_cond_t
+    - mimi_mutex_t
+    - mimi_task_handle_t
+    - mimi_timer_handle_t
