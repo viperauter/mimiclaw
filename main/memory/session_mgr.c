@@ -165,6 +165,17 @@ mimi_err_t session_get_history_json(const char *channel, const char *chat_id, ch
     cJSON_Delete(arr);
 
     if (json_str) {
+        size_t json_len = strlen(json_str);
+        if (json_len >= size) {
+            /* Buffer saturated - history will be truncated.
+             * This indicates that context_tokens may be too large for the buffer,
+             * or there are more messages than the buffer can hold.
+             */
+            MIMI_LOGW("session_mgr", 
+                      "History buffer saturated! JSON size: %zu, Buffer size: %zu. "
+                      "Some history will be lost. Consider increasing context_tokens or buffer size.",
+                      json_len, size);
+        }
         strncpy(buf, json_str, size - 1);
         buf[size - 1] = '\0';
         free(json_str);

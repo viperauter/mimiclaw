@@ -36,6 +36,7 @@
     - main/services
     - third_party
     - third_party/cjson
+    - third_party/mongoose
     - test/test_support
 
 :files:
@@ -45,6 +46,7 @@
     - main/agent/context/context_budget_plan.c
     - main/agent/context/context_compact.c
     - main/agent/context/context_assembler.c
+    - main/agent/context/context_builder.c
     - main/agent/tools/tool_files.c
     - main/agent/tools/tool_cron.c
     - main/agent/tools/tool_get_time.c
@@ -54,12 +56,14 @@
   :support:
     # Common support files for all tests
     - third_party/cjson/cJSON.c
+    - third_party/mongoose/mongoose.c
     - main/core/platform/mimi_err.c
     - main/core/platform/log.c
     - main/core/platform/path_utils.c
     - main/core/platform/fs/fs.c
     - main/core/platform/fs/posix_impl/fs_posix.c
     - main/core/platform/exec.c
+    - main/core/platform/os/posix_impl/os_posix.c
 
 :defines:
   :common: &common_defines []

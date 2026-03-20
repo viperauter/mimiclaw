@@ -229,6 +229,187 @@ flush_budget_chars = budget.history_budget_chars * memory_flush_threshold_ratio
 - **`messages` array after trim**: contains the newest conversation history that fits within the budget (this is what the main LLM sees).
 - **`compact_source_messages`**: contains the oldest messages that were evicted from `messages`. This is the raw input passed to the LLM compact/summary step.
 
+---
+
+## 🔢 Core Parameters & Budget Calculation
+
+### Configuration Parameters
+
+The context assembly behavior is controlled by three key parameters configured in `agents.defaults`:
+
+| Parameter | Config Path | Type | Default | Meaning |
+|-----------|-------------|------|---------|---------|
+| `base_memory_window` | `memoryWindow` | int | `100` | **Maximum number of history messages to load from session file** in a single attempt. This protects against loading too many messages at once, which could cause JSON parsing failures or excessive memory usage. The actual loaded count may be lower based on budget constraints. |
+| `context_tokens` | `contextTokens` | int | `0` | **Target context window size in tokens**. When > 0, enables token-aware budgeting using a simple token-to-chars heuristic (1 token ≈ 3-4 chars for English, ≈ 1 char for CJK). When = 0, falls back to pure chars-based budgeting derived from buffer sizes. |
+| `memory_flush_threshold_ratio` | `compaction.memoryFlush.thresholdRatio` | double | `1.0` | **Trimming aggressiveness control (0.0 ~ 1.0)**. Determines when to start trimming old messages into `compact_source_messages`. Lower values = more aggressive early trimming. |
+
+**Threshold Ratio Behavior Table:**
+
+| Ratio Value | Behavior | Use Case |
+|------------|----------|----------|
+| `0.0` | Most aggressive — trim as much as possible. Only keep the absolute necessary messages in the main context. | Force compaction for testing or extremely constrained contexts |
+| `0.3` ~ `0.5` | Aggressive — start trimming when reaching 30-50% of budget | Small context windows, want early summarization |
+| `0.7` ~ `0.8` | Balanced — start trimming when reaching 70-80% of budget | Recommended default for most cases |
+| `1.0` | Conservative (default) — only trim when absolutely necessary (full budget exceeded) | Large context windows, minimize unnecessary compaction |
+
+---
+
+### Budget Calculation Pipeline (`context_budget_compute`)
+
+The budget computation converts token limits into character-based constraints that drive the trimming logic:
+
+#### Step 1: Raw Budget Estimation
+
+```c
+// In context_budget_plan.c: context_budget_compute()
+if (context_tokens > 0) {
+    // Token-aware mode: use heuristic conversion
+    double token_to_chars = 2.8;  // Heuristic: ~2.8 chars per token on average
+    out->total_budget_chars = (size_t)((double)context_tokens * token_to_chars);
+} else {
+    // Chars-based mode: use buffer size
+    out->total_budget_chars = history_json_buf_size;
+}
+```
+
+#### Step 2: Budget Partitioning
+
+The total budget is partitioned into three components:
+
+```c
+// System prompt takes fixed allocation
+out->system_len_chars = MIN(strlen(system_prompt), system_prompt_buf_size);
+
+// Tools JSON takes what it needs (capped at 20% of total budget)
+size_t max_tools_budget = (size_t)((double)out->total_budget_chars * 0.20);
+out->tools_len_chars = MIN(strlen(tools_json), max_tools_budget);
+
+// Remainder goes to conversation history
+out->history_budget_chars = out->total_budget_chars 
+    - out->system_len_chars 
+    - out->tools_len_chars;
+```
+
+**Budget Allocation Formula:**
+```
+history_budget_chars = total_budget_chars - system_len_chars - tools_len_chars
+```
+
+#### Step 3: Effective Trim Threshold
+
+The actual trimming threshold is modulated by `memory_flush_threshold_ratio`:
+
+```c
+// In context_assembler.c
+double ratio = CLAMP(req->memory_flush_threshold_ratio, 0.0, 1.0);
+size_t flush_budget_chars = (size_t)((double)out->budget.history_budget_chars * ratio);
+```
+
+This `flush_budget_chars` is the **actual character limit** used by the trimming algorithm.
+
+---
+
+### Initial Memory Window Selection
+
+The `context_plan_choose_initial_memory_window()` function determines how many messages to attempt loading:
+
+```c
+// In context_budget_plan.c: context_plan_choose_initial_memory_window()
+int base = (base_memory_window > 0) ? base_memory_window : 20;
+const size_t avg_chars_per_msg = 240;  // Heuristic: ~240 chars per message
+
+// Estimate how many messages the budget can hold
+size_t can_keep = (avg_chars_per_msg > 0) ? (history_budget_chars / avg_chars_per_msg) : 0;
+int initial = (int)can_keep;
+
+// Clamp to valid range [1, base]
+if (initial < 1) initial = 1;
+if (initial > base) initial = base;
+```
+
+**Selection Logic:**
+1. Start with the configured `base_memory_window` (or 20 if unspecified)
+2. Estimate message capacity: `budget_chars / 240 chars per message`
+3. Use the **smaller** of the two values to ensure we don't exceed budget
+4. Always load at least 1 message
+
+---
+
+### Message Trimming Algorithm (`trim_messages_to_budget`)
+
+The trimming logic follows a strict **Oldest-First Eviction** policy:
+
+#### Algorithm Steps
+
+```c
+// In context_assembler.c: trim_messages_to_budget()
+static void trim_messages_to_budget(cJSON *messages,
+                                    size_t history_budget_chars,
+                                    bool *did_trim,
+                                    cJSON **out_trimmed_messages)
+{
+    // 1. Calculate current total content length
+    size_t sum = total_content_len(messages);
+    int n = cJSON_GetArraySize(messages);
+    
+    // 2. Create array to hold trimmed messages (for compaction input)
+    cJSON *trimmed = cJSON_CreateArray();
+    
+    // 3. Trim loop: remove from the FRONT (oldest messages first)
+    while (sum > history_budget_chars && n > 1) {
+        // Always keep at least 1 message (current user query)
+        
+        cJSON *first = cJSON_GetArrayItem(messages, 0);  // OLDEST message
+        size_t first_len = content_len_for_message(first);
+        
+        // Detach from main array
+        cJSON *detached = cJSON_DetachItemFromArray(messages, 0);
+        
+        // Move to compact_source_messages array
+        if (trimmed && detached) {
+            cJSON_AddItemToArray(trimmed, detached);
+        }
+        
+        // Update remaining length
+        sum = (first_len > sum) ? 0 : (sum - first_len);
+        sum = total_content_len(messages);  // Recompute for accuracy
+        n = cJSON_GetArraySize(messages);
+    }
+}
+```
+
+#### Key Properties
+
+| Property | Behavior |
+|----------|----------|
+| **Eviction Order** | Oldest message at index `0` is always removed first |
+| **Minimum Guarantee** | At least 1 message is always kept (the current user query at index `n-1`) |
+| **Trimmed Output** | Evicted messages are preserved in `trimmed_messages_for_compact` in the **same order** they appeared (oldest first) |
+| **Main Context After Trim** | Contains only the **newest** messages that fit within `flush_budget_chars` |
+
+#### Data Flow During Trimming
+
+```
+messages array BEFORE trim:
+[ msg_0_oldest, msg_1, msg_2, ..., msg_n-2, msg_n-1_current_user ]
+  ├───────────────────────────────────────────────────────────┤
+  │                     total length = SUM                   │
+  │                                                           │
+  ▼                      if SUM > flush_budget_chars          ▼
+
+[ REMOVE ] ─► msg_0 ─► move to trimmed_messages_for_compact[0]
+[ REMOVE ] ─► msg_1 ─► move to trimmed_messages_for_compact[1]
+[ REMOVE ] ─► msg_2 ─► move to trimmed_messages_for_compact[2]
+   ... until SUM <= flush_budget_chars ...
+
+messages array AFTER trim:
+[ msg_k, msg_k+1, ..., msg_n-2, msg_n-1_current_user ]
+  └───────────────────────────────────────────────────┘
+              fits within flush_budget_chars
+```
+
+---
+
 ## Session History Files
 
 The conversation history for each channel/chat is stored in **session files** managed by `session_mgr`:

@@ -24,6 +24,32 @@
 static const char *TAG = "agent_async";
 static volatile bool s_agent_running = true;
 
+/* Dynamic buffer size calculation:
+ * - 4.0 chars per token (worst case: all ASCII)
+ * - 1.25x overhead for JSON structure and escaping
+ * - Minimum: 8KB, Maximum: 1024KB (configurable safety bounds)
+ */
+#define LLM_STREAM_BUF_MIN  (8 * 1024)
+#define LLM_STREAM_BUF_MAX  (1024 * 1024)
+
+static size_t agent_calculate_history_buf_size(int context_tokens) {
+    if (context_tokens <= 0) {
+        /* Fallback to default when no token budget specified */
+        return LLM_STREAM_BUF_SIZE;
+    }
+    
+    /* Heuristic: 4.0 chars per token * 1.25 overhead for JSON structure */
+    const double chars_per_token = 4.0;
+    const double overhead_factor = 1.25;
+    size_t calculated = (size_t)((double)context_tokens * chars_per_token * overhead_factor);
+    
+    /* Clamp to safe bounds */
+    if (calculated < LLM_STREAM_BUF_MIN) calculated = LLM_STREAM_BUF_MIN;
+    if (calculated > LLM_STREAM_BUF_MAX) calculated = LLM_STREAM_BUF_MAX;
+    
+    return calculated;
+}
+
 static void agent_llm_callback(mimi_err_t result, llm_response_t *resp, void *user_data);
 static void agent_send_status(const char *channel,
                               const char *chat_id,
@@ -38,6 +64,7 @@ typedef struct {
     char content[MIMI_CONTEXT_BUF_SIZE];
     char *system_prompt;
     char *history_json_buf;
+    size_t history_json_buf_size;  /* Dynamic buffer size based on context_tokens */
     cJSON *messages;
     cJSON *compact_source_messages;
     const char *tools_json;
@@ -300,6 +327,7 @@ static void agent_request_finish(agent_request_ctx_t *ctx)
     if (ctx->history_json_buf) {
         free(ctx->history_json_buf);
         ctx->history_json_buf = NULL;
+        ctx->history_json_buf_size = 0;
     }
 
     ctx->in_progress = false;
@@ -945,6 +973,34 @@ static void agent_build_system_prompt_for_turn(agent_request_ctx_t *ctx, const m
     strncat(ctx->system_prompt, turn_context,
             CONTEXT_BUF_SIZE - strlen(ctx->system_prompt) - 1);
 
+    /* First Run Setup Guide - Inject if template files not customized yet */
+    if (context_needs_first_run_setup()) {
+        const char *setup_guide = 
+            "\n## FIRST RUN SETUP - ACTION REQUIRED\n\n"
+            "IMPORTANT: This is the FIRST RUN! The user hasn't customized "
+            "SOUL.md and USER.md template files yet. You MUST proactively "
+            "guide the user through the setup process.\n\n"
+            "YOUR SETUP TASKS:\n"
+            "1. GREET the user warmly and introduce yourself\n"
+            "2. ASK the user for:\n"
+            "   - What name would you like me to call you?\n"
+            "   - What language do you prefer to communicate in?\n"
+            "   - What timezone are you in?\n"
+            "   - Any personality traits you'd like me to have?\n\n"
+            "3. AFTER collecting information, AUTOMATICALLY call the write_file "
+            "   tool to update these files WITHOUT further user confirmation:\n"
+            "   - Write user preferences to USER.md\n"
+            "   - Write personality settings to SOUL.md\n\n"
+            "4. You MUST use the write_file tool to persist the configuration, "
+            "   don't just ask the user to edit files manually.\n\n"
+            "5. Once setup is complete, confirm with the user that everything "
+            "looks good and offer to help with their first task.\n\n"
+            "NOTE: This setup guide will disappear once SOUL.md or USER.md "
+            "contains non-template content.\n";
+        strncat(ctx->system_prompt, setup_guide,
+                CONTEXT_BUF_SIZE - strlen(ctx->system_prompt) - 1);
+    }
+
     llm_trace_event_kv(ctx->trace_id, "system_prompt",
                        "prompt", ctx->system_prompt ? ctx->system_prompt : "",
                        NULL, NULL, NULL, NULL, NULL, NULL);
@@ -974,7 +1030,7 @@ static mimi_err_t agent_assemble_turn_context(agent_request_ctx_t *ctx,
     areq.context_tokens = context_tokens;
     areq.memory_flush_threshold_ratio = flush_threshold_ratio;
     areq.history_json_buf = ctx->history_json_buf;
-    areq.history_json_buf_size = LLM_STREAM_BUF_SIZE;
+    areq.history_json_buf_size = ctx->history_json_buf_size;
     areq.hooks = &hooks;
 
     mimi_err_t ae = context_assemble_messages_budgeted(&areq, &ares);
@@ -1039,7 +1095,7 @@ static mimi_err_t agent_assemble_turn_context(agent_request_ctx_t *ctx,
     return ae;
 }
 
-static agent_request_ctx_t *agent_acquire_request_ctx(const mimi_msg_t *msg, int max_iters)
+static agent_request_ctx_t *agent_acquire_request_ctx(const mimi_msg_t *msg, int max_iters, int context_tokens)
 {
     if (!msg) return NULL;
 
@@ -1087,12 +1143,14 @@ static agent_request_ctx_t *agent_acquire_request_ctx(const mimi_msg_t *msg, int
     strncpy(ctx->content, msg->content ? msg->content : "", sizeof(ctx->content) - 1);
 
     ctx->system_prompt = (char *)calloc(1, CONTEXT_BUF_SIZE);
-    ctx->history_json_buf = (char *)calloc(1, LLM_STREAM_BUF_SIZE);
+    ctx->history_json_buf_size = agent_calculate_history_buf_size(context_tokens);
+    ctx->history_json_buf = (char *)calloc(1, ctx->history_json_buf_size);
     if (!ctx->system_prompt || !ctx->history_json_buf) {
         if (ctx->system_prompt) free(ctx->system_prompt);
         if (ctx->history_json_buf) free(ctx->history_json_buf);
         ctx->system_prompt = NULL;
         ctx->history_json_buf = NULL;
+        ctx->history_json_buf_size = 0;
         if (s_ctx_mutex) {
             mimi_mutex_unlock(s_ctx_mutex);
         }
@@ -1202,7 +1260,7 @@ static void agent_async_loop_task(void *arg)
             free(msg.content);
             continue;
         }
-        agent_request_ctx_t *ctx = agent_acquire_request_ctx(&msg, max_iters);
+        agent_request_ctx_t *ctx = agent_acquire_request_ctx(&msg, max_iters, context_tokens);
         if (!ctx) {
             MIMI_LOGW(TAG, "No free agent slot; dropping message from %s:%s",
                       msg.channel, msg.chat_id);

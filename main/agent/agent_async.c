@@ -1,5 +1,6 @@
 #include "agent_async.h"
 #include "agent/context/context_builder.h"
+#include "agent/context/context_assembler.h"
 #include "config.h"
 #include "bus/message_bus.h"
 #include "channels/channel.h"
@@ -320,22 +321,63 @@ mimi_err_t agent_async_start(agent_async_ctx_t *ctx)
         (void)mimi_fs_mkdir_p(ws_dir);
     }
     
-    /* Load session history */
-    char history_json[LLM_STREAM_BUF_SIZE] = {0};
+    /* Use unified context assembly pipeline (budgeting, trimming, hooks)
+     * Reuse the same dynamic buffer calculation logic as agent_async_loop.c
+     */
     int memory_window = 20;
-    session_get_history_json(ctx->channel, ctx->chat_id, history_json, LLM_STREAM_BUF_SIZE, memory_window);
+    int context_tokens = 0;  /* Default: use buffer size based budgeting */
+    double flush_threshold_ratio = 1.0;
     
-    /* Parse or create messages array */
-    ctx->messages = cJSON_Parse(history_json);
-    if (!ctx->messages) {
+    /* Calculate dynamic buffer size based on token budget */
+    size_t history_buf_size;
+    if (context_tokens > 0) {
+        const double chars_per_token = 4.0;
+        const double overhead_factor = 1.25;
+        history_buf_size = (size_t)((double)context_tokens * chars_per_token * overhead_factor);
+        if (history_buf_size < 8192) history_buf_size = 8192;
+        if (history_buf_size > 262144) history_buf_size = 262144;
+    } else {
+        history_buf_size = LLM_STREAM_BUF_SIZE;
+    }
+    
+    char *history_buf = (char *)calloc(1, history_buf_size);
+    if (!history_buf) {
+        MIMI_LOGE(TAG, "Failed to allocate history buffer");
+        return MIMI_ERR_NO_MEM;
+    }
+    
+    /* Use unified context assembly pipeline */
+    context_assemble_request_t areq = {0};
+    context_assemble_result_t ares = {0};
+    
+    areq.channel = ctx->channel;
+    areq.chat_id = ctx->chat_id;
+    areq.user_content = ctx->content;
+    areq.system_prompt_buf = ctx->system_prompt;
+    areq.system_prompt_buf_size = sizeof(ctx->system_prompt);
+    areq.history_json_buf = history_buf;
+    areq.history_json_buf_size = history_buf_size;
+    areq.tools_json = NULL;
+    areq.base_memory_window = memory_window;
+    areq.context_tokens = context_tokens;
+    areq.memory_flush_threshold_ratio = flush_threshold_ratio;
+    areq.hooks = NULL;
+    
+    mimi_err_t err = context_assemble_messages_budgeted(&areq, &ares);
+    if (err == MIMI_OK && ares.messages) {
+        ctx->messages = ares.messages;
+        /* Note: ctx->messages now owns the cJSON array, will be freed in agent_async_cleanup */
+    } else {
+        MIMI_LOGW(TAG, "Context assembly failed: %s, fallback to empty", mimi_err_to_name(err));
         ctx->messages = cJSON_CreateArray();
     }
     
-    /* Append current user message */
-    cJSON *user_msg = cJSON_CreateObject();
-    cJSON_AddStringToObject(user_msg, "role", "user");
-    cJSON_AddStringToObject(user_msg, "content", ctx->content);
-    cJSON_AddItemToArray(ctx->messages, user_msg);
+    /* Cleanup trimmed messages if any (not used in this simple path) */
+    if (ares.trimmed_messages_for_compact) {
+        cJSON_Delete(ares.trimmed_messages_for_compact);
+    }
+    
+    free(history_buf);
     
     /* Get tools JSON */
     ctx->tools_json = tool_registry_get_tools_json();
@@ -382,7 +424,7 @@ mimi_err_t agent_async_start(agent_async_ctx_t *ctx)
         .tools_json = ctx->tools_json,
         .trace_id = ctx->trace_id[0] ? ctx->trace_id : NULL,
     };
-    mimi_err_t err = llm_chat_tools_async_req(&req, resp, agent_llm_callback, ctx);
+    err = llm_chat_tools_async_req(&req, resp, agent_llm_callback, ctx);
     if (err != MIMI_OK) {
         free(resp);
         return err;
