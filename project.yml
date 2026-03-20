@@ -31,6 +31,7 @@
     - main/core
     - main/core/config
     - main/core/platform
+    - main/memory
     - main/core/platform/os
     - main/services
     - third_party
@@ -41,6 +42,9 @@
   :test:
     - +:test/**
   :source:
+    - main/agent/context/context_budget_plan.c
+    - main/agent/context/context_compact.c
+    - main/agent/context/context_assembler.c
     - main/agent/tools/tool_files.c
     - main/agent/tools/tool_cron.c
     - main/agent/tools/tool_get_time.c
@@ -99,3 +103,7 @@
     - mimi_mutex_t
     - mimi_task_handle_t
     - mimi_timer_handle_t
+  :plugins:
+    - callback
+    - return_thru_ptr
+    - array

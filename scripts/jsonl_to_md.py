@@ -17,14 +17,36 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 #   - readable timestamps (keep original ms)
 #   - per-trace timeline table
 #   - each record collapsible
+# - Parsed JSON fields (json / tools_json): flat **system** / **user** / **assistant** / **tool · …**
+#   first; a single <details> "detail" holds the full raw JSON for debugging.
 #
 
 FOLD_KEYS = ("prompt", "tools_json", "json", "text")
 PREVIEW_KEYS = ("user_input", "error", "last_error")
 
+# Order for chat blocks before raw JSON (then any other roles alphabetically).
+_ROLE_DISPLAY_ORDER = ("system", "user", "assistant")
+
+
+def _role_sort_key(role: str) -> Tuple[int, str]:
+    r = role.lower()
+    try:
+        return (_ROLE_DISPLAY_ORDER.index(r), r)
+    except ValueError:
+        return (len(_ROLE_DISPLAY_ORDER), r)
+
 
 def _best_fence(text: str) -> str:
     return "~~~" if "```" in text else "```"
+
+
+def _fold_field_heading(k: str) -> Optional[str]:
+    """Markdown heading for a fold key; None = omit (e.g. json body is self-explanatory)."""
+    if k == "json":
+        return None
+    if k == "prompt":
+        return "system"
+    return k
 
 
 def _one_line(s: str, limit: int = 120) -> str:
@@ -56,7 +78,23 @@ def _iter_jsonl(path: str) -> Iterable[Tuple[int, Any]]:
         content = f.read().strip()
         if not content:
             return
-        yield 1, json.loads(content)
+        try:
+            yield 1, json.loads(content)
+        except json.JSONDecodeError as e:
+            hint = ""
+            # Common misuse: feeding rendered markdown back into this script.
+            if content.startswith("# ") or "<details>" in content or "```" in content:
+                hint = (
+                    "Input appears to be Markdown (possibly a previously rendered .md file). "
+                    "Please provide the original trace .jsonl file."
+                )
+            msg = (
+                f"Failed to parse input as JSONL/JSON: {path}\n"
+                f"JSON error: {e.msg} at line {e.lineno}, column {e.colno}."
+            )
+            if hint:
+                msg += f"\nHint: {hint}"
+            raise ValueError(msg) from e
 
 
 def _format_ts_ms(ts_ms: Any) -> Optional[str]:
@@ -86,6 +124,205 @@ def _try_parse_json_str(s: str) -> Optional[Any]:
         return json.loads(s2)
     except Exception:
         return None
+
+
+def _collect_multiline_strings(v: Any, path: str = "") -> List[Tuple[str, str]]:
+    out: List[Tuple[str, str]] = []
+    if isinstance(v, dict):
+        for k, vv in v.items():
+            p = f"{path}.{k}" if path else str(k)
+            out.extend(_collect_multiline_strings(vv, p))
+        return out
+    if isinstance(v, list):
+        for i, vv in enumerate(v):
+            p = f"{path}[{i}]" if path else f"[{i}]"
+            out.extend(_collect_multiline_strings(vv, p))
+        return out
+    if isinstance(v, str) and "\n" in v:
+        out.append((path or "(root)", v))
+    return out
+
+
+def _collect_role_content_blocks(v: Any) -> Dict[str, List[str]]:
+    """
+    Collect chat-like content blocks and group by role.
+    Targets common trace payload shapes:
+      - {"role": "...", "content": "..."}
+      - {"message": {"role": "...", "content": "..."}}
+    """
+    grouped: Dict[str, List[str]] = {}
+    seen: set[Tuple[str, str]] = set()
+
+    def add(role: str, content: str) -> None:
+        role_key = role.strip().lower() if role and role.strip() else "unknown"
+        key = (role_key, content)
+        if key in seen:
+            return
+        seen.add(key)
+        grouped.setdefault(role_key, []).append(content)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            role = node.get("role")
+            content = node.get("content")
+            # Include any non-empty message text (not only multiline) so short user lines render before JSON.
+            if isinstance(role, str) and isinstance(content, str) and content.strip():
+                add(role, content)
+
+            msg = node.get("message")
+            if isinstance(msg, dict):
+                m_role = msg.get("role")
+                m_content = msg.get("content")
+                if isinstance(m_content, str) and m_content.strip():
+                    r = m_role if isinstance(m_role, str) and m_role.strip() else "assistant"
+                    add(r, m_content)
+
+            for vv in node.values():
+                walk(vv)
+            return
+
+        if isinstance(node, list):
+            for vv in node:
+                walk(vv)
+
+    walk(v)
+    return grouped
+
+
+def _collect_tool_calls_preview(v: Any) -> List[Dict[str, str]]:
+    """
+    Extract OpenAI-style tool_calls for a readable block before the full JSON dump.
+    Shapes: choices[].message.tool_calls[], or any dict with tool_calls: [...].
+    """
+    out: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str, str]] = set()
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            tcs = node.get("tool_calls")
+            if isinstance(tcs, list):
+                for tc in tcs:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function")
+                    name = ""
+                    args = ""
+                    if isinstance(fn, dict):
+                        name = str(fn.get("name") or "")
+                        args = str(fn.get("arguments") or "")
+                    tid = str(tc.get("id") or "")
+                    key = (tid, name, args)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append({"id": tid, "name": name, "arguments": args})
+            for vv in node.values():
+                visit(vv)
+        elif isinstance(node, list):
+            for vv in node:
+                visit(vv)
+
+    visit(v)
+    return out
+
+
+def _format_tool_arguments(arguments: str) -> str:
+    s = arguments.strip()
+    if not s:
+        return ""
+    parsed = _try_parse_json_str(s)
+    if parsed is not None:
+        return _format_json(parsed)
+    return arguments
+
+
+def _is_tools_json_array(v: Any) -> bool:
+    """Heuristic: internal tools list from trace (name + description / input_schema)."""
+    if not isinstance(v, list) or not v:
+        return False
+    first = v[0]
+    if not isinstance(first, dict):
+        return False
+    if "name" not in first:
+        return False
+    return "description" in first or "input_schema" in first
+
+
+def _write_tools_name_list(out, tools: List[Any]) -> None:
+    out.write("**tools**\n\n")
+    for item in tools:
+        if isinstance(item, dict) and item.get("name"):
+            out.write(f"- `{item['name']}`\n")
+        else:
+            out.write(f"- `{item}`\n")
+    out.write("\n")
+
+
+def _write_fold_parsed_human_first(out, field_key: str, parsed: Any) -> None:
+    """
+    Flat, readable body (no nested <details> per role/tool), then one fold: detail = full JSON.
+    """
+    max_inline = 200_000
+
+    def clip(s: str) -> str:
+        if len(s) <= max_inline:
+            return s
+        return s[: max_inline - 1] + "…"
+
+    role_blocks = _collect_role_content_blocks(parsed)
+    tool_calls = _collect_tool_calls_preview(parsed)
+
+    # Skip redundant heading: tools list uses **tools** below.
+    skip_heading = field_key == "json" or (
+        field_key == "tools_json"
+        and isinstance(parsed, list)
+        and _is_tools_json_array(parsed)
+        and not role_blocks
+        and not tool_calls
+    )
+    if not skip_heading:
+        h = _fold_field_heading(field_key) or field_key
+        out.write(f"**{h}**\n\n")
+
+    for role in sorted(role_blocks.keys(), key=_role_sort_key):
+        blocks = role_blocks[role]
+        for idx, s in enumerate(blocks, 1):
+            label = role if len(blocks) == 1 else f"{role} · {idx}"
+            out.write(f"**{label}**\n\n")
+            rendered = clip(s)
+            fence = _best_fence(rendered)
+            out.write(f"{fence}text\n{rendered}\n{fence}\n\n")
+
+    for tc in tool_calls:
+        name = tc.get("name") or "(function)"
+        tid = tc.get("id") or ""
+        line = f"**tool · {name}**"
+        if tid:
+            line += f" (`{tid}`)"
+        out.write(f"{line}\n\n")
+        args_fmt = _format_tool_arguments(tc.get("arguments") or "")
+        rendered_args = clip(args_fmt) if args_fmt else ""
+        if rendered_args:
+            fence_a = _best_fence(rendered_args)
+            out.write(f"{fence_a}json\n{rendered_args}\n{fence_a}\n\n")
+
+    if not role_blocks and not tool_calls:
+        if field_key == "tools_json" and isinstance(parsed, list) and _is_tools_json_array(parsed):
+            _write_tools_name_list(out, parsed)
+        else:
+            multiline_items = _collect_multiline_strings(parsed)
+            for p, s in multiline_items[:10]:
+                out.write(f"**{p}**\n\n")
+                rendered = clip(s)
+                fence2 = _best_fence(rendered)
+                out.write(f"{fence2}text\n{rendered}\n{fence2}\n\n")
+
+    txt = _format_json(parsed)
+    fence = _best_fence(txt)
+    out.write("<details>\n<summary>detail</summary>\n\n")
+    out.write("<div style=\"margin-left: 1em;\">\n\n")
+    out.write(f"{fence}json\n{txt}\n{fence}\n\n")
+    out.write("</div>\n\n</details>\n\n")
 
 
 @dataclass
@@ -143,19 +380,22 @@ def _write_kv(out, k: str, v: Any) -> None:
         # If this is a folded key, try parsing JSON string for nicer rendering.
         if k in FOLD_KEYS:
             parsed = _try_parse_json_str(v)
-            summary = f"{k}: {_one_line(v, 100)}" if v.strip() else k
-            out.write("<details>\n")
-            out.write(f"<summary><code>{summary}</code></summary>\n\n")
-            out.write("<div style=\"margin-left: 1em;\">\n\n")
             if parsed is not None and not isinstance(parsed, str):
-                txt = _format_json(parsed)
-                fence = _best_fence(txt)
-                out.write(f"{fence}json\n{txt}\n{fence}\n\n")
+                _write_fold_parsed_human_first(out, k, parsed)
+            elif parsed is not None and isinstance(parsed, str):
+                h = _fold_field_heading(k)
+                if h:
+                    out.write(f"**{h}**\n\n")
+                rendered = parsed if len(parsed) <= 200_000 else (parsed[:199_999] + "…")
+                fence = _best_fence(rendered)
+                out.write(f"{fence}text\n{rendered}\n{fence}\n\n")
             else:
-                fence = _best_fence(v)
-                out.write(f"{fence}text\n{v}\n{fence}\n\n")
-            out.write("</div>\n\n")
-            out.write("</details>\n\n")
+                h = _fold_field_heading(k)
+                if h:
+                    out.write(f"**{h}**\n\n")
+                rendered = v if len(v) <= 200_000 else (v[:199_999] + "…")
+                fence = _best_fence(rendered)
+                out.write(f"{fence}text\n{rendered}\n{fence}\n\n")
             return
 
         if "\n" in v or len(v) > 160:
@@ -311,7 +551,11 @@ def main() -> int:
 
     os.makedirs(os.path.dirname(outp), exist_ok=True)
 
-    records = _as_records(inp)
+    try:
+        records = _as_records(inp)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 2
     by_tid: Dict[str, List[Record]] = {}
     for r in records:
         by_tid.setdefault(r.trace_id, []).append(r)

@@ -62,6 +62,7 @@ typedef struct {
     cJSON *messages;            /* required: cJSON array of messages (caller owns) */
     const char *tools_json;     /* optional: JSON string array of tools */
     const char *trace_id;       /* optional: for llm_trace correlation */
+    const char *model_override; /* optional: when non-empty, use this model for this request */
 } llm_chat_req_t;
 
 /**

@@ -47,7 +47,7 @@ static mimi_err_t write_text_file_vfs(const char *path, const char *data, size_t
 
 /* Bump when the config JSON schema changes.
  * Loader will auto-merge missing keys and write back merged config. */
-#define MIMI_CONFIG_SCHEMA_VERSION 1
+#define MIMI_CONFIG_SCHEMA_VERSION 2
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
 {
@@ -284,6 +284,22 @@ static cJSON *config_build_json_full_from_config(const mimi_config_t *cfg, int s
          * Backward compatible with maxToolIterations (used as fallback). */
         cJSON_AddNumberToObject(defaults, "defaultMaxIters", cfg->max_tool_iterations);
         cJSON_AddNumberToObject(defaults, "memoryWindow", cfg->memory_window);
+
+        /* Context/token-budget (best-effort token->chars approximation) */
+        cJSON_AddNumberToObject(defaults, "contextTokens", 100000);
+
+        /* Context compaction/summary controls (wired into context assembler). */
+        cJSON *compaction = cJSON_CreateObject();
+        if (compaction) {
+            cJSON_AddStringToObject(compaction, "model", "");
+            cJSON *memoryFlush = cJSON_CreateObject();
+            if (memoryFlush) {
+                cJSON_AddNumberToObject(memoryFlush, "thresholdRatio", 0.75);
+                cJSON_AddItemToObject(compaction, "memoryFlush", memoryFlush);
+            }
+            cJSON_AddItemToObject(defaults, "compaction", compaction);
+        }
+
         cJSON_AddStringToObject(defaults, "apiUrl", cfg->api_url);
         cJSON_AddBoolToObject(defaults, "sendWorkingStatus", cfg->send_working_status);
         cJSON_AddItemToObject(agents, "defaults", defaults);
@@ -517,6 +533,16 @@ mimi_err_t mimi_config_load(const char *path)
         bool version_mismatch = (file_ver != MIMI_CONFIG_SCHEMA_VERSION);
         should_write_back = missing_keys || version_mismatch;
         json_merge_object_into(merged_root, file_root);
+        /* Force bump schemaVersion after merge.
+         * The merge policy is "user values win", so a user's old schemaVersion
+         * key would otherwise overwrite the upgraded default schemaVersion. */
+        cJSON *sv = cJSON_GetObjectItemCaseSensitive(merged_root, "schemaVersion");
+        if (sv && cJSON_IsNumber(sv)) {
+            sv->valuedouble = (double)MIMI_CONFIG_SCHEMA_VERSION;
+            sv->valueint = MIMI_CONFIG_SCHEMA_VERSION;
+        } else if (!sv) {
+            cJSON_AddNumberToObject(merged_root, "schemaVersion", MIMI_CONFIG_SCHEMA_VERSION);
+        }
         root = merged_root;
     } else {
         merged_root = NULL;

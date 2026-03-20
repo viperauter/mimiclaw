@@ -1,5 +1,5 @@
 {
-	"schemaVersion":	1,
+	"schemaVersion":	2,
 	"providers":	{
 		"openrouter":	{
 			"apiKey":	"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",
@@ -12,7 +12,7 @@
 	},
 	"agents":	{
 		"defaults":	{
-			"workspace":"/home/aotao/.mimiclaw/workspace",
+			"workspace":	"/home/aotao/.mimiclaw/workspace",
 			"timezone":	"PST8PDT,M3.2.0,M11.1.0",
 			"model":	"qwen-plus",
 			"provider":	"minimax",
@@ -22,6 +22,13 @@
 			"maxToolIterations":	40,
 			"defaultMaxIters":	40,
 			"memoryWindow":	100,
+			"contextTokens":	100000,
+			"compaction":	{
+				"model":	"",
+				"memoryFlush":	{
+					"thresholdRatio":	0.75
+				}
+			},
 			"apiUrl":	"",
 			"sendWorkingStatus":	true,
 			"subagentsEnabled":	true

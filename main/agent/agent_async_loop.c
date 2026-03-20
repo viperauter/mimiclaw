@@ -1,5 +1,7 @@
 #include "agent_async_loop.h"
-#include "agent/context_builder.h"
+#include "agent/context/context_builder.h"
+#include "agent/context/context_assembler.h"
+#include "agent/context/context_compact.h"
 #include "config.h"
 #include "config_view.h"
 #include "bus/message_bus.h"
@@ -35,7 +37,9 @@ typedef struct {
     char trace_id[64];
     char content[MIMI_CONTEXT_BUF_SIZE];
     char *system_prompt;
+    char *history_json_buf;
     cJSON *messages;
+    cJSON *compact_source_messages;
     const char *tools_json;
     int iteration;
     int max_iters;
@@ -44,6 +48,129 @@ typedef struct {
     llm_response_t llm_resp;
     bool in_progress;
 } agent_request_ctx_t;
+
+static void agent_start_main_llm_async(agent_request_ctx_t *ctx);
+
+static const char *SUM_SYS_PROMPT =
+    "You are a context compressor. Summarize the provided conversation history into a concise, self-contained "
+    "context memo for the next assistant turn. Preserve key facts, preferences, constraints, and any pending tasks. "
+    "Output ONLY plain text (no JSON).";
+
+static void context_compact_summary_callback(mimi_err_t result, llm_response_t *resp, void *user_data)
+{
+    agent_request_ctx_t *ctx = (agent_request_ctx_t *)user_data;
+
+    if (!ctx) {
+        if (resp) llm_response_free(resp);
+        return;
+    }
+
+    if (result != MIMI_OK) {
+        MIMI_LOGW(TAG, "context compact summary failed: %s", mimi_err_to_name(result));
+        llm_trace_event_kv(ctx->trace_id, "context_compact_failed",
+                           "result", mimi_err_to_name(result),
+                           NULL, NULL,
+                           NULL, NULL, NULL, NULL);
+        context_compact_trace_failed_debug(ctx->trace_id,
+                                            ctx->messages,
+                                            ctx->compact_source_messages);
+        /* Failure fallback:
+         * If compact/summary failed, keep the originally trimmed messages so we
+         * don't lose conversation continuity. The assembler trimmed the oldest
+         * history into ctx->compact_source_messages and kept the newest part in
+         * ctx->messages; on failure we merge them back in chronological order.
+         */
+        if (ctx->messages && ctx->compact_source_messages &&
+            cJSON_IsArray(ctx->messages) && cJSON_IsArray(ctx->compact_source_messages)) {
+            (void)context_compact_merge_compact_source_to_messages(&ctx->messages,
+                                                                     ctx->compact_source_messages);
+        }
+        context_compact_trace_messages_after_failure(ctx->trace_id, ctx->messages);
+        goto release_and_start_main;
+    }
+
+    if (resp && ctx->messages) {
+        const char *summary_text = (resp->text && resp->text[0]) ? resp->text : "";
+        context_compact_trace_summary_output(ctx->trace_id, summary_text);
+        cJSON *summary_message = cJSON_CreateObject();
+        if (summary_message) {
+            cJSON_AddStringToObject(summary_message, "role", "system");
+            cJSON_AddStringToObject(summary_message, "content", summary_text);
+            mimi_err_t ins = context_compact_insert_summary_message(ctx->messages, summary_message);
+            if (ins != MIMI_OK) {
+                cJSON_Delete(summary_message);
+            }
+        }
+    }
+
+    llm_trace_event_kv(ctx->trace_id, "context_compact_done",
+                       NULL, NULL,
+                       NULL, NULL,
+                       NULL, NULL,
+                       NULL, NULL);
+
+    context_compact_trace_messages_after(ctx->trace_id, ctx->messages);
+
+release_and_start_main:
+    if (ctx->compact_source_messages) {
+        cJSON_Delete(ctx->compact_source_messages);
+        ctx->compact_source_messages = NULL;
+    }
+
+    if (resp) {
+        llm_response_free(resp);
+    }
+
+    agent_start_main_llm_async(ctx);
+}
+
+/* Start async compaction if needed.
+ * Return true if compaction started; in that case main LLM starts from callback. */
+static bool context_compact_maybe_summarize_async(agent_request_ctx_t *ctx, const char *model_override)
+{
+    if (!ctx || !ctx->messages || !ctx->compact_source_messages) return false;
+    if (!cJSON_IsArray(ctx->compact_source_messages)) return false;
+
+    int n = cJSON_GetArraySize(ctx->compact_source_messages);
+    if (n <= 0) return false;
+
+    context_compact_trace_llm_input_meta(ctx->trace_id, ctx->compact_source_messages);
+
+    agent_send_status(ctx->channel, ctx->chat_id,
+                       MIMI_STATUS_PHASE_PROGRESS, "agent_turn",
+                       "🧠 正在压缩上下文（compact/summary）…");
+
+    llm_chat_req_t req = {
+        .system_prompt = SUM_SYS_PROMPT,
+        .messages = ctx->compact_source_messages,
+        .tools_json = NULL,
+        .trace_id = ctx->trace_id[0] ? ctx->trace_id : NULL,
+        .model_override = model_override,
+    };
+
+    llm_response_t *resp = &ctx->llm_resp;
+    memset(resp, 0, sizeof(*resp));
+
+    mimi_err_t err = llm_chat_tools_async_req(&req,
+                                               resp,
+                                               context_compact_summary_callback,
+                                               ctx);
+    if (err != MIMI_OK) {
+        MIMI_LOGW(TAG, "Failed to start async compaction: %s", mimi_err_to_name(err));
+        llm_trace_event_kv(ctx->trace_id, "context_compact_start_failed",
+                           "result", mimi_err_to_name(err),
+                           NULL, NULL,
+                           NULL, NULL, NULL, NULL);
+        if (ctx->compact_source_messages) {
+            cJSON_Delete(ctx->compact_source_messages);
+            ctx->compact_source_messages = NULL;
+        }
+        llm_response_free(resp);
+        return false;
+    }
+
+    return true;
+}
 
 static mimi_mutex_t *s_ctx_mutex = NULL;
 static agent_request_ctx_t s_pending_ctx[MIMI_MAX_CONCURRENT];
@@ -161,6 +288,20 @@ static void agent_request_finish(agent_request_ctx_t *ctx)
         cJSON_Delete(ctx->messages);
         ctx->messages = NULL;
     }
+    if (ctx->compact_source_messages) {
+        cJSON_Delete(ctx->compact_source_messages);
+        ctx->compact_source_messages = NULL;
+    }
+
+    if (ctx->system_prompt) {
+        free(ctx->system_prompt);
+        ctx->system_prompt = NULL;
+    }
+    if (ctx->history_json_buf) {
+        free(ctx->history_json_buf);
+        ctx->history_json_buf = NULL;
+    }
+
     ctx->in_progress = false;
 
     if (s_ctx_mutex) {
@@ -550,6 +691,65 @@ static void send_working_status(const char *channel, const char *chat_id, bool *
     *sent = true;
 }
 
+static void agent_start_main_llm_async(agent_request_ctx_t *ctx)
+{
+    if (!ctx || !ctx->messages) {
+        MIMI_LOGW(TAG, "agent_start_main_llm_async: null ctx/messages");
+        if (ctx) {
+            agent_request_finish(ctx);
+        }
+        return;
+    }
+
+    send_working_status(ctx->channel, ctx->chat_id, &ctx->sent_working_status);
+
+    llm_response_t *resp = &ctx->llm_resp;
+    memset(resp, 0, sizeof(*resp));
+
+    /* Print LLM request context for debugging */
+    char *messages_json = cJSON_PrintUnformatted(ctx->messages);
+    if (messages_json) {
+        MIMI_LOGD(TAG, "LLM request messages: %s", messages_json);
+        llm_trace_event_json(ctx->trace_id, "messages", messages_json);
+        free(messages_json);
+    }
+
+    {
+        char itbuf[32];
+        snprintf(itbuf, sizeof(itbuf), "%d", ctx->iteration + 1);
+        llm_trace_event_kv(ctx->trace_id, "llm_call_start",
+                           "iteration", itbuf,
+                           NULL, NULL, NULL, NULL, NULL, NULL);
+    }
+
+    llm_chat_req_t req = {
+        .system_prompt = ctx->system_prompt,
+        .messages = ctx->messages,
+        .tools_json = ctx->tools_json,
+        .trace_id = ctx->trace_id,
+    };
+
+    mimi_err_t err = llm_chat_tools_async_req(&req, resp, agent_llm_callback, ctx);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to start async LLM: %s", mimi_err_to_name(err));
+
+        mimi_msg_t error_msg_obj = {0};
+        strncpy(error_msg_obj.channel, ctx->channel, sizeof(error_msg_obj.channel) - 1);
+        strncpy(error_msg_obj.chat_id, ctx->chat_id, sizeof(error_msg_obj.chat_id) - 1);
+        error_msg_obj.type = MIMI_MSG_TYPE_TEXT;
+        error_msg_obj.content = strdup("Failed to start LLM request");
+        if (error_msg_obj.content) {
+            message_bus_push_outbound(&error_msg_obj);
+        }
+
+        if (error_msg_obj.content) {
+            free(error_msg_obj.content);
+        }
+
+        agent_request_finish(ctx);
+    }
+}
+
 static void continue_iteration(agent_request_ctx_t *ctx, llm_response_t *resp)
 {
     if (ctx->iteration >= ctx->max_iters) {
@@ -565,6 +765,14 @@ static void continue_iteration(agent_request_ctx_t *ctx, llm_response_t *resp)
         if (ctx->messages) {
             cJSON_Delete(ctx->messages);
             ctx->messages = NULL;
+        }
+        if (ctx->system_prompt) {
+            free(ctx->system_prompt);
+            ctx->system_prompt = NULL;
+        }
+        if (ctx->history_json_buf) {
+            free(ctx->history_json_buf);
+            ctx->history_json_buf = NULL;
         }
         ctx->in_progress = false;
         if (s_ctx_mutex) {
@@ -706,6 +914,14 @@ cleanup:
         cJSON_Delete(ctx->messages);
         ctx->messages = NULL;
     }
+    if (ctx && ctx->system_prompt) {
+        free(ctx->system_prompt);
+        ctx->system_prompt = NULL;
+    }
+    if (ctx && ctx->history_json_buf) {
+        free(ctx->history_json_buf);
+        ctx->history_json_buf = NULL;
+    }
     ctx->in_progress = false;
     if (s_ctx_mutex) {
         mimi_mutex_lock(s_ctx_mutex);
@@ -713,6 +929,219 @@ cleanup:
     s_active_count--;
     if (s_ctx_mutex) {
         mimi_mutex_unlock(s_ctx_mutex);
+    }
+}
+
+static void agent_build_system_prompt_for_turn(agent_request_ctx_t *ctx, const mimi_msg_t *msg)
+{
+    if (!ctx || !msg || !ctx->system_prompt) return;
+
+    context_build_system_prompt(ctx->system_prompt, CONTEXT_BUF_SIZE);
+    char turn_context[512];
+    snprintf(turn_context, sizeof(turn_context),
+             "\n## Current Turn Context\n- source_channel: %s\n- source_chat_id: %s\n",
+             msg->channel[0] ? msg->channel : "(unknown)",
+             msg->chat_id[0] ? msg->chat_id : "(empty)");
+    strncat(ctx->system_prompt, turn_context,
+            CONTEXT_BUF_SIZE - strlen(ctx->system_prompt) - 1);
+
+    llm_trace_event_kv(ctx->trace_id, "system_prompt",
+                       "prompt", ctx->system_prompt ? ctx->system_prompt : "",
+                       NULL, NULL, NULL, NULL, NULL, NULL);
+}
+
+static mimi_err_t agent_assemble_turn_context(agent_request_ctx_t *ctx,
+                                                const mimi_msg_t *msg,
+                                                int memory_window,
+                                                int context_tokens,
+                                                double flush_threshold_ratio)
+{
+    if (!ctx || !msg || !ctx->system_prompt || !ctx->history_json_buf) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    context_hooks_t hooks = {0};
+    context_assemble_request_t areq = {0};
+    context_assemble_result_t ares = {0};
+
+    areq.channel = ctx->channel;
+    areq.chat_id = ctx->chat_id;
+    areq.user_content = msg->content ? msg->content : "";
+    areq.system_prompt_buf = ctx->system_prompt;
+    areq.system_prompt_buf_size = CONTEXT_BUF_SIZE;
+    areq.tools_json = ctx->tools_json;
+    areq.base_memory_window = memory_window;
+    areq.context_tokens = context_tokens;
+    areq.memory_flush_threshold_ratio = flush_threshold_ratio;
+    areq.history_json_buf = ctx->history_json_buf;
+    areq.history_json_buf_size = LLM_STREAM_BUF_SIZE;
+    areq.hooks = &hooks;
+
+    mimi_err_t ae = context_assemble_messages_budgeted(&areq, &ares);
+    if (ae != MIMI_OK || !ares.messages) {
+        MIMI_LOGW(TAG, "context assemble messages failed: %s", mimi_err_to_name(ae));
+        if (ares.messages) cJSON_Delete(ares.messages);
+        if (ares.trimmed_messages_for_compact) cJSON_Delete(ares.trimmed_messages_for_compact);
+        ctx->messages = cJSON_CreateArray();
+        ctx->compact_source_messages = NULL;
+        return ae;
+    }
+
+    ctx->messages = ares.messages;
+    ctx->compact_source_messages = ares.trimmed_messages_for_compact;
+
+    if (ctx->trace_id[0]) {
+        char mwbuf[32];
+        char rpbuf[32];
+        char trimbuf[8];
+        char flushbuf[32];
+        char ratiobuf[32];
+        char totalbuf[32];
+        char histbuf[32];
+        char sysbuf[32];
+        char toolsbuf[32];
+        snprintf(mwbuf, sizeof(mwbuf), "%d", ares.plan.memory_window_used);
+        snprintf(rpbuf, sizeof(rpbuf), "%d", ares.plan.parse_retries);
+        snprintf(trimbuf, sizeof(trimbuf), "%s", ares.plan.did_trim_messages ? "yes" : "no");
+        snprintf(flushbuf, sizeof(flushbuf), "%zu", ares.plan.history_budget_chars_flush);
+        snprintf(ratiobuf, sizeof(ratiobuf), "%.2f", ares.plan.memory_flush_threshold_ratio_used);
+        snprintf(totalbuf, sizeof(totalbuf), "%zu", ares.budget.total_budget_chars);
+        snprintf(histbuf, sizeof(histbuf), "%zu", ares.budget.history_budget_chars);
+        snprintf(sysbuf, sizeof(sysbuf), "%zu", ares.budget.system_len_chars);
+        snprintf(toolsbuf, sizeof(toolsbuf), "%zu", ares.budget.tools_len_chars);
+
+        llm_trace_event_kv(ctx->trace_id,
+                           "context_plan",
+                           "memory_window_used", mwbuf,
+                           "parse_retries", rpbuf,
+                           "trimmed", trimbuf,
+                           "flush_chars", flushbuf);
+
+        llm_trace_event_kv(ctx->trace_id,
+                           "context_budget",
+                           "total_budget_chars", totalbuf,
+                           "history_budget_chars", histbuf,
+                           "system_len_chars", sysbuf,
+                           "tools_len_chars", toolsbuf);
+
+        llm_trace_event_kv(ctx->trace_id,
+                           "context_plan_flush",
+                           "flush_ratio", ratiobuf,
+                           NULL, NULL,
+                           NULL, NULL,
+                           NULL, NULL);
+
+        context_assembler_trace_context_split(ctx->trace_id,
+                                               ctx->messages,
+                                               ctx->compact_source_messages);
+    }
+
+    return ae;
+}
+
+static agent_request_ctx_t *agent_acquire_request_ctx(const mimi_msg_t *msg, int max_iters)
+{
+    if (!msg) return NULL;
+
+    if (s_ctx_mutex) {
+        mimi_mutex_lock(s_ctx_mutex);
+    }
+
+    if (s_active_count >= MAX_CONCURRENT) {
+        if (s_ctx_mutex) {
+            mimi_mutex_unlock(s_ctx_mutex);
+        }
+        return NULL;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < MAX_CONCURRENT; i++) {
+        if (!s_pending_ctx[i].in_progress) {
+            int pending_count = tool_call_context_get_pending_count();
+            if (pending_count == 0) {
+                slot = i;
+                break;
+            } else {
+                MIMI_LOGD(TAG,
+                          "Found %d pending tool confirmations, waiting before reusing slot %d",
+                          pending_count,
+                          i);
+            }
+        }
+    }
+
+    if (slot < 0) {
+        if (s_ctx_mutex) {
+            mimi_mutex_unlock(s_ctx_mutex);
+        }
+        return NULL;
+    }
+
+    agent_request_ctx_t *ctx = &s_pending_ctx[slot];
+    memset(ctx, 0, sizeof(*ctx));
+
+    strncpy(ctx->channel, msg->channel, sizeof(ctx->channel) - 1);
+    strncpy(ctx->chat_id, msg->chat_id, sizeof(ctx->chat_id) - 1);
+    llm_trace_make_id(ctx->trace_id, sizeof(ctx->trace_id));
+    llm_trace_bind_session(ctx->trace_id, ctx->channel, ctx->chat_id);
+    strncpy(ctx->content, msg->content ? msg->content : "", sizeof(ctx->content) - 1);
+
+    ctx->system_prompt = (char *)calloc(1, CONTEXT_BUF_SIZE);
+    ctx->history_json_buf = (char *)calloc(1, LLM_STREAM_BUF_SIZE);
+    if (!ctx->system_prompt || !ctx->history_json_buf) {
+        if (ctx->system_prompt) free(ctx->system_prompt);
+        if (ctx->history_json_buf) free(ctx->history_json_buf);
+        ctx->system_prompt = NULL;
+        ctx->history_json_buf = NULL;
+        if (s_ctx_mutex) {
+            mimi_mutex_unlock(s_ctx_mutex);
+        }
+        return NULL;
+    }
+
+    ctx->max_iters = max_iters;
+    ctx->iteration = 0;
+    ctx->in_progress = true;
+    s_active_count++;
+
+    if (s_ctx_mutex) {
+        mimi_mutex_unlock(s_ctx_mutex);
+    }
+
+    return ctx;
+}
+
+static void agent_process_user_turn(agent_request_ctx_t *ctx,
+                                    const mimi_msg_t *msg,
+                                    int memory_window,
+                                    int context_tokens,
+                                    double flush_threshold_ratio,
+                                    const char *compaction_model)
+{
+    if (!ctx || !msg) return;
+
+    MIMI_LOGD(TAG, "Processing message from %s:%s", ctx->channel, ctx->chat_id);
+
+    llm_trace_event_kv(ctx->trace_id,
+                       "request_start",
+                       "channel", ctx->channel,
+                       "chat_id", ctx->chat_id,
+                       "user_input", msg->content ? msg->content : "",
+                       NULL, NULL);
+
+    (void)agent_build_system_prompt_for_turn(ctx, msg);
+
+    ctx->tools_json = tool_registry_get_tools_json();
+    (void)agent_assemble_turn_context(ctx, msg, memory_window, context_tokens, flush_threshold_ratio);
+
+    llm_trace_event_kv(ctx->trace_id,
+                       "tools",
+                       "tools_json", ctx->tools_json ? ctx->tools_json : "",
+                       NULL, NULL, NULL, NULL, NULL, NULL);
+
+    bool compact_started = context_compact_maybe_summarize_async(ctx, compaction_model);
+    if (!compact_started) {
+        agent_start_main_llm_async(ctx);
     }
 }
 
@@ -736,14 +1165,17 @@ static void agent_async_loop_task(void *arg)
     if (memory_window <= 0) memory_window = 100;
     if (max_iters <= 0) max_iters = 40;
 
-    char *system_prompt = (char *)calloc(1, CONTEXT_BUF_SIZE);
-    char *history_json = (char *)calloc(1, LLM_STREAM_BUF_SIZE);
-
-    if (!system_prompt || !history_json) {
-        MIMI_LOGE(TAG, "Failed to allocate buffers");
-        free(system_prompt);
-        free(history_json);
-        return;
+    /* Context budgeting and memory flush/compaction trigger */
+    int context_tokens = mimi_cfg_get_int(defaults, "contextTokens", 0);
+    double flush_threshold_ratio = 1.0; /* default: keep old behavior */
+    const char *compaction_model = "";
+    {
+        mimi_cfg_obj_t comp = mimi_cfg_get_obj(defaults, "compaction");
+        compaction_model = mimi_cfg_get_str(comp, "model", "");
+        mimi_cfg_obj_t memory_flush = mimi_cfg_get_obj(comp, "memoryFlush");
+        flush_threshold_ratio = mimi_cfg_get_double(memory_flush, "thresholdRatio", flush_threshold_ratio);
+        if (flush_threshold_ratio < 0.0) flush_threshold_ratio = 0.0;
+        if (flush_threshold_ratio > 1.0) flush_threshold_ratio = 1.0;
     }
 
     memset(s_pending_ctx, 0, sizeof(s_pending_ctx));
@@ -770,171 +1202,24 @@ static void agent_async_loop_task(void *arg)
             free(msg.content);
             continue;
         }
-
-        if (s_ctx_mutex) {
-            mimi_mutex_lock(s_ctx_mutex);
-        }
-        if (s_active_count >= MAX_CONCURRENT) {
-            if (s_ctx_mutex) {
-                mimi_mutex_unlock(s_ctx_mutex);
-            }
-            MIMI_LOGW(TAG, "Too many concurrent requests, dropping message from %s:%s", 
+        agent_request_ctx_t *ctx = agent_acquire_request_ctx(&msg, max_iters);
+        if (!ctx) {
+            MIMI_LOGW(TAG, "No free agent slot; dropping message from %s:%s",
                       msg.channel, msg.chat_id);
             free(msg.content);
             continue;
         }
 
-        int slot = -1;
-        for (int i = 0; i < MAX_CONCURRENT; i++) {
-            if (!s_pending_ctx[i].in_progress) {
-                /* Check if there are any pending tool confirmations */
-                int pending_count = tool_call_context_get_pending_count();
-                if (pending_count == 0) {
-                    slot = i;
-                    break;
-                } else {
-                    /* Wait for pending confirmations to complete before reusing slots */
-                    MIMI_LOGD(TAG, "Found %d pending tool confirmations, waiting before reusing slot %d", pending_count, i);
-                }
-            }
-        }
-        if (slot < 0) {
-            if (s_ctx_mutex) {
-                mimi_mutex_unlock(s_ctx_mutex);
-            }
-            free(msg.content);
-            continue;
-        }
-
-        agent_request_ctx_t *ctx = &s_pending_ctx[slot];
-        memset(ctx, 0, sizeof(*ctx));
-        strncpy(ctx->channel, msg.channel, sizeof(ctx->channel) - 1);
-        strncpy(ctx->chat_id, msg.chat_id, sizeof(ctx->chat_id) - 1);
-        llm_trace_make_id(ctx->trace_id, sizeof(ctx->trace_id));
-        llm_trace_bind_session(ctx->trace_id, ctx->channel, ctx->chat_id);
-        strncpy(ctx->content, msg.content, sizeof(ctx->content) - 1);
-        ctx->system_prompt = system_prompt;
-        ctx->max_iters = max_iters;
-        ctx->iteration = 0;
-        ctx->in_progress = true;
-        s_active_count++;
-        if (s_ctx_mutex) {
-            mimi_mutex_unlock(s_ctx_mutex);
-        }
-
-        MIMI_LOGD(TAG, "Processing message from %s:%s", ctx->channel, ctx->chat_id);
-
-        llm_trace_event_kv(ctx->trace_id, "request_start",
-                           "channel", ctx->channel,
-                           "chat_id", ctx->chat_id,
-                           "user_input", msg.content ? msg.content : "",
-                           NULL, NULL);
-        
-        context_build_system_prompt(ctx->system_prompt, CONTEXT_BUF_SIZE);
-        char turn_context[512];
-        snprintf(turn_context, sizeof(turn_context),
-                 "\n## Current Turn Context\n- source_channel: %s\n- source_chat_id: %s\n",
-                 msg.channel[0] ? msg.channel : "(unknown)", 
-                 msg.chat_id[0] ? msg.chat_id : "(empty)");
-        strncat(ctx->system_prompt, turn_context, CONTEXT_BUF_SIZE - strlen(ctx->system_prompt) - 1);
-
-        llm_trace_event_kv(ctx->trace_id, "system_prompt",
-                           "prompt", ctx->system_prompt ? ctx->system_prompt : "",
-                           NULL, NULL, NULL, NULL, NULL, NULL);
-
-        session_get_history_json(ctx->channel, ctx->chat_id, history_json, LLM_STREAM_BUF_SIZE, memory_window);
-        ctx->messages = cJSON_Parse(history_json);
-        if (!ctx->messages) {
-            ctx->messages = cJSON_CreateArray();
-        }
-
-        cJSON *user_msg = cJSON_CreateObject();
-        cJSON_AddStringToObject(user_msg, "role", "user");
-        cJSON_AddStringToObject(user_msg, "content", msg.content);
-        cJSON_AddItemToArray(ctx->messages, user_msg);
-
-        /* Persist user message early so tool-only flows are not lost.
-         * IMPORTANT: do this AFTER reading history_json; otherwise the same user
-         * message is present in both history and the explicitly appended
-         * per-turn message, causing duplicates in LLM request messages. */
-        {
-            mimi_err_t se = session_append(ctx->channel, ctx->chat_id, "user", msg.content ? msg.content : "");
-            if (se != MIMI_OK) {
-                MIMI_LOGW(TAG, "Session append(user) failed for %s:%s: %s",
-                          ctx->channel, ctx->chat_id, mimi_err_to_name(se));
-            }
-        }
-
-        ctx->tools_json = tool_registry_get_tools_json();
-
-        llm_trace_event_kv(ctx->trace_id, "tools",
-                           "tools_json", ctx->tools_json ? ctx->tools_json : "",
-                           NULL, NULL, NULL, NULL, NULL, NULL);
-
-        send_working_status(ctx->channel, ctx->chat_id, &ctx->sent_working_status);
-
-        llm_response_t *resp = &ctx->llm_resp;
-        memset(resp, 0, sizeof(*resp));
-
-        // Print LLM request context for debugging
-        char *messages_json = cJSON_PrintUnformatted(ctx->messages);
-        if (messages_json) {
-            MIMI_LOGD(TAG, "LLM request messages: %s", messages_json);
-            llm_trace_event_json(ctx->trace_id, "messages", messages_json);
-            free(messages_json);
-        }
-
-        {
-            char itbuf[32];
-            snprintf(itbuf, sizeof(itbuf), "%d", ctx->iteration + 1);
-            llm_trace_event_kv(ctx->trace_id, "llm_call_start",
-                               "iteration", itbuf,
-                               NULL, NULL, NULL, NULL, NULL, NULL);
-        }
-        
-        llm_chat_req_t req = {
-            .system_prompt = ctx->system_prompt,
-            .messages = ctx->messages,
-            .tools_json = ctx->tools_json,
-            .trace_id = ctx->trace_id,
-        };
-        err = llm_chat_tools_async_req(&req, resp, agent_llm_callback, ctx);
-        if (err != MIMI_OK) {
-            MIMI_LOGE(TAG, "Failed to start async LLM: %s", mimi_err_to_name(err));
-            ctx->in_progress = false;
-            if (s_ctx_mutex) {
-                mimi_mutex_lock(s_ctx_mutex);
-            }
-            s_active_count--;
-            if (s_ctx_mutex) {
-                mimi_mutex_unlock(s_ctx_mutex);
-            }
-            mimi_msg_t error_msg_obj = {0};
-            strncpy(error_msg_obj.channel, ctx->channel, sizeof(error_msg_obj.channel) - 1);
-            strncpy(error_msg_obj.chat_id, ctx->chat_id, sizeof(error_msg_obj.chat_id) - 1);
-            error_msg_obj.type = MIMI_MSG_TYPE_TEXT;
-            error_msg_obj.content = strdup("Failed to start LLM request");
-            if (error_msg_obj.content) {
-                message_bus_push_outbound(&error_msg_obj);
-            }
-        }
+        agent_process_user_turn(ctx,
+                                 &msg,
+                                 memory_window,
+                                 context_tokens,
+                                 flush_threshold_ratio,
+                                 compaction_model);
 
         free(msg.content);
     }
 
-    /* Give in-flight requests a chance to finish before releasing shared buffers. */
-    uint64_t start_ms = mimi_time_ms();
-    while (mimi_time_ms() - start_ms < 3000) {
-        int active = 0;
-        if (s_ctx_mutex) mimi_mutex_lock(s_ctx_mutex);
-        active = s_active_count;
-        if (s_ctx_mutex) mimi_mutex_unlock(s_ctx_mutex);
-        if (active <= 0) break;
-        mimi_sleep_ms(50);
-    }
-
-    free(system_prompt);
-    free(history_json);
 }
 
 /* ==========================================================================

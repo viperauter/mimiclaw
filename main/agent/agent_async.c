@@ -1,5 +1,5 @@
 #include "agent_async.h"
-#include "agent/context_builder.h"
+#include "agent/context/context_builder.h"
 #include "config.h"
 #include "bus/message_bus.h"
 #include "channels/channel.h"

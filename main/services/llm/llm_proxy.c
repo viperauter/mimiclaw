@@ -396,7 +396,8 @@ mimi_err_t llm_chat_tools_req(const llm_chat_req_t *req, llm_response_t *resp)
     cJSON *body = cJSON_CreateObject();
     if (!body) return MIMI_ERR_NO_MEM;
 
-    cJSON_AddStringToObject(body, "model", s_model);
+    const char *model_to_use = (req && req->model_override && req->model_override[0]) ? req->model_override : s_model;
+    cJSON_AddStringToObject(body, "model", model_to_use);
     if (provider_is_openai_compat()) {
         /* OpenAI Chat Completions API uses max_tokens for the response budget. */
         cJSON_AddNumberToObject(body, "max_tokens", max_tokens);
@@ -1001,7 +1002,8 @@ mimi_err_t llm_chat_tools_async_req(const llm_chat_req_t *req,
     cJSON *body = cJSON_CreateObject();
     if (!body) return MIMI_ERR_NO_MEM;
 
-    cJSON_AddStringToObject(body, "model", s_model);
+    const char *model_to_use = (req && req->model_override && req->model_override[0]) ? req->model_override : s_model;
+    cJSON_AddStringToObject(body, "model", model_to_use);
     if (provider_is_openai_compat()) {
         /* OpenAI Chat Completions API uses max_tokens for the response budget. */
         cJSON_AddNumberToObject(body, "max_tokens", max_tokens);

@@ -240,7 +240,7 @@ static mimi_err_t stdio_gateway_init_impl(gateway_t *gw, const gateway_config_t 
     }
 
 #if defined(MIMICLAW_ENABLE_LOWDOWN)
-    s_priv.lowdown_enabled = false;
+    s_priv.lowdown_enabled = true;
     s_priv.lowdown_width = 80;
     s_priv.lowdown_ansi = true;
 

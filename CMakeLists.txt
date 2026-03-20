@@ -133,7 +133,10 @@ list(APPEND APP_SRC
     main/services/proxy/http_proxy.c
 
     # Agent modules (including control, subagents, and tools)
-    main/agent/context_builder.c
+    main/agent/context/context_builder.c
+    main/agent/context/context_budget_plan.c
+    main/agent/context/context_assembler.c
+    main/agent/context/context_compact.c
     main/agent/subagent/subagent_config.c
     main/agent/subagent/subagent_manager.c
     main/agent/subagent/subagent_task.c

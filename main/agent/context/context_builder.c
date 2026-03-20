@@ -43,10 +43,8 @@ mimi_err_t context_build_system_prompt(char *buf, size_t size)
         "You are MimiClaw, a personal AI assistant.\n"
         "Be helpful, accurate, and concise.\n");
 
-    /* Agent guidelines (workspace root, created by bootstrap; ignore if missing). */
     off = append_file(buf, size, off, MIMI_DEFAULT_AGENTS_FILE, "Agent Guidelines");
 
-    /* Short memory / skills pointers (details live in policies and files). */
     off += snprintf(buf + off, size - off,
         "\n## Memory\n\n"
         "- Long-term memory: %s\n"
@@ -58,23 +56,19 @@ mimi_err_t context_build_system_prompt(char *buf, size_t size)
         "memory",
         skills_prefix);
 
-    /* Bootstrap files */
     off = append_file(buf, size, off, soul_file, "Personality");
     off = append_file(buf, size, off, user_file, "User Info");
 
-    /* Long-term memory */
     char mem_buf[4096];
     if (memory_read_long_term(mem_buf, sizeof(mem_buf)) == MIMI_OK && mem_buf[0]) {
         off += snprintf(buf + off, size - off, "\n## Long-term Memory\n\n%s\n", mem_buf);
     }
 
-    /* Recent daily notes (last 3 days) */
     char recent_buf[4096];
     if (memory_read_recent(recent_buf, sizeof(recent_buf), 3) == MIMI_OK && recent_buf[0]) {
         off += snprintf(buf + off, size - off, "\n## Recent Notes\n\n%s\n", recent_buf);
     }
 
-    /* Skills */
     char skills_buf[2048];
     size_t skills_len = skill_loader_build_summary(skills_buf, sizeof(skills_buf));
     if (skills_len > 0) {
@@ -87,3 +81,4 @@ mimi_err_t context_build_system_prompt(char *buf, size_t size)
     MIMI_LOGI(TAG, "System prompt built: %d bytes", (int)off);
     return MIMI_OK;
 }
+
