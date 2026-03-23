@@ -6,15 +6,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <time.h>
 #include <pty.h>
+#if defined(__linux__)
+#include <sys/mount.h>
+#include <sys/prctl.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <linux/audit.h>
+#include <sys/syscall.h>
+#endif
 
 static const char *TOOL_DESCRIPTION =
     "Execute a command in the workspace. Supports optional PTY + background sessions via process.";
@@ -24,14 +34,14 @@ static const char *TOOL_SCHEMA =
     "\"type\":\"object\","
     "\"properties\":{"
       "\"action\":{\"type\":\"string\",\"enum\":[\"run\",\"poll\",\"send\",\"send-keys\",\"paste\",\"submit\",\"kill\"],\"default\":\"run\"},"
+      "\"mode\":{\"type\":\"string\",\"enum\":[\"sync\",\"session\"],\"default\":\"sync\",\"description\":\"Execution lifecycle mode\"},"
+      "\"io\":{\"type\":\"string\",\"enum\":[\"pipe\",\"pty\"],\"default\":\"pipe\",\"description\":\"Process I/O transport\"},"
       "\"command\":{\"type\":\"string\",\"description\":\"Command to execute (sh -c)\"},"
       "\"working_directory\":{\"type\":\"string\",\"description\":\"Optional working directory relative to workspace or absolute path\"},"
       "\"timeout_sec\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Optional timeout in seconds\"},"
       "\"env\":{\"type\":\"string\",\"enum\":[\"host\",\"sandbox\"],\"description\":\"Execution mode\"},"
       "\"max_output_bytes\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Maximum captured output bytes\"},"
-      "\"pty\":{\"type\":\"boolean\",\"description\":\"Run in pseudo-terminal (TTY-only CLIs)\"},"
-      "\"yieldMs\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"If set, return after this delay with session_id if still running\"},"
-      "\"background\":{\"type\":\"boolean\",\"description\":\"Run in background immediately and return session_id\"},"
+      "\"start_wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"In session mode, optional initial wait before returning\"},"
       "\"sessionId\":{\"type\":\"string\",\"description\":\"Session id for poll/send/kill\"},"
       "\"text\":{\"type\":\"string\",\"description\":\"Text for send/paste\"},"
       "\"keys\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
@@ -137,13 +147,174 @@ static int pty_open(int *master_fd, int *slave_fd)
     return openpty(master_fd, slave_fd, NULL, NULL, NULL);
 }
 
+static void append_clamped(char *dst, size_t dst_size, size_t *len, const char *src, size_t src_len, bool *truncated)
+{
+    if (!dst || dst_size == 0 || !len || !src || src_len == 0) return;
+    size_t remain = (*len < dst_size - 1) ? (dst_size - 1 - *len) : 0;
+    if (remain == 0) {
+        if (truncated) *truncated = true;
+        return;
+    }
+    size_t cpy = src_len < remain ? src_len : remain;
+    memcpy(dst + *len, src, cpy);
+    *len += cpy;
+    dst[*len] = '\0';
+    if (cpy < src_len && truncated) *truncated = true;
+}
+
+#if defined(__linux__)
+static int session_sandbox_install_seccomp(void)
+{
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD + BPF_W + BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_read, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_write, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_brk, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_mmap, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_mprotect, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_rt_sigreturn, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_exit, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_exit_group, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_execve, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_kill, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_rt_sigaction, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_rt_sigprocmask, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_alarm, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_setsid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_ioctl, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_dup, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_dup2, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_close, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_fcntl, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_open, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_openat, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_pipe, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_readlink, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getcwd, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_chdir, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getdents, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getpid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getppid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getuid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_geteuid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getgid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getegid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_gettid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_getpgid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_setpgid, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_wait4, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_writev, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_readv, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_newfstatat, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_fstat, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_lseek, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_unlink, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_umask, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_times, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_gettimeofday, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, __NR_umount2, 0, 1),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_KILL_PROCESS),
+    };
+
+    struct sock_fprog prog = {
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter,
+    };
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return -1;
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) return -1;
+    return 0;
+}
+
+static int session_sandbox_setup_mount_namespace(const char *workspace)
+{
+    if (!workspace || !workspace[0]) return -1;
+    if (mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL)) return -1;
+
+    char sandbox_root[512];
+    snprintf(sandbox_root, sizeof(sandbox_root), "%s/.sandbox", workspace);
+    (void)mkdir(sandbox_root, 0755);
+    if (chdir(sandbox_root) < 0) return -1;
+    if (chroot(".") < 0) return -1;
+    if (chdir("/") < 0) return -1;
+
+    (void)mkdir("/workspace", 0755);
+    if (mount(workspace, "/workspace", NULL, MS_BIND | MS_REC, NULL)) return -1;
+    if (chdir("/workspace") < 0) return -1;
+
+    (void)mkdir("/proc", 0555);
+    (void)mount("proc", "/proc", "proc", 0, NULL);
+    (void)mkdir("/tmp", 01777);
+    (void)mkdir("/dev", 0755);
+    (void)mkdir("/dev/pts", 0755);
+    if (mount("devpts", "/dev/pts", "devpts", 0, NULL) < 0) {
+        (void)mkdir("/dev/ptmx", 0644);
+    }
+    return 0;
+}
+#endif
+
 static mimi_err_t start_background_session(const char *cmd, const char *cwd, int use_pty,
+                                          mimi_exec_env_t env,
+                                          const char *workspace_root,
                                           int timeout_sec,
                                           size_t output_cap,
                                           exec_sess_t **out_sess)
 {
     if (!cmd || !out_sess) return MIMI_ERR_INVALID_ARG;
     *out_sess = NULL;
+
+#if defined(__linux__)
+    if (env == MIMI_EXEC_ENV_SANDBOX && geteuid() != 0) return MIMI_ERR_NOT_SUPPORTED;
+#else
+    if (env == MIMI_EXEC_ENV_SANDBOX) return MIMI_ERR_NOT_SUPPORTED;
+#endif
 
     sessions_gc();
     exec_sess_t *s = sess_alloc();
@@ -212,6 +383,14 @@ static mimi_err_t start_background_session(const char *cmd, const char *cwd, int
             close(in_pipe[0]); close(in_pipe[1]);
             close(out_pipe[0]); close(out_pipe[1]);
         }
+#if defined(__linux__)
+        if (env == MIMI_EXEC_ENV_SANDBOX) {
+            if (session_sandbox_setup_mount_namespace(workspace_root) < 0) _exit(126);
+            if (session_sandbox_install_seccomp() < 0) _exit(126);
+        }
+#else
+        (void)workspace_root;
+#endif
         if (cwd && cwd[0]) (void)chdir(cwd);
         char *argv[] = {"sh", "-c", (char *)cmd, NULL};
         execvp("/bin/sh", argv);
@@ -461,9 +640,9 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
     const char *workspace = (session_ctx && session_ctx->workspace_root[0]) ? session_ctx->workspace_root : "/tmp";
     const char *wd = cJSON_GetStringValue(cJSON_GetObjectItem(root, "working_directory"));
     const char *env = cJSON_GetStringValue(cJSON_GetObjectItem(root, "env"));
-    bool background = cJSON_IsTrue(cJSON_GetObjectItem(root, "background"));
-    int yield_ms = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(root, "yieldMs"));
-    bool pty = cJSON_IsTrue(cJSON_GetObjectItem(root, "pty"));
+    const char *mode = cJSON_GetStringValue(cJSON_GetObjectItem(root, "mode"));
+    const char *io = cJSON_GetStringValue(cJSON_GetObjectItem(root, "io"));
+    int start_wait_ms = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(root, "start_wait_ms"));
 
     char cwd_buf[512];
     const char *cwd = workspace;
@@ -484,25 +663,76 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
     cJSON *mo = cJSON_GetObjectItem(root, "max_output_bytes");
     if (mo && cJSON_IsNumber(mo) && mo->valuedouble > 0) max_out = (size_t)mo->valuedouble;
 
-    if ((background || yield_ms > 0 || pty) && env && strcmp(env, "sandbox") == 0) {
+    bool use_pty = false;
+    if (io && io[0]) {
+        if (strcmp(io, "pty") == 0) use_pty = true;
+        else if (strcmp(io, "pipe") == 0) use_pty = false;
+        else {
+            cJSON_Delete(root);
+            snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"invalid_io\"}");
+            return MIMI_ERR_INVALID_ARG;
+        }
+    }
+
+    bool session_mode = false;
+    if (mode && mode[0]) {
+        if (strcmp(mode, "session") == 0) session_mode = true;
+        else if (strcmp(mode, "sync") == 0) session_mode = false;
+        else {
+            cJSON_Delete(root);
+            snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"invalid_mode\"}");
+            return MIMI_ERR_INVALID_ARG;
+        }
+    }
+
+    int initial_wait_ms = start_wait_ms;
+    if (initial_wait_ms < 0) initial_wait_ms = 0;
+
+    if (session_mode && env && strcmp(env, "sandbox") == 0 && !use_pty) {
         cJSON_Delete(root);
-        snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"session_sandbox_not_supported\"}");
+        const char *conflict = "mode=session+io=pipe";
+        snprintf(output, output_size,
+            "{\"status\":\"error\",\"error\":\"sandbox_env_conflict\","
+            "\"message\":\"Sandbox mode does not support %s sessions. "
+            "Use env=\\\"host\\\" for non-PTY session execution, "
+            "or remove %s from your request.\","
+            "\"hint\":\"Set env=\\\"host\\\" for session+pipe, or use env=\\\"sandbox\\\" with mode=sync or io=pty.\","
+            "\"conflicting_params\":[\"env=sandbox\",\"%s\"]}",
+            conflict, conflict, conflict);
         return MIMI_ERR_NOT_SUPPORTED;
     }
 
-    if (background || yield_ms > 0 || pty) {
+    if (session_mode) {
+        mimi_exec_env_t exec_env = (env && strcmp(env, "sandbox") == 0) ? MIMI_EXEC_ENV_SANDBOX : MIMI_EXEC_ENV_HOST;
+        const char *session_cwd = cwd;
+        if (exec_env == MIMI_EXEC_ENV_SANDBOX) {
+            session_cwd = "/workspace";
+        }
         exec_sess_t *sess = NULL;
-        mimi_err_t serr = start_background_session(cmd, cwd, (int)pty, timeout_sec, max_out, &sess);
+        mimi_err_t serr = start_background_session(cmd,
+                                                   session_cwd,
+                                                   (int)use_pty,
+                                                   exec_env,
+                                                   workspace,
+                                                   timeout_sec,
+                                                   max_out,
+                                                   &sess);
         if (serr != MIMI_OK || !sess) {
             cJSON_Delete(root);
-            snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"session_start_failed\"}");
+            if (serr == MIMI_ERR_NOT_SUPPORTED && exec_env == MIMI_EXEC_ENV_SANDBOX) {
+                snprintf(output, output_size,
+                         "{\"status\":\"error\",\"error\":\"sandbox_requires_root\","
+                         "\"message\":\"Sandbox PTY sessions require root privileges on this platform.\"}");
+            } else {
+                snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"session_start_failed\"}");
+            }
             return serr != MIMI_OK ? serr : MIMI_ERR_FAIL;
         }
 
-        if (!background && yield_ms > 0) {
+        if (initial_wait_ms > 0) {
             char poll_json[8192] = {0};
             (void)tool_exec_process_attach(sess->id, poll_json, sizeof(poll_json),
-                                           TOOL_EXEC_ACT_POLL, NULL, 0, yield_ms, 4096);
+                                           TOOL_EXEC_ACT_POLL, NULL, 0, initial_wait_ms, 4096);
             cJSON *pj = cJSON_Parse(poll_json);
             bool exited = false;
             if (pj) {
@@ -550,33 +780,103 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
         snprintf(output, output_size, "{\"status\":\"running\",\"sessionId\":\"%s\"}", sess->id);
         return MIMI_OK;
     }
+    /* Unified backend for sync path: run through session spawn + poll loop. */
+    mimi_exec_env_t exec_env = (env && strcmp(env, "sandbox") == 0) ? MIMI_EXEC_ENV_SANDBOX : MIMI_EXEC_ENV_HOST;
+    const char *session_cwd = cwd;
+    if (exec_env == MIMI_EXEC_ENV_SANDBOX) {
+        session_cwd = "/workspace";
+    }
+    exec_sess_t *sess = NULL;
+    mimi_err_t serr = start_background_session(cmd,
+                                               session_cwd,
+                                               (int)use_pty,
+                                               exec_env,
+                                               workspace,
+                                               timeout_sec,
+                                               max_out,
+                                               &sess);
+    if (serr != MIMI_OK || !sess) {
+        cJSON_Delete(root);
+        if (serr == MIMI_ERR_NOT_SUPPORTED && exec_env == MIMI_EXEC_ENV_SANDBOX) {
+            snprintf(output, output_size,
+                     "{\"status\":\"error\",\"error\":\"sandbox_requires_root\","
+                     "\"message\":\"Sandbox executions require root privileges on this platform.\"}");
+        } else {
+            snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"session_start_failed\"}");
+        }
+        return serr != MIMI_OK ? serr : MIMI_ERR_FAIL;
+    }
 
-    mimi_exec_spec_t spec = {
-        .command = cmd,
-        .cwd = cwd,
-        .workspace_root = workspace,
-        .timeout_ms = timeout_sec * 1000,
-        .max_output_bytes = max_out,
-        .merge_stderr = true,
-        .env = (env && strcmp(env, "sandbox") == 0) ? MIMI_EXEC_ENV_SANDBOX : MIMI_EXEC_ENV_HOST,
-    };
+    char full_out[32768] = {0};
+    size_t full_len = 0;
+    bool timed_out = false;
+    bool out_truncated = false;
+    bool exited = false;
+    int exit_code = -1;
+    size_t cursor = 0;
+    const int poll_wait_ms = 100;
 
-    char exec_output[32768] = {0};
-    mimi_exec_result_t r = {0};
-    mimi_err_t err = mimi_exec_run(&spec, exec_output, sizeof(exec_output), &r);
+    while (!exited) {
+        char poll_json[8192] = {0};
+        mimi_err_t perr = tool_exec_process_attach(sess->id,
+                                                   poll_json,
+                                                   sizeof(poll_json),
+                                                   TOOL_EXEC_ACT_POLL,
+                                                   NULL,
+                                                   cursor,
+                                                   poll_wait_ms,
+                                                   4096);
+        if (perr == MIMI_ERR_TIMEOUT) {
+            timed_out = true;
+            break;
+        }
+        if (perr != MIMI_OK) {
+            cJSON_Delete(root);
+            snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"poll_failed\"}");
+            return perr;
+        }
+
+        cJSON *pj = cJSON_Parse(poll_json);
+        if (!pj || !cJSON_IsObject(pj)) {
+            if (pj) cJSON_Delete(pj);
+            cJSON_Delete(root);
+            snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"poll_decode_failed\"}");
+            return MIMI_ERR_FAIL;
+        }
+
+        cJSON *out = cJSON_GetObjectItem(pj, "output");
+        if (cJSON_IsString(out) && out->valuestring) {
+            append_clamped(full_out,
+                           sizeof(full_out),
+                           &full_len,
+                           out->valuestring,
+                           strlen(out->valuestring),
+                           &out_truncated);
+        }
+        cJSON *nc = cJSON_GetObjectItem(pj, "nextCursor");
+        if (cJSON_IsNumber(nc) && nc->valuedouble >= 0) cursor = (size_t)nc->valuedouble;
+        cJSON *tr = cJSON_GetObjectItem(pj, "truncated");
+        if (cJSON_IsTrue(tr)) out_truncated = true;
+        cJSON *ex = cJSON_GetObjectItem(pj, "exited");
+        if (cJSON_IsTrue(ex)) exited = true;
+        cJSON *ec = cJSON_GetObjectItem(pj, "exit_code");
+        if (cJSON_IsNumber(ec)) exit_code = (int)ec->valuedouble;
+
+        cJSON_Delete(pj);
+    }
 
     cJSON *resp = cJSON_CreateObject();
-    cJSON_AddStringToObject(resp, "status", (err == MIMI_OK) ? "ok" : "error");
-    cJSON_AddStringToObject(resp, "output", exec_output);
-    cJSON_AddNumberToObject(resp, "exit_code", r.exit_code);
-    cJSON_AddBoolToObject(resp, "timed_out", r.timed_out);
-    cJSON_AddBoolToObject(resp, "truncated", r.truncated);
-    cJSON_AddStringToObject(resp, "env", (spec.env == MIMI_EXEC_ENV_SANDBOX) ? "sandbox" : "host");
+    cJSON_AddStringToObject(resp, "status", timed_out ? "error" : "ok");
+    cJSON_AddStringToObject(resp, "output", full_out);
+    cJSON_AddNumberToObject(resp, "exit_code", exit_code);
+    cJSON_AddBoolToObject(resp, "timed_out", timed_out);
+    cJSON_AddBoolToObject(resp, "truncated", out_truncated);
+    cJSON_AddStringToObject(resp, "env", (exec_env == MIMI_EXEC_ENV_SANDBOX) ? "sandbox" : "host");
+    if (timed_out) cJSON_AddStringToObject(resp, "error", "timeout");
 
     char *s = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
     cJSON_Delete(root);
-
     if (!s) {
         snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"json_encode_failed\"}");
         return MIMI_ERR_FAIL;
@@ -584,6 +884,6 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
     strncpy(output, s, output_size - 1);
     output[output_size - 1] = '\0';
     free(s);
-    return err;
+    return timed_out ? MIMI_ERR_TIMEOUT : MIMI_OK;
 }
 

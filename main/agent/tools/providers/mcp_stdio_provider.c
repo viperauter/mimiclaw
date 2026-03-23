@@ -4,12 +4,16 @@
 #include "tools/tool_exec.h"
 #include "cJSON.h"
 #include "log.h"
+#include "os/os.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdint.h>
+#include <time.h>
+#include <sys/select.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -27,6 +31,10 @@ typedef struct {
     int from_child; /* parent reads  <- child stdout */
     bool started;
 
+    /* MCP lifecycle state (std io JSON-RPC). */
+    bool initialized;
+    long long last_ping_ms;
+
     /* cached tool list (OpenAI tools json array string) */
     char *tools_json;
 } mcp_server_t;
@@ -34,6 +42,28 @@ typedef struct {
 static mcp_server_t s_servers[MAX_MCP_SERVERS];
 static int s_server_count = 0;
 static char *s_tools_json_merged = NULL;
+
+static mimi_mutex_t *s_mcp_mu = NULL;
+static uint64_t s_rpc_id_next = 1;
+
+static long long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000LL);
+}
+
+static void lock_mcp(void)
+{
+    if (!s_mcp_mu) return;
+    (void)mimi_mutex_lock(s_mcp_mu);
+}
+
+static void unlock_mcp(void)
+{
+    if (!s_mcp_mu) return;
+    (void)mimi_mutex_unlock(s_mcp_mu);
+}
 
 static void free_server(mcp_server_t *s)
 {
@@ -49,6 +79,8 @@ static void free_server(mcp_server_t *s)
         }
     }
     s->started = false;
+    s->initialized = false;
+    s->last_ping_ms = 0;
     s->pid = 0;
     s->to_child = -1;
     s->from_child = -1;
@@ -119,6 +151,8 @@ static mimi_err_t start_server(mcp_server_t *s)
     s->to_child = in_pipe[1];
     s->from_child = out_pipe[0];
     s->started = true;
+    s->initialized = false;
+    s->last_ping_ms = 0;
     MIMI_LOGI(TAG, "Started MCP server %s pid=%d", s->name, (int)pid);
     return MIMI_OK;
 }
@@ -132,11 +166,24 @@ static mimi_err_t rpc_send_line(mcp_server_t *s, const char *line)
     return MIMI_OK;
 }
 
-static mimi_err_t rpc_read_line(mcp_server_t *s, char *buf, size_t buf_sz)
+static mimi_err_t rpc_read_line(mcp_server_t *s, char *buf, size_t buf_sz, int timeout_ms)
 {
     if (!s || !s->started || s->from_child < 0 || !buf || buf_sz == 0) return MIMI_ERR_INVALID_ARG;
     size_t off = 0;
+    long long deadline = (timeout_ms > 0) ? (now_ms() + (long long)timeout_ms) : 0;
     while (off + 1 < buf_sz) {
+        if (timeout_ms > 0) {
+            long long rem = deadline - now_ms();
+            if (rem <= 0) return MIMI_ERR_TIMEOUT;
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(s->from_child, &rfds);
+            struct timeval tv;
+            tv.tv_sec = (long)(rem / 1000LL);
+            tv.tv_usec = (long)((rem % 1000LL) * 1000LL);
+            int ready = select(s->from_child + 1, &rfds, NULL, NULL, &tv);
+            if (ready <= 0) return MIMI_ERR_TIMEOUT;
+        }
         char c;
         ssize_t r = read(s->from_child, &c, 1);
         if (r == 0) break;
@@ -154,23 +201,144 @@ static mimi_err_t rpc_read_line(mcp_server_t *s, char *buf, size_t buf_sz)
 static char *rpc_request(mcp_server_t *s, const char *method, cJSON *params)
 {
     if (!s || !method) return NULL;
+
+    /* JSON-RPC id must be unique; otherwise can't safely match responses
+     * if server sends notifications intermixed with responses. */
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "%llu", (unsigned long long)s_rpc_id_next++);
+
     cJSON *req = cJSON_CreateObject();
     cJSON_AddStringToObject(req, "jsonrpc", "2.0");
-    cJSON_AddStringToObject(req, "id", "1");
+    cJSON_AddStringToObject(req, "id", id_str);
     cJSON_AddStringToObject(req, "method", method);
     if (params) cJSON_AddItemToObject(req, "params", params);
     char *line = cJSON_PrintUnformatted(req);
     cJSON_Delete(req);
     if (!line) return NULL;
-    if (rpc_send_line(s, line) != MIMI_OK) {
-        free(line);
+
+    lock_mcp();
+    mimi_err_t err = rpc_send_line(s, line);
+    free(line);
+    if (err != MIMI_OK) {
+        unlock_mcp();
         return NULL;
     }
-    free(line);
 
-    char resp_line[16384];
-    if (rpc_read_line(s, resp_line, sizeof(resp_line)) != MIMI_OK) return NULL;
-    return strdup(resp_line);
+    /* Read until response with matching id arrives. */
+    long long start = now_ms();
+    const int timeout_ms = 30000; /* 30 seconds */
+    for (;;) {
+        int rem_ms = timeout_ms;
+        if (timeout_ms > 0) {
+            long long elapsed = now_ms() - start;
+            rem_ms = (int)((elapsed >= (long long)timeout_ms) ? 0 : (long long)timeout_ms - elapsed);
+            if (rem_ms <= 0) {
+                unlock_mcp();
+                return NULL;
+            }
+        }
+
+        char msg_line[16384];
+        mimi_err_t rerr = rpc_read_line(s, msg_line, sizeof(msg_line), rem_ms);
+        if (rerr != MIMI_OK) {
+            unlock_mcp();
+            return NULL;
+        }
+
+        cJSON *msg = cJSON_Parse(msg_line);
+        if (!msg || !cJSON_IsObject(msg)) {
+            cJSON_Delete(msg);
+            continue;
+        }
+
+        cJSON *mid = cJSON_GetObjectItemCaseSensitive(msg, "id");
+        if (mid) {
+            if (cJSON_IsString(mid) && strcmp(mid->valuestring, id_str) == 0) {
+                char *ret = strdup(msg_line);
+                cJSON_Delete(msg);
+                unlock_mcp();
+                return ret;
+            }
+            if (cJSON_IsNumber(mid)) {
+                unsigned long long expected = (unsigned long long)strtoull(id_str, NULL, 10);
+                unsigned long long got = (unsigned long long)mid->valuedouble;
+                if (got == expected) {
+                    char *ret = strdup(msg_line);
+                    cJSON_Delete(msg);
+                    unlock_mcp();
+                    return ret;
+                }
+            }
+        }
+
+        /* Ignore notifications or responses with other ids. */
+        cJSON_Delete(msg);
+    }
+}
+
+static mimi_err_t rpc_notify(mcp_server_t *s, const char *method, cJSON *params)
+{
+    if (!s || !method) return MIMI_ERR_INVALID_ARG;
+    cJSON *req = cJSON_CreateObject();
+    cJSON_AddStringToObject(req, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(req, "method", method);
+    if (params) cJSON_AddItemToObject(req, "params", params);
+    char *line = cJSON_PrintUnformatted(req);
+    cJSON_Delete(req);
+    if (!line) return MIMI_ERR_NO_MEM;
+
+    lock_mcp();
+    mimi_err_t err = rpc_send_line(s, line);
+    unlock_mcp();
+    free(line);
+    return err;
+}
+
+static mimi_err_t mcp_do_initialize(mcp_server_t *s)
+{
+    if (!s) return MIMI_ERR_INVALID_ARG;
+    if (s->initialized) return MIMI_OK;
+    mimi_err_t err = start_server(s);
+    if (err != MIMI_OK) return err;
+
+    cJSON *init_params = cJSON_CreateObject();
+    cJSON_AddStringToObject(init_params, "protocolVersion", "2024-11-05");
+    cJSON *cap = cJSON_CreateObject();
+    cJSON_AddItemToObject(init_params, "capabilities", cap);
+    cJSON_AddStringToObject(init_params, "clientInfo", "mimiclaw");
+    char *init_resp = rpc_request(s, "initialize", init_params);
+
+    bool init_ok = (init_resp != NULL);
+    if (init_resp) {
+        cJSON *root = cJSON_Parse(init_resp);
+        if (root) {
+            cJSON *e = cJSON_GetObjectItemCaseSensitive(root, "error");
+            if (e) init_ok = false;
+            cJSON_Delete(root);
+        }
+        free(init_resp);
+    }
+
+    if (!init_ok) return MIMI_ERR_FAIL;
+
+    /* Standard MCP lifecycle: send initialized notification. */
+    (void)rpc_notify(s, "notifications/initialized", NULL);
+    s->initialized = true;
+    s->last_ping_ms = 0;
+    return MIMI_OK;
+}
+
+static mimi_err_t mcp_ping_if_needed(mcp_server_t *s)
+{
+    if (!s || !s->initialized) return MIMI_OK;
+    long long n = now_ms();
+    if (s->last_ping_ms <= 0 || n - s->last_ping_ms > 30000) {
+        /* MCP ping request: method name is simply "ping". */
+        char *resp = rpc_request(s, "ping", NULL);
+        free(resp);
+        s->last_ping_ms = n;
+    }
+    return MIMI_OK;
 }
 
 static char *mcp_tools_to_openai_json(const char *server_name, cJSON *tools_arr)
@@ -202,25 +370,26 @@ static char *mcp_tools_to_openai_json(const char *server_name, cJSON *tools_arr)
 static mimi_err_t refresh_server_tools(mcp_server_t *s)
 {
     if (!s) return MIMI_ERR_INVALID_ARG;
-    mimi_err_t err = start_server(s);
+    mimi_err_t err = mcp_do_initialize(s);
     if (err != MIMI_OK) return err;
-
-    /* initialize (best-effort) */
-    cJSON *init_params = cJSON_CreateObject();
-    cJSON_AddStringToObject(init_params, "protocolVersion", "2024-11-05");
-    cJSON *cap = cJSON_CreateObject();
-    cJSON_AddItemToObject(init_params, "capabilities", cap);
-    cJSON_AddStringToObject(init_params, "clientInfo", "mimiclaw");
-    char *init_resp = rpc_request(s, "initialize", init_params);
-    free(init_resp);
-
+    (void)mcp_ping_if_needed(s);
     char *tools_resp = rpc_request(s, "tools/list", cJSON_CreateObject());
     if (!tools_resp) return MIMI_ERR_FAIL;
     cJSON *root = cJSON_Parse(tools_resp);
     free(tools_resp);
     if (!root) return MIMI_ERR_FAIL;
-    cJSON *result = cJSON_GetObjectItem(root, "result");
-    cJSON *tools = result ? cJSON_GetObjectItem(result, "tools") : NULL;
+
+    /* Tools response format varies across servers.
+     * Standard MCP: { "result": { "tools": [...] } }
+     * Some servers: { "tools": [...] }
+     */
+    cJSON *tools = NULL;
+    cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
+    if (result && cJSON_IsObject(result)) {
+        tools = cJSON_GetObjectItemCaseSensitive(result, "tools");
+    }
+    if (!tools) tools = cJSON_GetObjectItemCaseSensitive(root, "tools");
+
     char *openai = mcp_tools_to_openai_json(s->name, tools);
     free(s->tools_json);
     s->tools_json = openai;
@@ -233,6 +402,10 @@ static mimi_err_t mcp_init(void)
     clear_cache();
     for (int i = 0; i < s_server_count; i++) free_server(&s_servers[i]);
     s_server_count = 0;
+
+    if (!s_mcp_mu) {
+        (void)mimi_mutex_create(&s_mcp_mu);
+    }
 
     mimi_cfg_obj_t providers = mimi_cfg_section("providers");
     mimi_cfg_obj_t servers = mimi_cfg_get_arr(providers, "mcpServers");
@@ -266,6 +439,11 @@ static mimi_err_t mcp_deinit(void)
     clear_cache();
     for (int i = 0; i < s_server_count; i++) free_server(&s_servers[i]);
     s_server_count = 0;
+
+    if (s_mcp_mu) {
+        mimi_mutex_destroy(s_mcp_mu);
+        s_mcp_mu = NULL;
+    }
     return MIMI_OK;
 }
 
@@ -333,8 +511,9 @@ static mimi_err_t mcp_execute(const char *tool_name, const char *input_json,
         snprintf(output, output_size, "{\"status\":\"error\",\"error\":\"unknown mcp tool\"}");
         return MIMI_ERR_NOT_FOUND;
     }
-    mimi_err_t err = start_server(srv);
+    mimi_err_t err = mcp_do_initialize(srv);
     if (err != MIMI_OK) return err;
+    (void)mcp_ping_if_needed(srv);
 
     cJSON *params = cJSON_CreateObject();
     cJSON_AddStringToObject(params, "name", local_tool);
