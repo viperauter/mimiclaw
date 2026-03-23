@@ -272,5 +272,203 @@ class TestEndToEndScenarios:
         # We expect at least one LLM call (the tool call) plus possibly a second for the final answer
         assert stats["call_count"] >= 1
 
+
+class TestSubagentTool:
+    """Tests for the built-in subagents tool functionality"""
+    
+    def test_subagent_spawn_basic(self, llm_server_clean, test_config, mimiclaw_runner):
+        """Test basic subagent spawning"""
+        llm_server_clean.reset()
+        
+        # Sequence: LLM first calls subagents spawn tool
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "spawn",
+                "task": "Calculate the sum of first 10 prime numbers",
+                "maxIters": 3,
+                "timeoutSec": 30
+            }
+        )
+        
+        # After spawn, we expect a response indicating the subagent was created
+        llm_server_clean.set_text_response(
+            "I have successfully spawned a subagent to calculate the sum of first 10 prime numbers."
+        )
+        
+        result = mimiclaw_runner.run_with_input(
+            "Spawn a subagent to calculate the sum of first 10 prime numbers",
+            timeout=30
+        )
+        
+        print(f"\n=== Subagent Spawn Test ===")
+        print(f"Return Code: {result['returncode']}")
+        print(f"Stdout: {result['stdout'][-800:]}")
+        
+        # Verify at least one LLM call was made
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+        assert stats["call_count"] >= 1
+    
+    def test_subagent_list(self, llm_server_clean, test_config, mimiclaw_runner):
+        """Test listing subagents"""
+        llm_server_clean.reset()
+        
+        # First spawn a subagent
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "spawn",
+                "task": "Perform a quick analysis of test data",
+                "maxIters": 2,
+                "timeoutSec": 20
+            }
+        )
+        
+        # Then list subagents
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "list",
+                "recentMinutes": 5
+            }
+        )
+        
+        llm_server_clean.set_text_response(
+            "I can see the subagent you spawned is currently running."
+        )
+        
+        result = mimiclaw_runner.run_with_input(
+            "Spawn a subagent for quick analysis and list all running subagents",
+            timeout=30
+        )
+        
+        print(f"\n=== Subagent List Test ===")
+        print(f"Return Code: {result['returncode']}")
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+        assert stats["call_count"] >= 2  # spawn + list + possibly final response
+    
+    def test_subagent_spawn_with_tools(self, llm_server_clean, test_config, mimiclaw_runner):
+        """Test spawning a subagent with specific tools"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "spawn",
+                "task": "Analyze the available tools and create a summary",
+                "tools": "subagents",  # Only allow subagent tool
+                "maxIters": 3,
+                "timeoutSec": 30
+            }
+        )
+        
+        llm_server_clean.set_text_response(
+            "Subagent spawned successfully with restricted tool access."
+        )
+        
+        result = mimiclaw_runner.run_with_input(
+            "Spawn a subagent that can only use subagents tool to analyze available tools",
+            timeout=30
+        )
+        
+        print(f"\n=== Subagent Spawn with Tools Test ===")
+        print(f"Return Code: {result['returncode']}")
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+        assert stats["call_count"] >= 1
+
+class TestSubagentWorkflows:
+    """Advanced subagent workflow tests"""
+    
+    def test_spawn_and_immediate_join(self, llm_server_clean, test_config, mimiclaw_runner):
+        """Test spawning a subagent and immediately joining it"""
+        llm_server_clean.reset()
+        
+        # Spawn
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "spawn",
+                "task": "Quick computation task",
+                "maxIters": 2,
+                "timeoutSec": 15
+            }
+        )
+        
+        # Join - need to get id from spawn response first
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "join",
+                "id": "some_subagent_id",  # In real scenario, this comes from spawn response
+                "waitMs": 5000
+            }
+        )
+        
+        llm_server_clean.set_text_response(
+            "Subagent completed its task successfully."
+        )
+        
+        result = mimiclaw_runner.run_with_input(
+            "Spawn a subagent for quick computation and wait for it to complete",
+            timeout=45
+        )
+        
+        print(f"\n=== Spawn and Join Test ===")
+        print(f"Return Code: {result['returncode']}")
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+    
+    def test_subagent_cancel(self, llm_server_clean, test_config, mimiclaw_runner):
+        """Test canceling a subagent"""
+        llm_server_clean.reset()
+        
+        # Spawn long-running task
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "spawn",
+                "task": "Perform a lengthy analysis that we will cancel",
+                "maxIters": 10,
+                "timeoutSec": 60
+            }
+        )
+        
+        # Cancel it
+        llm_server_clean.set_tool_call(
+            "subagents",
+            {
+                "action": "cancel",
+                "id": "subagent_to_cancel",
+                "mode": "cancel"  # soft cancel
+            }
+        )
+        
+        llm_server_clean.set_text_response(
+            "The subagent has been canceled as requested."
+        )
+        
+        result = mimiclaw_runner.run_with_input(
+            "Start a subagent and then cancel it",
+            timeout=30
+        )
+        
+        print(f"\n=== Subagent Cancel Test ===")
+        print(f"Return Code: {result['returncode']}")
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

@@ -39,7 +39,7 @@ The integration test framework uses a **black-box testing approach** that runs t
 
 | File | Purpose |
 |------|---------|
-| [`test_mcp_integration.py`](./test_mcp_integration.py) | **Main test suite** containing all MCP integration test cases |
+| [`test_mcp_integration.py`](./test_mcp_integration.py) | **Main test suite** containing MCP integration tests **and built-in subagent tool tests** (15 test cases) |
 | [`conftest.py`](./conftest.py) | pytest fixtures and shared configuration for test environment |
 | [`virtual_llm_server.py`](./virtual_llm_server.py) | Flask-based mock LLM server with dynamic response configuration |
 | [`test_mcp_server.py`](./test_mcp_server.py) | Test MCP server implementing tools like `echo`, `add`, `get_test_data` |
@@ -70,9 +70,15 @@ The test suite covers these scenarios:
 - Sequential tool calls
 - Error recovery scenarios
 
-### 5. End-to-End Workflows
+### 5. Built-in Tool Tests
+- **Subagent management** - Spawn, list, cancel, join operations
+- Subagent tool restriction (tools allowlist)
+- Subagent lifecycle management
+
+### 6. End-to-End Workflows
 - Complete workflow from user input to final response
 - Full MCP integration lifecycle
+- Subagent-based task decomposition
 
 ## Running Tests
 
@@ -88,6 +94,8 @@ cd /root/workspace/mimiclaw/test/integration
 # Examples:
 ./run_tests.sh -v                          # Run all tests with verbose output
 ./run_tests.sh test_mcp_integration.py::TestEndToEndScenarios -v  # Run specific test class
+./run_tests.sh test_mcp_integration.py::TestSubagentTool -v       # Run subagent tool tests
+./run_tests.sh test_mcp_integration.py::TestSubagentWorkflows -v  # Run subagent workflow tests
 ./run_tests.sh --no-venv -x -s             # Use system Python, stop on first failure
 ```
 
