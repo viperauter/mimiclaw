@@ -143,7 +143,10 @@ list(APPEND APP_SRC
     main/agent/control/control_manager.c
     main/agent/tools/tool_registry.c
     main/agent/tools/tool_provider.c
-    main/agent/tools/providers/mcp_stdio_provider.c
+    main/agent/tools/providers/mcp_provider.c
+    main/agent/tools/providers/mcp_stdio_transport.c
+    main/agent/tools/providers/mcp_http_provider.c
+    main/agent/tools/providers/mcp_provider_core.c
     main/agent/tools/tool_files.c
     main/agent/tools/tool_cron.c
     main/agent/tools/tool_web_search.c

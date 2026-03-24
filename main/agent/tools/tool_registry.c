@@ -6,7 +6,7 @@
 #include "tools/tool_cron.h"
 #include "tools/tool_exec.h"
 #include "tools/tool_provider.h"
-#include "tools/providers/mcp_stdio_provider.h"
+#include "tools/providers/mcp_provider.h"
 #include "mimi_config.h"
 
 #if MIMI_ENABLE_SUBAGENT
@@ -110,7 +110,7 @@ mimi_err_t tool_registry_init(void)
 {
     s_tool_count = 0;
     (void)tool_provider_registry_init();
-    (void)tool_provider_register(mcp_stdio_provider_get());
+    (void)tool_provider_register(mcp_provider_get());
 
     /* Register web_search */
     tool_web_search_init();

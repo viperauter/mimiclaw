@@ -77,6 +77,12 @@ typedef struct mimi_config {
 
     char dns_server[64];
     char log_level[16];
+    bool log_to_file;
+    bool log_to_stderr;
+    char log_dir[128];
+    char log_file[128];
+    int  log_max_file_bytes;
+    int  log_max_files;
 
     bool llm_trace_enabled;
     char llm_trace_dir[256];

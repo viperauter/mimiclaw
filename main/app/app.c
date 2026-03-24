@@ -106,7 +106,11 @@ static void outbound_dispatch_task(void *arg)
     }
 }
 
-mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_level, bool gateway_mode)
+mimi_err_t app_init(const char *config_path,
+                    bool enable_logs,
+                    const char *log_level,
+                    bool gateway_mode,
+                    const char *log_file_path)
 {
     if (s_app_initialized) {
         return MIMI_OK;
@@ -164,6 +168,13 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
         mimi_log_setup(log_level ? log_level : (log_level_cfg && log_level_cfg[0] ? log_level_cfg : "info"));
     }
 
+    bool log_to_file_cfg = mimi_cfg_get_bool(logging, "toFile", false);
+    bool log_to_stderr_cfg = mimi_cfg_get_bool(logging, "toStderr", true);
+    const char *log_dir_cfg = mimi_cfg_get_str(logging, "dir", "logs");
+    const char *log_file_cfg = mimi_cfg_get_str(logging, "file", "mimiclaw.log");
+    int log_max_file_bytes_cfg = mimi_cfg_get_int(logging, "maxFileBytes", 5 * 1024 * 1024);
+    int log_max_files_cfg = mimi_cfg_get_int(logging, "maxFiles", 3);
+
     /* Print OS backend version */
     MIMI_LOGI("app", "OS backend: %s", mimi_os_get_version());
     MIMI_LOGI("app", "Config: model=%s provider=%s", model, provider);
@@ -174,6 +185,40 @@ mimi_err_t app_init(const char *config_path, bool enable_logs, const char *log_l
     if (mimi_workspace_bootstrap(cfg_path, true) != MIMI_OK) {
         MIMI_LOGE("app", "workspace bootstrap failed");
         return MIMI_ERR_FAIL;
+    }
+
+    /* Configure file logging after workspace is ready. */
+    if (enable_logs && (log_to_file_cfg || (log_file_path && log_file_path[0]))) {
+        char resolved_log_path[1024];
+        resolved_log_path[0] = '\0';
+
+        if (log_file_path && log_file_path[0]) {
+            if (mimi_path_is_absolute(log_file_path)) {
+                strncpy(resolved_log_path, log_file_path, sizeof(resolved_log_path) - 1);
+                resolved_log_path[sizeof(resolved_log_path) - 1] = '\0';
+            } else if (mimi_path_join(workspace, log_file_path, resolved_log_path, sizeof(resolved_log_path)) != 0) {
+                MIMI_LOGW("app", "Failed to resolve --log-file path: %s", log_file_path);
+            }
+        } else {
+            char log_dir_path[768];
+            if (mimi_path_join(workspace, log_dir_cfg, log_dir_path, sizeof(log_dir_path)) == 0 &&
+                mimi_path_join(log_dir_path, log_file_cfg, resolved_log_path, sizeof(resolved_log_path)) == 0) {
+                /* resolved */
+            } else {
+                MIMI_LOGW("app", "Failed to resolve logging.dir/logging.file path");
+            }
+        }
+
+        if (resolved_log_path[0] != '\0') {
+            mimi_log_set_rotation(log_max_file_bytes_cfg, log_max_files_cfg);
+            mimi_err_t lerr = mimi_log_set_output_file(resolved_log_path, log_to_stderr_cfg);
+            if (lerr != MIMI_OK) {
+                MIMI_LOGW("app", "Failed to enable file logging (%s): %s",
+                          resolved_log_path, mimi_err_to_name(lerr));
+            } else {
+                MIMI_LOGI("app", "File logging enabled: %s", resolved_log_path);
+            }
+        }
     }
 
     MIMI_LOGD("app", "workspace=%s config=%s",
@@ -375,6 +420,7 @@ void app_destroy(void)
     
     /* Deinitialize tool registry */
     tool_registry_deinit();
+    mimi_log_close_output_file();
 
     s_app_initialized = false;
     MIMI_LOGI("app", "Application destroyed");

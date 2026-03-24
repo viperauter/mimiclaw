@@ -23,6 +23,7 @@ typedef struct {
     uint8_t *body;      /* heap-allocated, NUL-terminated for convenience */
     size_t body_len;
     char *content_type; /* heap-allocated Content-Type (optional) */
+    char *mcp_session_id; /* heap-allocated MCP-Session-Id header (optional) */
 } mimi_http_response_t;
 
 /* HTTP callback for async operations */

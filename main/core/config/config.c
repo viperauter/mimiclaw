@@ -47,7 +47,7 @@ static mimi_err_t write_text_file_vfs(const char *path, const char *data, size_t
 
 /* Bump when the config JSON schema changes.
  * Loader will auto-merge missing keys and write back merged config. */
-#define MIMI_CONFIG_SCHEMA_VERSION 2
+#define MIMI_CONFIG_SCHEMA_VERSION 3
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
 {
@@ -158,10 +158,16 @@ static void apply_defaults(void)
     
     /* Logging */
     safe_strcpy(s_config.log_level, sizeof(s_config.log_level), "info");
+    s_config.log_to_file = false;
+    s_config.log_to_stderr = true;
+    safe_strcpy(s_config.log_dir, sizeof(s_config.log_dir), "logs");
+    safe_strcpy(s_config.log_file, sizeof(s_config.log_file), "mimiclaw.log");
+    s_config.log_max_file_bytes = 5 * 1024 * 1024; /* 5MB */
+    s_config.log_max_files = 3;
 
     /* Tracing (disabled by default) */
     s_config.llm_trace_enabled = false;
-    safe_strcpy(s_config.llm_trace_dir, sizeof(s_config.llm_trace_dir), "traces");
+    safe_strcpy(s_config.llm_trace_dir, sizeof(s_config.llm_trace_dir), "logs/traces");
     s_config.llm_trace_max_file_bytes = 10 * 1024 * 1024; /* 10MB */
     s_config.llm_trace_max_field_bytes = 16 * 1024;       /* 16KB per field */
 
@@ -360,6 +366,12 @@ static cJSON *config_build_json_full_from_config(const mimi_config_t *cfg, int s
     cJSON *logging = cJSON_CreateObject();
     if (logging) {
         cJSON_AddStringToObject(logging, "level", cfg->log_level);
+        cJSON_AddBoolToObject(logging, "toFile", cfg->log_to_file);
+        cJSON_AddBoolToObject(logging, "toStderr", cfg->log_to_stderr);
+        cJSON_AddStringToObject(logging, "dir", cfg->log_dir);
+        cJSON_AddStringToObject(logging, "file", cfg->log_file);
+        cJSON_AddNumberToObject(logging, "maxFileBytes", cfg->log_max_file_bytes);
+        cJSON_AddNumberToObject(logging, "maxFiles", cfg->log_max_files);
         cJSON_AddItemToObject(root, "logging", logging);
     }
 
@@ -736,8 +748,27 @@ mimi_err_t mimi_config_load(const char *path)
     
     /* logging */
     cJSON *logging = cJSON_GetObjectItem(root, "logging");
-    if (cJSON_IsObject(logging))
+    if (cJSON_IsObject(logging)) {
         json_str_to_buf(cJSON_GetObjectItem(logging, "level"), s_config.log_level, sizeof(s_config.log_level), true);
+        cJSON *to_file = cJSON_GetObjectItem(logging, "toFile");
+        if (to_file && (cJSON_IsBool(to_file) || cJSON_IsNumber(to_file))) {
+            s_config.log_to_file = cJSON_IsTrue(to_file) || (cJSON_IsNumber(to_file) && to_file->valueint != 0);
+        }
+        cJSON *to_stderr = cJSON_GetObjectItem(logging, "toStderr");
+        if (to_stderr && (cJSON_IsBool(to_stderr) || cJSON_IsNumber(to_stderr))) {
+            s_config.log_to_stderr = cJSON_IsTrue(to_stderr) || (cJSON_IsNumber(to_stderr) && to_stderr->valueint != 0);
+        }
+        json_str_to_buf(cJSON_GetObjectItem(logging, "dir"), s_config.log_dir, sizeof(s_config.log_dir), true);
+        json_str_to_buf(cJSON_GetObjectItem(logging, "file"), s_config.log_file, sizeof(s_config.log_file), true);
+        cJSON *lmfb = cJSON_GetObjectItem(logging, "maxFileBytes");
+        if (lmfb && cJSON_IsNumber(lmfb) && lmfb->valuedouble >= 0) {
+            s_config.log_max_file_bytes = (int)lmfb->valuedouble;
+        }
+        cJSON *lmf = cJSON_GetObjectItem(logging, "maxFiles");
+        if (lmf && cJSON_IsNumber(lmf) && lmf->valuedouble >= 0) {
+            s_config.log_max_files = (int)lmf->valuedouble;
+        }
+    }
 
     /* tracing */
     cJSON *tracing = cJSON_GetObjectItem(root, "tracing");

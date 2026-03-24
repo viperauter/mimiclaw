@@ -24,17 +24,19 @@
 
 static void print_usage(const char *prog)
 {
-    printf("Usage: %s [OPTIONS] [config_file]\n", prog);
+    printf("Usage: %s [OPTIONS]\n", prog);
     printf("Options:\n");
     printf("  -c, --config <path>    Specify config file path\n");
     printf("  -l, --logs [level]     Enable logging (level: error, warn, info, debug)\n");
+    printf("  -f, --log-file <path>  Write logs to file (relative path uses workspace)\n");
     printf("  -g, --gateway          Gateway mode (no STDIO, daemon-like)\n");
     printf("  -h, --help             Show this help message\n");
     printf("\nExamples:\n");
     printf("  %s                      Use default config at ~/.mimiclaw/config.json\n", prog);
-    printf("  %s ./myconfig.json      Use specified config file\n", prog);
+    printf("  %s -c ./myconfig.json   Use specified config file\n", prog);
     printf("  %s -l debug             Enable debug level logging\n", prog);
     printf("  %s --logs=debug         Enable debug level logging (alternative)\n", prog);
+    printf("  %s -f logs/app.log      Write logs to workspace/logs/app.log\n", prog);
     printf("  %s -g                   Run in gateway mode (no STDIO)\n", prog);
 }
 
@@ -45,6 +47,7 @@ typedef struct {
     bool gateway_mode;
     const char *config_path;
     const char *log_level;
+    const char *log_file_path;
 } main_args_t;
 
 /* Application main function - runs in task context for FreeRTOS */
@@ -62,7 +65,7 @@ static void app_main_task(void *arg)
         return;
     }
 
-    err = app_init(args->config_path, args->enable_logs, args->log_level, args->gateway_mode);
+    err = app_init(args->config_path, args->enable_logs, args->log_level, args->gateway_mode, args->log_file_path);
     if (err != MIMI_OK) {
         MIMI_LOGE("main", "app_init failed: %s", mimi_err_to_name(err));
         return;
@@ -96,12 +99,14 @@ int main(int argc, char **argv)
         .enable_logs = false,
         .gateway_mode = false,
         .config_path = NULL,
-        .log_level = NULL
+        .log_level = NULL,
+        .log_file_path = NULL
     };
 
     static struct option long_options[] = {
         {"logs", optional_argument, 0, 'l'},
         {"config", required_argument, 0, 'c'},
+        {"log-file", required_argument, 0, 'f'},
         {"gateway", no_argument, 0, 'g'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
@@ -113,7 +118,7 @@ int main(int argc, char **argv)
     optind = 1;
     opterr = 0;
 
-    while ((opt = getopt_long(argc, argv, "c:l:gh", long_options, &optidx)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:l:f:gh", long_options, &optidx)) != -1) {
         switch (opt) {
             case 'c':
                 args.config_path = optarg;
@@ -121,6 +126,10 @@ int main(int argc, char **argv)
             case 'l':
                 args.enable_logs = true;
                 args.log_level = optarg;
+                break;
+            case 'f':
+                args.enable_logs = true;
+                args.log_file_path = optarg;
                 break;
             case 'g':
                 args.gateway_mode = true;
@@ -131,21 +140,6 @@ int main(int argc, char **argv)
             default:
                 print_usage(argv[0]);
                 return 1;
-        }
-    }
-
-    /* Handle remaining non-option arguments as config file */
-    if (optind < argc && args.config_path == NULL) {
-        while (optind < argc) {
-            if (argv[optind][0] != '-' &&
-                strcmp(argv[optind], "debug") != 0 &&
-                strcmp(argv[optind], "info") != 0 &&
-                strcmp(argv[optind], "warn") != 0 &&
-                strcmp(argv[optind], "error") != 0) {
-                args.config_path = argv[optind];
-                break;
-            }
-            optind++;
         }
     }
 

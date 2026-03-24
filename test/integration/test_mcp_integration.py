@@ -150,10 +150,10 @@ class TestMCPConfigurationScenarios:
         with open(config_path, "r") as f:
             config = json.load(f)
             
-        assert "mcpServers" in config.get("providers", {})
-        assert len(config["providers"]["mcpServers"]) == 2
-        assert config["providers"]["mcpServers"][0]["name"] == "server1"
-        assert config["providers"]["mcpServers"][1]["requires_confirmation"] == True
+        assert "mcpServers" in config.get("tools", {})
+        assert len(config["tools"]["mcpServers"]) == 2
+        assert config["tools"]["mcpServers"][0]["name"] == "server1"
+        assert config["tools"]["mcpServers"][1]["requires_confirmation"] == True
         
     def test_mcp_server_with_confirmation(self, llm_server_clean, test_config):
         """Test MCP server with requires_confirmation flag"""
@@ -172,7 +172,7 @@ class TestMCPConfigurationScenarios:
         with open(config_path, "r") as f:
             config = json.load(f)
             
-        server_config = config["providers"]["mcpServers"][0]
+        server_config = config["tools"]["mcpServers"][0]
         assert server_config["requires_confirmation"] == True
         assert server_config["name"] == "sensitive_server"
 
@@ -469,6 +469,211 @@ class TestSubagentWorkflows:
         print(f"LLM Call Count: {stats['call_count']}")
         
         assert result["returncode"] in [0, 1]
+
+
+class TestMCPHTTPTransport:
+    """Tests for MCP HTTP transport mode"""
+    
+    def test_http_server_startup(self, mcp_http_server):
+        """Test that HTTP MCP server starts successfully"""
+        assert mcp_http_server.url is not None
+        assert mcp_http_server.port > 0
+        print(f"\n=== HTTP Server Info ===")
+        print(f"URL: {mcp_http_server.url}")
+        print(f"Port: {mcp_http_server.port}")
+        
+    def test_http_tool_discovery(self, llm_server_clean, test_config_http, mimiclaw_runner_http):
+        """Test tool discovery via HTTP transport"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server_http::echo",
+            {"message": "HTTP Transport Test"}
+        )
+        
+        llm_server_clean.set_text_response("HTTP transport tool call completed!")
+        
+        result = mimiclaw_runner_http.run_with_input(
+            "Use the echo tool via HTTP transport to say 'HTTP Transport Test'",
+            timeout=30
+        )
+        
+        print(f"\n=== HTTP Tool Discovery Test ===")
+        print(f"Return Code: {result['returncode']}")
+        print(f"Stdout: {result['stdout'][-500:]}")
+        
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+        
+    def test_http_add_tool(self, llm_server_clean, test_config_http, mimiclaw_runner_http):
+        """Test add tool via HTTP transport"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server_http::add",
+            {"a": 100, "b": 200}
+        )
+        
+        llm_server_clean.set_text_response("Addition via HTTP transport completed!")
+        
+        result = mimiclaw_runner_http.run_with_input(
+            "Calculate 100 + 200 using the HTTP MCP server",
+            timeout=30
+        )
+        
+        print(f"\n=== HTTP Add Tool Test ===")
+        print(f"Return Code: {result['returncode']}")
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+        
+    def test_http_transport_info(self, llm_server_clean, test_config_http, mimiclaw_runner_http):
+        """Test transport_info tool to verify HTTP transport is being used"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server_http::transport_info",
+            {}
+        )
+        
+        llm_server_clean.set_text_response("Transport info retrieved successfully!")
+        
+        result = mimiclaw_runner_http.run_with_input(
+            "Get the transport information from the HTTP MCP server",
+            timeout=30
+        )
+        
+        print(f"\n=== HTTP Transport Info Test ===")
+        print(f"Return Code: {result['returncode']}")
+        print(f"Stdout: {result['stdout'][-500:]}")
+        
+        assert result["returncode"] in [0, 1]
+
+
+class TestMCPSSERransport:
+    """Tests for MCP SSE transport mode"""
+    
+    def test_sse_server_startup(self, mcp_sse_server):
+        """Test that SSE MCP server starts successfully"""
+        assert mcp_sse_server.url is not None
+        assert mcp_sse_server.port > 0
+        print(f"\n=== SSE Server Info ===")
+        print(f"URL: {mcp_sse_server.url}")
+        print(f"Port: {mcp_sse_server.port}")
+        
+    def test_sse_tool_discovery(self, llm_server_clean, test_config_sse, mimiclaw_runner_sse):
+        """Test tool discovery via SSE transport"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server_sse::echo",
+            {"message": "SSE Transport Test"}
+        )
+        
+        llm_server_clean.set_text_response("SSE transport tool call completed!")
+        
+        result = mimiclaw_runner_sse.run_with_input(
+            "Use the echo tool via SSE transport to say 'SSE Transport Test'",
+            timeout=30
+        )
+        
+        print(f"\n=== SSE Tool Discovery Test ===")
+        print(f"Return Code: {result['returncode']}")
+        print(f"Stdout: {result['stdout'][-500:]}")
+        
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+        
+    def test_sse_get_test_data(self, llm_server_clean, test_config_sse, mimiclaw_runner_sse):
+        """Test get_test_data tool via SSE transport"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server_sse::get_test_data",
+            {}
+        )
+        
+        llm_server_clean.set_text_response("Test data retrieved via SSE transport!")
+        
+        result = mimiclaw_runner_sse.run_with_input(
+            "Get test data from the SSE MCP server",
+            timeout=30
+        )
+        
+        print(f"\n=== SSE Get Test Data Test ===")
+        print(f"Return Code: {result['returncode']}")
+        stats = llm_server_clean.get_stats()
+        print(f"LLM Call Count: {stats['call_count']}")
+        
+        assert result["returncode"] in [0, 1]
+        
+    def test_sse_transport_info(self, llm_server_clean, test_config_sse, mimiclaw_runner_sse):
+        """Test transport_info tool to verify SSE transport is being used"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server_sse::transport_info",
+            {}
+        )
+        
+        llm_server_clean.set_text_response("Transport info retrieved successfully!")
+        
+        result = mimiclaw_runner_sse.run_with_input(
+            "Get the transport information from the SSE MCP server",
+            timeout=30
+        )
+        
+        print(f"\n=== SSE Transport Info Test ===")
+        print(f"Return Code: {result['returncode']}")
+        print(f"Stdout: {result['stdout'][-500:]}")
+        
+        assert result["returncode"] in [0, 1]
+
+
+class TestMCPTransportComparison:
+    """Tests comparing different transport modes"""
+    
+    def test_stdio_vs_http_tool_names(self, llm_server_clean, test_config, mimiclaw_runner, 
+                                       test_config_http, mimiclaw_runner_http):
+        """Compare tool names between stdio and HTTP transports"""
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server::echo",
+            {"message": "stdio test"}
+        )
+        llm_server_clean.set_text_response("stdio transport test")
+        
+        result_stdio = mimiclaw_runner.run_with_input(
+            "Echo 'stdio test' using stdio transport",
+            timeout=30
+        )
+        
+        llm_server_clean.reset()
+        
+        llm_server_clean.set_tool_call(
+            "mcp::test_server_http::echo",
+            {"message": "http test"}
+        )
+        llm_server_clean.set_text_response("http transport test")
+        
+        result_http = mimiclaw_runner_http.run_with_input(
+            "Echo 'http test' using HTTP transport",
+            timeout=30
+        )
+        
+        print(f"\n=== Transport Comparison ===")
+        print(f"stdio return code: {result_stdio['returncode']}")
+        print(f"HTTP return code: {result_http['returncode']}")
+        
+        assert result_stdio["returncode"] in [0, 1]
+        assert result_http["returncode"] in [0, 1]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

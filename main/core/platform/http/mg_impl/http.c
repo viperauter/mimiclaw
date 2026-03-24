@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <ctype.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -71,11 +72,18 @@ static void http_send_request(struct mg_connection *c, http_ctx_t *ctx)
     struct mg_str host = mg_url_host(ctx->req->url);
     const char *uri = mg_url_uri(ctx->req->url);
     if (!uri) uri = "/";
+    int port = mg_url_port(ctx->req->url);
+    bool is_ssl = mg_url_is_ssl(ctx->req->url);
+    if (port == 0) port = is_ssl ? 443 : 80;
 
     snprintf(ctx->host_name, sizeof(ctx->host_name), "%.*s",
              (int) host.len, host.buf ? host.buf : "");
+    char host_header[192];
+    bool default_port = (is_ssl && port == 443) || (!is_ssl && port == 80);
+    if (default_port) snprintf(host_header, sizeof(host_header), "%s", ctx->host_name);
+    else snprintf(host_header, sizeof(host_header), "%s:%d", ctx->host_name, port);
 
-    if (mg_url_is_ssl(ctx->req->url)) {
+    if (is_ssl) {
         struct mg_tls_opts opts;
         memset(&opts, 0, sizeof(opts));
         opts.name = mg_str(ctx->host_name);
@@ -95,7 +103,7 @@ static void http_send_request(struct mg_connection *c, http_ctx_t *ctx)
               "\r\n",
               ctx->req->method ? ctx->req->method : "GET",
               uri,
-              ctx->host_name,
+              host_header,
               extra,
               (extra[0] && (extra[strlen(extra) - 1] != '\n')) ? "\r\n" : "",
               (unsigned long)body_len);
@@ -189,11 +197,18 @@ static void http_send_request_async(struct mg_connection *c, http_async_req_t *c
     struct mg_str host = mg_url_host(ctx->req.url);
     const char *uri = mg_url_uri(ctx->req.url);
     if (!uri) uri = "/";
+    int port = mg_url_port(ctx->req.url);
+    bool is_ssl = mg_url_is_ssl(ctx->req.url);
+    if (port == 0) port = is_ssl ? 443 : 80;
 
     snprintf(ctx->host_name, sizeof(ctx->host_name), "%.*s",
              (int) host.len, host.buf ? host.buf : "");
+    char host_header[192];
+    bool default_port = (is_ssl && port == 443) || (!is_ssl && port == 80);
+    if (default_port) snprintf(host_header, sizeof(host_header), "%s", ctx->host_name);
+    else snprintf(host_header, sizeof(host_header), "%s:%d", ctx->host_name, port);
 
-    if (mg_url_is_ssl(ctx->req.url)) {
+    if (is_ssl) {
         struct mg_tls_opts opts;
         memset(&opts, 0, sizeof(opts));
         opts.name = mg_str(ctx->host_name);
@@ -213,7 +228,7 @@ static void http_send_request_async(struct mg_connection *c, http_async_req_t *c
               "\r\n",
               ctx->req.method ? ctx->req.method : "GET",
               uri,
-              ctx->host_name,
+              host_header,
               extra,
               (extra[0] && (extra[strlen(extra) - 1] != '\n')) ? "\r\n" : "",
               (unsigned long)body_len);
@@ -248,6 +263,121 @@ static void http_set_content_type(mimi_http_response_t *resp, const struct mg_ht
     resp->content_type = s;
 }
 
+static void http_set_mcp_session_id(mimi_http_response_t *resp, const struct mg_http_message *hm)
+{
+    if (!resp || !hm) return;
+    if (resp->mcp_session_id) return;
+
+    struct mg_str *sid = mg_http_get_header((struct mg_http_message *)hm, "MCP-Session-Id");
+    if (!sid || !sid->buf || sid->len <= 0) {
+        sid = mg_http_get_header((struct mg_http_message *)hm, "Mcp-Session-Id");
+    }
+    if (!sid || !sid->buf || sid->len <= 0) return;
+
+    char *s = (char *)malloc((size_t)sid->len + 1);
+    if (!s) return;
+    memcpy(s, sid->buf, (size_t)sid->len);
+    s[sid->len] = '\0';
+    resp->mcp_session_id = s;
+}
+
+static bool header_name_equals(const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool try_capture_sse_from_raw(struct mg_connection *c, mimi_http_response_t *resp)
+{
+    if (!c || !resp || !c->recv.buf || c->recv.len == 0 || resp->body) return false;
+    const char *raw = (const char *)c->recv.buf;
+    size_t raw_len = c->recv.len;
+
+    size_t hdr_end = 0;
+    for (size_t i = 0; i + 3 < raw_len; i++) {
+        if (raw[i] == '\r' && raw[i + 1] == '\n' && raw[i + 2] == '\r' && raw[i + 3] == '\n') {
+            hdr_end = i + 4;
+            break;
+        }
+    }
+    if (hdr_end == 0) return false;
+    size_t body_len = raw_len - hdr_end;
+    if (body_len == 0) return false;
+
+    char *headers = (char *)malloc(hdr_end + 1);
+    if (!headers) return false;
+    memcpy(headers, raw, hdr_end);
+    headers[hdr_end] = '\0';
+
+    int status = 0;
+    if (sscanf(headers, "HTTP/%*s %d", &status) != 1) {
+        free(headers);
+        return false;
+    }
+
+    bool is_sse = false;
+    const char *session_id = NULL;
+    size_t session_id_len = 0;
+    char *line = headers;
+    while (line && *line) {
+        char *next = strstr(line, "\r\n");
+        if (!next) break;
+        *next = '\0';
+        char *colon = strchr(line, ':');
+        if (colon) {
+            *colon = '\0';
+            char *name = line;
+            char *value = colon + 1;
+            while (*value == ' ' || *value == '\t') value++;
+            if (header_name_equals(name, "Content-Type")) {
+                if (strstr(value, "text/event-stream")) is_sse = true;
+            } else if (header_name_equals(name, "MCP-Session-Id")) {
+                session_id = value;
+                session_id_len = strlen(value);
+            }
+        }
+        line = next + 2;
+    }
+
+    if (!is_sse) {
+        free(headers);
+        return false;
+    }
+
+    const char *body = raw + hdr_end;
+    bool has_complete_event = (strstr(body, "\n\n") != NULL) || (strstr(body, "\r\n\r\n") != NULL);
+    if (!has_complete_event) {
+        free(headers);
+        return false;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(body_len + 1);
+    if (!buf) {
+        free(headers);
+        return false;
+    }
+    memcpy(buf, body, body_len);
+    buf[body_len] = '\0';
+    resp->status = status;
+    resp->body = buf;
+    resp->body_len = body_len;
+    if (!resp->content_type) resp->content_type = strdup("text/event-stream");
+    if (!resp->mcp_session_id && session_id && session_id_len > 0) {
+        resp->mcp_session_id = (char *)malloc(session_id_len + 1);
+        if (resp->mcp_session_id) {
+            memcpy(resp->mcp_session_id, session_id, session_id_len);
+            resp->mcp_session_id[session_id_len] = '\0';
+        }
+    }
+    free(headers);
+    return true;
+}
+
 static void http_ev_direct_async(struct mg_connection *c, int ev, void *ev_data)
 {
     http_async_req_t *ctx = (http_async_req_t *)c->fn_data;
@@ -270,6 +400,7 @@ static void http_ev_direct_async(struct mg_connection *c, int ev, void *ev_data)
         int st = mg_http_status(hm);
         if (ctx->resp) ctx->resp->status = st;
         http_set_content_type(ctx->resp, hm);
+        http_set_mcp_session_id(ctx->resp, hm);
 
         size_t n = hm->body.len;
         uint8_t *buf = (uint8_t *)malloc(n + 1);
@@ -394,6 +525,7 @@ static void http_ev_proxy_async(struct mg_connection *c, int ev, void *ev_data)
         int st = mg_http_status(hm);
         if (ctx->resp) ctx->resp->status = st;
         http_set_content_type(ctx->resp, hm);
+        http_set_mcp_session_id(ctx->resp, hm);
 
         size_t n = hm->body.len;
         uint8_t *b = (uint8_t *)malloc(n + 1);
@@ -452,6 +584,7 @@ static void http_ev_direct(struct mg_connection *c, int ev, void *ev_data)
         int st = mg_http_status(hm);
         ctx->resp->status = st;
         http_set_content_type(ctx->resp, hm);
+        http_set_mcp_session_id(ctx->resp, hm);
 
         size_t n = hm->body.len;
         uint8_t *buf = (uint8_t *)malloc(n + 1);
@@ -469,6 +602,11 @@ static void http_ev_direct(struct mg_connection *c, int ev, void *ev_data)
         const char *err = (const char *) ev_data;
         MIMI_LOGE("http_posix", "Mongoose HTTP error: %s", err ? err : "(unknown)");
         http_signal_done(ctx, MIMI_ERR_IO);
+    } else if (ev == MG_EV_READ) {
+        if (try_capture_sse_from_raw(c, ctx->resp)) {
+            http_signal_done(ctx, MIMI_OK);
+            c->is_closing = 1;
+        }
     } else if (ev == MG_EV_CLOSE) {
         if (ctx->mutex && ctx->cond) {
             mimi_mutex_lock(ctx->mutex);
@@ -575,6 +713,7 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
         int st = mg_http_status(hm);
         ctx->resp->status = st;
         http_set_content_type(ctx->resp, hm);
+        http_set_mcp_session_id(ctx->resp, hm);
 
         size_t n = hm->body.len;
         uint8_t *buf = (uint8_t *)malloc(n + 1);
@@ -592,6 +731,11 @@ static void http_ev_proxy(struct mg_connection *c, int ev, void *ev_data)
         const char *err = (const char *) ev_data;
         MIMI_LOGE("http_posix", "Mongoose HTTP error (proxy): %s", err ? err : "(unknown)");
         http_signal_done(ctx, MIMI_ERR_IO);
+    } else if (ev == MG_EV_READ) {
+        if (ctx->phase == HTTP_PHASE_HTTP_ACTIVE && try_capture_sse_from_raw(c, ctx->resp)) {
+            http_signal_done(ctx, MIMI_OK);
+            c->is_closing = 1;
+        }
     } else if (ev == MG_EV_CLOSE) {
         if (ctx->mutex && ctx->cond) {
             mimi_mutex_lock(ctx->mutex);
@@ -916,4 +1060,6 @@ void mimi_http_response_free(mimi_http_response_t *resp)
     resp->status = 0;
     free(resp->content_type);
     resp->content_type = NULL;
+    free(resp->mcp_session_id);
+    resp->mcp_session_id = NULL;
 }

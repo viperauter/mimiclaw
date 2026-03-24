@@ -102,7 +102,7 @@ def generate_test_config(output_dir, llm_port=9999):
                 "tools": ["*"]
             }
         },
-        "providers": {
+        "tools": {
             "mcpServers": [
                 {
                     "name": "test_server",

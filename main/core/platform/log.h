@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdarg.h>
+#include "mimi_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,15 @@ void mimi_log_set_level(mimi_log_level_t level);
 
 /* Setup log level from string */
 void mimi_log_setup(const char *level_str);
+
+/* Route logs to a file. If also_stderr is true, keep stderr output too. */
+mimi_err_t mimi_log_set_output_file(const char *path, bool also_stderr);
+
+/* Configure file rotation. max_file_bytes<=0 disables rotate checks. */
+void mimi_log_set_rotation(int max_file_bytes, int max_files);
+
+/* Close file logger and reset to stderr-only output. */
+void mimi_log_close_output_file(void);
 
 /* Check if logging is enabled */
 bool mimi_log_is_enabled(void);

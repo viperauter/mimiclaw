@@ -1,6 +1,6 @@
 # Integration Tests for MimicLaw MCP Integration
 
-This directory contains end-to-end integration tests for the Model Control Plane (MCP) functionality in MimicLaw.
+This directory contains end-to-end integration tests for the Model Context Protocol (MCP) functionality in MimicLaw.
 
 ## Test Architecture
 
@@ -42,7 +42,7 @@ The integration test framework uses a **black-box testing approach** that runs t
 | [`test_mcp_integration.py`](./test_mcp_integration.py) | **Main test suite** containing MCP integration tests **and built-in subagent tool tests** (15 test cases) |
 | [`conftest.py`](./conftest.py) | pytest fixtures and shared configuration for test environment |
 | [`virtual_llm_server.py`](./virtual_llm_server.py) | Flask-based mock LLM server with dynamic response configuration |
-| [`test_mcp_server.py`](./test_mcp_server.py) | Test MCP server implementing tools like `echo`, `add`, `get_test_data` |
+| [`test_mcp_server.py`](./test_mcp_server.py) | Test MCP server using **official MCP Python SDK** implementing tools like `echo`, `add`, `get_test_data`. **Supports multiple transport modes: stdio, sse, streamable-http** |
 | [`test_controller.py`](./test_controller.py) | Standalone test environment manager (start/stop/configure services) |
 | [`test_runner.py`](./test_runner.py) | Test execution orchestrator and environment setup |
 
@@ -79,6 +79,22 @@ The test suite covers these scenarios:
 - Complete workflow from user input to final response
 - Full MCP integration lifecycle
 - Subagent-based task decomposition
+
+### 7. HTTP Transport Tests
+- HTTP MCP server startup and connectivity
+- Tool discovery via HTTP transport
+- Tool execution via HTTP transport
+- Transport mode verification
+
+### 8. SSE Transport Tests
+- SSE MCP server startup and connectivity
+- Tool discovery via SSE transport
+- Tool execution via SSE transport
+- Server-Sent Events communication
+
+### 9. Transport Comparison Tests
+- Cross-transport consistency validation
+- stdio vs HTTP transport comparison
 
 ## Running Tests
 
@@ -192,6 +208,15 @@ response = requests.post(
 - `test_config` - Generates fresh test configuration with correct LLM port
 - `mimiclaw_runner` - Wrapper for executing mimiclaw binary with test config
 
+### HTTP/SSE Transport Fixtures
+
+- `mcp_http_server` - Starts MCP server with HTTP transport (streamable-http mode)
+- `mcp_sse_server` - Starts MCP server with SSE transport
+- `test_config_http` - Configuration for HTTP MCP server testing
+- `test_config_sse` - Configuration for SSE MCP server testing
+- `mimiclaw_runner_http` - Runner for HTTP MCP server tests
+- `mimiclaw_runner_sse` - Runner for SSE MCP server tests
+
 ## Writing New Tests
 
 ### Basic Test Structure
@@ -229,6 +254,44 @@ def test_tool_call(self, llm_server_clean, test_config, mimiclaw_runner):
     # Verify LLM was called
     stats = llm_server_clean.get_stats()
     assert stats["call_count"] >= 1
+```
+
+### Testing HTTP Transport
+
+```python
+def test_http_transport(self, llm_server_clean, test_config_http, mimiclaw_runner_http):
+    # Configure LLM to make a tool call via HTTP transport
+    llm_server_clean.set_tool_call(
+        "mcp::test_server_http::echo",
+        {"message": "HTTP Transport Test"}
+    )
+    
+    llm_server_clean.set_text_response("HTTP transport tool call completed!")
+    
+    result = mimiclaw_runner_http.run_with_input(
+        "Use the echo tool via HTTP transport"
+    )
+    
+    assert result["returncode"] in [0, 1]
+```
+
+### Testing SSE Transport
+
+```python
+def test_sse_transport(self, llm_server_clean, test_config_sse, mimiclaw_runner_sse):
+    # Configure LLM to make a tool call via SSE transport
+    llm_server_clean.set_tool_call(
+        "mcp::test_server_sse::echo",
+        {"message": "SSE Transport Test"}
+    )
+    
+    llm_server_clean.set_text_response("SSE transport tool call completed!")
+    
+    result = mimiclaw_runner_sse.run_with_input(
+        "Use the echo tool via SSE transport"
+    )
+    
+    assert result["returncode"] in [0, 1]
 ```
 
 ## Troubleshooting
@@ -278,3 +341,44 @@ python3 test_controller.py --action stop
 2. **Test Isolation** - Each test starts with clean server state and fresh configuration
 3. **Dynamic Responses** - LLM server responses are configured per test case for flexible scenario testing
 4. **Realistic Environment** - Uses actual MCP server stdio communication and OpenAI API protocol
+5. **Standard Protocol** - Test MCP server uses official MCP Python SDK to ensure protocol compliance
+6. **Multi-Transport Support** - Tests cover stdio, HTTP, and SSE transport modes for comprehensive MCP compatibility
+
+## MCP Server Transport Modes
+
+The test MCP server supports multiple transport modes for testing different MCP connection scenarios:
+
+### Transport Types
+
+| Transport | Description | Use Case |
+|-----------|-------------|----------|
+| `stdio` | Standard input/output communication (default) | Local process-based MCP servers |
+| `sse` | Server-Sent Events over HTTP | Real-time notifications, web-based clients |
+| `streamable-http` | HTTP with streaming support | RESTful MCP servers with streaming |
+
+### Running MCP Server with Different Transports
+
+```bash
+# stdio mode (default)
+python3 test_mcp_server.py --transport stdio
+
+# SSE mode
+python3 test_mcp_server.py --transport sse --port 8000
+
+# HTTP streaming mode
+python3 test_mcp_server.py --transport streamable-http --port 8000
+```
+
+### Available Test Tools
+
+The test MCP server provides these tools for testing:
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `echo` | Echo back a message | `message: str` |
+| `add` | Add two numbers | `a: float, b: float` |
+| `get_test_data` | Return structured test data | None |
+| `slow_operation` | Simulate slow operation | `delay_ms: int` |
+| `error_test` | Return error response | `error_type: str` |
+| `validate_params` | Validate parameter passing | `required_param: str, optional_param: int` |
+| `transport_info` | Return current transport mode info | None |

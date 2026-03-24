@@ -72,7 +72,9 @@ class TestController:
                     "apiKey": "test_key_12345",
                     "apiBase": f"http://localhost:{self.llm_port}/v1",
                     "model": "virtual-llm"
-                },
+                }
+            },
+            "tools": {
                 "mcpServers": [
                     {
                         "name": "test_server",

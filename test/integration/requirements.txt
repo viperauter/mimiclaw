@@ -2,3 +2,5 @@ flask>=2.0.0
 requests>=2.25.0
 pytest>=7.0.0
 pytest-timeout>=2.1.0
+psutil
+mcp[cli]>=1.0.0
