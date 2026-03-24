@@ -226,6 +226,7 @@ static mimi_err_t mcp_init(void)
             dst->use_http = true;
         }
         strncpy(dst->command, mimi_cfg_get_str(node, "command", ""), sizeof(dst->command) - 1);
+        strncpy(dst->args, mimi_cfg_get_str(node, "args", ""), sizeof(dst->args) - 1);
         strncpy(dst->url, url, sizeof(dst->url) - 1);
         dst->requires_confirmation = mimi_cfg_get_bool(node, "requires_confirmation", true);
         dst->pid = 0;

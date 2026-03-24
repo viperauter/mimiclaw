@@ -131,11 +131,24 @@ mimi_err_t mcp_stdio_start(mcp_server_t *s)
         dup2(out_pipe[1], STDOUT_FILENO);
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
-        char storage[512];
-        char *argv[32];
-        int argc = split_cmd(s->command, argv, 32, storage, sizeof(storage));
-        if (argc <= 0) _exit(127);
-        execvp(argv[0], argv);
+        char cmd_storage[512];
+        char args_storage[512];
+        char *cmd_argv[32];
+        char *args_argv[32];
+
+        int cmd_argc = split_cmd(s->command, cmd_argv, 32, cmd_storage, sizeof(cmd_storage));
+        if (cmd_argc <= 0) _exit(127);
+
+        int argc = cmd_argc;
+        if (s->args[0]) {
+            int extra_argc = split_cmd(s->args, args_argv, 32, args_storage, sizeof(args_storage));
+            for (int i = 0; i < extra_argc && argc < 31; i++) {
+                cmd_argv[argc++] = args_argv[i];
+            }
+        }
+        cmd_argv[argc] = NULL;
+
+        execvp(cmd_argv[0], cmd_argv);
         _exit(127);
     }
 

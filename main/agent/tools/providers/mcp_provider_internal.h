@@ -10,6 +10,7 @@ typedef struct {
     bool use_http;
     char name[64];
     char command[256];
+    char args[512];  /* additional arguments, space-separated */
     char url[512];
     bool requires_confirmation;
 
