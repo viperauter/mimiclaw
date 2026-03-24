@@ -229,8 +229,8 @@ class MimiclawProcess:
         """Run mimiclaw with user input and capture output"""
         mimiclaw_bin = self._find_mimiclaw_binary()
         
-        # Command: mimiclaw [config_file] - input is provided via stdin
-        cmd = [mimiclaw_bin, self.config_path]
+        # Command: mimiclaw -c [config_file] - input is provided via stdin
+        cmd = [mimiclaw_bin, "-c", self.config_path]
         
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
