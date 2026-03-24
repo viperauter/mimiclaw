@@ -68,6 +68,25 @@ mimi_err_t router_handle_feishu(const char *session_id,
 mimi_err_t router_handle_qq(const char *session_id,
                             const char *content);
 
+/**
+ * Handle WeChat input
+ */
+mimi_err_t router_handle_wechat(const char *session_id,
+                                const char *content);
+
+/**
+ * Generic channel input handler - dynamically routed by channel_name
+ * Eliminates need for per-channel handler boilerplate
+ * 
+ * @param channel_name Name of the source channel (e.g., "telegram", "wechat")
+ * @param session_id Unique session/chat identifier
+ * @param content Message content
+ * @return MIMI_OK on success, error code otherwise
+ */
+mimi_err_t router_handle_generic(const char *channel_name,
+                                 const char *session_id,
+                                 const char *content);
+
 #ifdef __cplusplus
 }
 #endif

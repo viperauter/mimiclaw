@@ -87,8 +87,8 @@ static void handle_update_object(cJSON *upd)
 
     MIMI_LOGI(TAG, "Incoming message from chat %s: %.40s...", chat_id, text->valuestring);
 
-    /* Route through Input Processor */
-    router_handle_telegram(chat_id, text->valuestring);
+    /* Route through Input Processor - generic handler eliminates per-channel boilerplate */
+    router_handle_generic("telegram", chat_id, text->valuestring);
 }
 
 /**

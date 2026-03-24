@@ -230,106 +230,40 @@ mimi_err_t router_handle(gateway_t *gw,
     }
 }
 
-mimi_err_t router_handle_telegram(const char *session_id,
-                                  const char *content)
+mimi_err_t router_handle_telegram(const char *session_id, const char *content)
 {
-    if (!session_id || !content) {
-        return MIMI_ERR_INVALID_ARG;
-    }
-
-    if (!g_router.initialized) {
-        return MIMI_ERR_INVALID_STATE;
-    }
-
-    const char *channel_name = "telegram";
-
-    MIMI_LOGD(TAG, "Telegram input from %s: %.40s...", session_id, content);
-
-    /* Determine if command or chat message */
-    if (router_is_command(content)) {
-        MIMI_LOGI(TAG, "Routing Telegram command: %.40s...", content);
-
-        /* Execute command without gateway output (Telegram has its own send) */
-        char output[ROUTER_OUTPUT_MAX_LEN];
-        command_context_t ctx = {
-            .channel = channel_name,
-            .session_id = session_id,
-            .user_id = session_id,
-            .user_data = NULL
-        };
-        int ret = command_execute(content, &ctx, output, sizeof(output));
-
-        if (ret == 0) {
-            /* Send response via Telegram Channel */
-            mimi_msg_t msg = {0};
-            strncpy(msg.channel, channel_name, sizeof(msg.channel) - 1);
-            strncpy(msg.chat_id, session_id, sizeof(msg.chat_id) - 1);
-            msg.type = MIMI_MSG_TYPE_TEXT;
-            msg.content = strdup(output);
-            if (msg.content) {
-                channel_send(&msg);
-                free(msg.content);
-            }
-        }
-        return MIMI_OK;
-    } else {
-        MIMI_LOGI(TAG, "Routing Telegram chat message to Agent");
-        return router_send_to_agent(channel_name, session_id, content);
-    }
+    return router_handle_generic("telegram", session_id, content);
 }
 
-mimi_err_t router_handle_feishu(const char *session_id,
-                                const char *content)
+mimi_err_t router_handle_feishu(const char *session_id, const char *content)
 {
-    if (!session_id || !content) {
-        return MIMI_ERR_INVALID_ARG;
-    }
-
-    if (!g_router.initialized) {
-        return MIMI_ERR_INVALID_STATE;
-    }
-
-    const char *channel_name = "feishu";
-
-    MIMI_LOGD(TAG, "Feishu input from %s: %.40s...", session_id, content);
-
-    /* Determine if command or chat message */
-    if (router_is_command(content)) {
-        MIMI_LOGI(TAG, "Routing Feishu command: %.40s...", content);
-
-        /* Execute command without gateway output (Feishu has its own send) */
-        char output[ROUTER_OUTPUT_MAX_LEN];
-        command_context_t ctx = {
-            .channel = channel_name,
-            .session_id = session_id,
-            .user_id = session_id,
-            .user_data = NULL
-        };
-        int ret = command_execute(content, &ctx, output, sizeof(output));
-
-        if (ret == 0) {
-            /* Send response via Feishu Channel */
-            mimi_msg_t msg = {0};
-            strncpy(msg.channel, channel_name, sizeof(msg.channel) - 1);
-            strncpy(msg.chat_id, session_id, sizeof(msg.chat_id) - 1);
-            msg.type = MIMI_MSG_TYPE_TEXT;
-            msg.content = strdup(output);
-            if (msg.content) {
-                channel_send(&msg);
-                free(msg.content);
-            }
-        }
-        return MIMI_OK;
-    } else {
-        MIMI_LOGI(TAG, "Routing Feishu chat message to Agent");
-        return router_send_to_agent(channel_name, session_id, content);
-    }
+    return router_handle_generic("feishu", session_id, content);
 }
 
-mimi_err_t router_handle_qq(const char *session_id,
-                            const char *content)
+mimi_err_t router_handle_qq(const char *session_id, const char *content)
 {
-    if (!session_id || !content) {
+    return router_handle_generic("qq", session_id, content);
+}
+
+mimi_err_t router_handle_wechat(const char *session_id, const char *content)
+{
+    return router_handle_generic("wechat", session_id, content);
+}
+
+/**
+ * Generic channel input handler - dynamically routed by channel_name
+ * Eliminates need for per-channel handler boilerplate
+ * 
+ * New channels should use this instead of creating a hardcoded handler.
+ * The channel_name must be registered via router_register_mapping() first.
+ * 
+ * Flow: channel_name -> (optional mapping lookup) -> command/agent routing
+ */
+mimi_err_t router_handle_generic(const char *channel_name,
+                                 const char *session_id,
+                                 const char *content)
+{
+    if (!channel_name || !session_id || !content) {
         return MIMI_ERR_INVALID_ARG;
     }
 
@@ -337,15 +271,13 @@ mimi_err_t router_handle_qq(const char *session_id,
         return MIMI_ERR_INVALID_STATE;
     }
 
-    const char *channel_name = "qq";
-
-    MIMI_LOGD(TAG, "QQ input from %s: %.40s...", session_id, content);
+    MIMI_LOGD(TAG, "Input from %s/%s: %.40s...", channel_name, session_id, content);
 
     /* Determine if command or chat message */
     if (router_is_command(content)) {
-        MIMI_LOGI(TAG, "Routing QQ command: %.40s...", content);
+        MIMI_LOGI(TAG, "Routing %s command: %.40s...", channel_name, content);
 
-        /* Execute command without gateway output (QQ has its own send) */
+        /* Execute command */
         char output[ROUTER_OUTPUT_MAX_LEN];
         command_context_t ctx = {
             .channel = channel_name,
@@ -355,21 +287,18 @@ mimi_err_t router_handle_qq(const char *session_id,
         };
         int ret = command_execute(content, &ctx, output, sizeof(output));
 
-        if (ret == 0) {
-            /* Send response via QQ Channel */
+        if (ret == 0 && output[0] != '\0') {
+            /* Send response via Channel Manager */
             mimi_msg_t msg = {0};
             strncpy(msg.channel, channel_name, sizeof(msg.channel) - 1);
             strncpy(msg.chat_id, session_id, sizeof(msg.chat_id) - 1);
             msg.type = MIMI_MSG_TYPE_TEXT;
-            msg.content = strdup(output);
-            if (msg.content) {
-                channel_send(&msg);
-                free(msg.content);
-            }
+            msg.content = output;  /* Stack buffer - no need to free since we're synchronous */
+            channel_send(&msg);
         }
         return MIMI_OK;
     } else {
-        MIMI_LOGI(TAG, "Routing QQ chat message to Agent");
+        MIMI_LOGI(TAG, "Routing %s chat message to Agent", channel_name);
         return router_send_to_agent(channel_name, session_id, content);
     }
 }

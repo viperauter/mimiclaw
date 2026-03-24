@@ -90,8 +90,8 @@ static void handle_message(const char *user_id, const char *channel_id,
         strncpy(s_priv.session_id, channel_id, sizeof(s_priv.session_id) - 1);
     }
 
-    /* Route through Input Processor */
-    router_handle_qq(user_id, content);
+    /* Route through Input Processor - generic handler eliminates per-channel boilerplate */
+    router_handle_generic("qq", user_id, content);
 }
 
 /**

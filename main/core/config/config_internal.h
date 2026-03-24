@@ -56,6 +56,11 @@ typedef struct mimi_config {
     char qq_app_id[64];
     char qq_token[256];
 
+    bool wechat_enabled;
+    char wechat_bot_token[512];  /* Longer token for WeChat */
+    char wechat_bot_id[128];
+    char wechat_user_id[128];
+
     char proxy_host[MIMI_CONFIG_HOST_LEN];
     char proxy_port[MIMI_CONFIG_PORT_LEN];
     char proxy_type[16];

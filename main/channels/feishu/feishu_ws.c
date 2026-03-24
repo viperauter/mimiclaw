@@ -26,7 +26,7 @@ static const char *TAG = "feishu";
 static void handle_message(const char *user_id, const char *content)
 {
     MIMI_LOGI(TAG, "Incoming message from %s: %.40s...", user_id, content);
-    router_handle_feishu(user_id, content);
+    router_handle_generic("feishu", user_id, content);
 }
 
 typedef struct {
