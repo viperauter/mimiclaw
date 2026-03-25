@@ -35,6 +35,9 @@ typedef struct {
     char proxy_host[128];
     int proxy_port;
     
+    /* Persistent extra headers (format: "Header1: value\r\nHeader2: value") */
+    char extra_headers[512];
+    
     /* Connection state */
     bool initialized;
     bool connected;
@@ -58,11 +61,49 @@ mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
                                    char *response, size_t response_len);
 
 /**
+ * Send HTTP GET request with extra headers
+ * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
+ */
+mimi_err_t http_client_gateway_get_ex(gateway_t *gw, const char *endpoint,
+                                      const char *extra_headers,
+                                      char *response, size_t response_len);
+
+/**
  * Send HTTP POST request
  */
 mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
                                     const char *data, size_t data_len,
                                     char *response, size_t response_len);
+
+/**
+ * Send HTTP POST request with extra headers
+ * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
+ */
+mimi_err_t http_client_gateway_post_ex(gateway_t *gw, const char *endpoint,
+                                       const char *extra_headers,
+                                       const char *data, size_t data_len,
+                                       char *response, size_t response_len);
+
+/**
+ * Send HTTP GET request with custom auth token (per-request)
+ * @param auth_token If provided, uses this token instead of stored config token
+ * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
+ */
+mimi_err_t http_client_gateway_get_with_token(gateway_t *gw, const char *endpoint,
+                                              const char *auth_token,
+                                              const char *extra_headers,
+                                              char *response, size_t response_len);
+
+/**
+ * Send HTTP POST request with custom auth token (per-request)
+ * @param auth_token If provided, uses this token instead of stored config token
+ * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
+ */
+mimi_err_t http_client_gateway_post_with_token(gateway_t *gw, const char *endpoint,
+                                               const char *auth_token,
+                                               const char *extra_headers,
+                                               const char *data, size_t data_len,
+                                               char *response, size_t response_len);
 
 /**
  * Check if HTTP Client Gateway is connected
@@ -83,6 +124,15 @@ gateway_t* http_client_gateway_get_instance(void);
  * Configure HTTP Client Gateway
  */
 mimi_err_t http_client_gateway_configure(const char *base_url, const char *api_token, int timeout_ms);
+
+/**
+ * Set persistent extra headers (remains until explicitly cleared)
+ * Headers format: "Header1: value\r\nHeader2: value"
+ * 
+ * NOTE: For request-specific headers, use the _ex() variant functions which 
+ * accept extra_headers as a parameter (fully reentrant/thread-safe).
+ */
+mimi_err_t http_client_gateway_set_persistent_headers(gateway_t *gw, const char *headers);
 
 #ifdef __cplusplus
 }

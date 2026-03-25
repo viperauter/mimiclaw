@@ -165,6 +165,7 @@ list(APPEND APP_SRC
     main/interface/commands/cmd_memory.c
     main/interface/commands/cmd_ask.c
     main/interface/commands/cmd_exit.c
+    main/interface/commands/cmd_wechat_login.c
     main/interface/router/router.c
 
     # Gateway layer
@@ -187,6 +188,8 @@ list(APPEND APP_SRC
     main/channels/feishu/feishu_ws.c
     main/channels/feishu/feishu_media.c
     main/channels/qq/qq_channel.c
+    main/channels/wechat/wechat_channel.c
+    main/channels/wechat/wechat_login.c
 )
 
 # --------------------------------

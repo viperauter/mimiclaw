@@ -308,6 +308,7 @@ extern mimi_err_t telegram_channel_init(void);
 extern mimi_err_t ws_server_channel_init(void);
 extern mimi_err_t feishu_channel_init(void);
 extern mimi_err_t qq_channel_init(void);
+extern mimi_err_t wechat_channel_init(void);
 
 /* External channel instances */
 extern channel_t g_cli_channel;
@@ -315,6 +316,7 @@ extern channel_t g_telegram_channel;
 extern channel_t g_ws_server_channel;
 extern channel_t g_feishu_channel;
 extern channel_t g_qq_channel;
+extern channel_t g_wechat_channel;
 
 /* External Router init */
 extern mimi_err_t router_init(void);
@@ -378,6 +380,15 @@ mimi_err_t channel_system_init(void)
     } else {
         if (channel_register(&g_qq_channel) != MIMI_OK) {
             MIMI_LOGW(TAG, "Failed to register QQ channel");
+        }
+    }
+
+    /* Initialize and register WeChat Channel */
+    if (wechat_channel_init() != MIMI_OK) {
+        MIMI_LOGW(TAG, "wechat_channel_init failed");
+    } else {
+        if (channel_register(&g_wechat_channel) != MIMI_OK) {
+            MIMI_LOGW(TAG, "Failed to register WeChat channel");
         }
     }
 

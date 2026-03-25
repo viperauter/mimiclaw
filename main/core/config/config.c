@@ -25,6 +25,7 @@ static const char *TAG = "config";
 static mimi_config_t s_config;
 static bool s_loaded;
 static cJSON *s_json_root; /* merged raw config JSON (source of truth for extensible sections) */
+static char s_config_path[512] = {0}; /* last loaded config path - symmetry with mimi_config_load() */
 
 static mimi_err_t write_text_file_vfs(const char *path, const char *data, size_t len)
 {
@@ -47,7 +48,7 @@ static mimi_err_t write_text_file_vfs(const char *path, const char *data, size_t
 
 /* Bump when the config JSON schema changes.
  * Loader will auto-merge missing keys and write back merged config. */
-#define MIMI_CONFIG_SCHEMA_VERSION 3
+#define MIMI_CONFIG_SCHEMA_VERSION 4
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
 {
@@ -126,6 +127,12 @@ static void apply_defaults(void)
     s_config.qq_enabled = false;
     s_config.qq_app_id[0] = '\0';
     s_config.qq_token[0] = '\0';
+
+    /* WeChat */
+    s_config.wechat_enabled = false;
+    s_config.wechat_bot_token[0] = '\0';
+    s_config.wechat_bot_id[0] = '\0';
+    s_config.wechat_user_id[0] = '\0';
 
     /* Proxy */
     s_config.proxy_host[0] = '\0';
@@ -344,6 +351,15 @@ static cJSON *config_build_json_full_from_config(const mimi_config_t *cfg, int s
             cJSON_AddItemToObject(channels, "qq", qq);
         }
 
+        cJSON *wechat = cJSON_CreateObject();
+        if (wechat) {
+            cJSON_AddBoolToObject(wechat, "enabled", cfg->wechat_enabled);
+            cJSON_AddStringToObject(wechat, "bot_token", cfg->wechat_bot_token);
+            cJSON_AddStringToObject(wechat, "bot_id", cfg->wechat_bot_id);
+            cJSON_AddStringToObject(wechat, "user_id", cfg->wechat_user_id);
+            cJSON_AddItemToObject(channels, "wechat", wechat);
+        }
+
         cJSON_AddItemToObject(root, "channels", channels);
     }
 
@@ -471,6 +487,169 @@ const cJSON *mimi_config_json_root_internal(void)
     return s_json_root;
 }
 
+const char *mimi_config_get_path(void)
+{
+    return s_config_path[0] ? s_config_path : NULL;
+}
+
+mimi_err_t mimi_config_save_current(void)
+{
+    if (!s_config_path[0]) {
+        MIMI_LOGW(TAG, "No config path known; call mimi_config_save(path) explicitly");
+        return MIMI_ERR_INVALID_STATE;
+    }
+    return mimi_config_save(s_config_path);
+}
+
+/* Internal helper to navigate/create JSON path (e.g., "a.b.c" -> creates nodes as needed) */
+static cJSON* config_json_ensure_path(cJSON *root, const char *path)
+{
+    if (!root || !path || !path[0]) return NULL;
+    
+    char path_copy[256];
+    strncpy(path_copy, path, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+    
+    cJSON *current = root;
+    char *token = strtok(path_copy, ".");
+    
+    while (token && current) {
+        cJSON *next = cJSON_GetObjectItem(current, token);
+        if (!next) {
+            next = cJSON_AddObjectToObject(current, token);
+        }
+        current = next;
+        token = strtok(NULL, ".");
+    }
+    
+    return current;
+}
+
+/* Internal helper to set string values in JSON root */
+static mimi_err_t config_json_set_str(const char *json_path, const char *value)
+{
+    if (!json_path || !json_path[0]) return MIMI_ERR_INVALID_ARG;
+    
+    /* Ensure JSON root exists */
+    if (!s_json_root) {
+        s_json_root = config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
+        if (!s_json_root) return MIMI_ERR_NO_MEM;
+    }
+    
+    /* Split path into parent path and key */
+    char path_copy[256];
+    strncpy(path_copy, json_path, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+    
+    char *last_dot = strrchr(path_copy, '.');
+    if (!last_dot) {
+        /* Root level key */
+        cJSON_DeleteItemFromObject(s_json_root, path_copy);
+        if (value && value[0]) {
+            cJSON_AddStringToObject(s_json_root, path_copy, value);
+        }
+        return MIMI_OK;
+    }
+    
+    /* Split into parent path and key */
+    *last_dot = '\0';
+    const char *key = last_dot + 1;
+    
+    /* Navigate to parent node */
+    cJSON *parent = config_json_ensure_path(s_json_root, path_copy);
+    if (!parent) return MIMI_ERR_INVALID_ARG;
+    
+    /* Set the value - always delete first to avoid duplicates */
+    cJSON_DeleteItemFromObject(parent, key);
+    if (value && value[0]) {
+        cJSON_AddStringToObject(parent, key, value);
+    }
+    
+    return MIMI_OK;
+}
+
+/* Internal helper to set bool values in JSON root */
+static mimi_err_t config_json_set_bool(const char *json_path, bool value)
+{
+    if (!json_path || !json_path[0]) return MIMI_ERR_INVALID_ARG;
+    
+    /* Ensure JSON root exists */
+    if (!s_json_root) {
+        s_json_root = config_build_json_full_from_config(&s_config, MIMI_CONFIG_SCHEMA_VERSION);
+        if (!s_json_root) return MIMI_ERR_NO_MEM;
+    }
+    
+    /* Split path into parent path and key */
+    char path_copy[256];
+    strncpy(path_copy, json_path, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+    
+    char *last_dot = strrchr(path_copy, '.');
+    if (!last_dot) {
+        /* Root level key */
+        cJSON_DeleteItemFromObject(s_json_root, path_copy);
+        cJSON_AddBoolToObject(s_json_root, path_copy, value);
+        return MIMI_OK;
+    }
+    
+    /* Split into parent path and key */
+    *last_dot = '\0';
+    const char *key = last_dot + 1;
+    
+    /* Navigate to parent node */
+    cJSON *parent = config_json_ensure_path(s_json_root, path_copy);
+    if (!parent) return MIMI_ERR_INVALID_ARG;
+    
+    /* Set the value - always delete first to avoid duplicates */
+    cJSON_DeleteItemFromObject(parent, key);
+    cJSON_AddBoolToObject(parent, key, value);
+    
+    return MIMI_OK;
+}
+
+/*
+ * Generic config setter - path format examples:
+ * - "channels.wechat.bot_token" -> channels.wechat.bot_token
+ * - "proxy.host" -> proxy.host
+ * - "log_level" (root level key)
+ *
+ * Updates both the JSON root (source of truth for persistence) and the
+ * runtime config struct for known fields.
+ */
+mimi_err_t mimi_config_set(const char *path, mimi_config_type_t type, const void *value)
+{
+    if (!path || !path[0] || !value) return MIMI_ERR_INVALID_ARG;
+    
+    mimi_err_t err = MIMI_OK;
+    
+    switch (type) {
+        case MIMI_CONFIG_TYPE_STRING:
+            err = config_json_set_str(path, (const char *)value);
+            break;
+        case MIMI_CONFIG_TYPE_BOOL:
+            err = config_json_set_bool(path, *(const bool *)value);
+            break;
+        default:
+            return MIMI_ERR_INVALID_ARG;
+    }
+    
+    return err;
+}
+
+/* Convenience wrapper for string values */
+mimi_err_t mimi_config_set_string(const char *path, const char *value)
+{
+    return mimi_config_set(path, MIMI_CONFIG_TYPE_STRING, value);
+}
+
+/* Convenience wrapper for bool values */
+mimi_err_t mimi_config_set_bool(const char *path, bool value)
+{
+    return mimi_config_set(path, MIMI_CONFIG_TYPE_BOOL, &value);
+}
+
+
+
 mimi_err_t mimi_config_load(const char *path)
 {
     apply_defaults();
@@ -480,6 +659,14 @@ mimi_err_t mimi_config_load(const char *path)
     if (s_json_root) {
         cJSON_Delete(s_json_root);
         s_json_root = NULL;
+    }
+
+    /* Store config path for symmetry: allows mimi_config_save_current() */
+    if (path && path[0] != '\0') {
+        strncpy(s_config_path, path, sizeof(s_config_path) - 1);
+        s_config_path[sizeof(s_config_path) - 1] = '\0';
+    } else {
+        s_config_path[0] = '\0';
     }
 
     if (!path || path[0] == '\0') {
@@ -727,6 +914,18 @@ mimi_err_t mimi_config_load(const char *path)
         }
         json_str_to_buf(cJSON_GetObjectItem(qq, "appId"), s_config.qq_app_id, sizeof(s_config.qq_app_id), false);
         json_str_to_buf(cJSON_GetObjectItem(qq, "secret"), s_config.qq_token, sizeof(s_config.qq_token), false);
+    }
+
+    /* channels.wechat */
+    cJSON *wechat = channels && cJSON_IsObject(channels) ? cJSON_GetObjectItem(channels, "wechat") : NULL;
+    if (cJSON_IsObject(wechat)) {
+        cJSON *en = cJSON_GetObjectItem(wechat, "enabled");
+        if (en && (cJSON_IsBool(en) || cJSON_IsNumber(en))) {
+            s_config.wechat_enabled = cJSON_IsTrue(en) || (cJSON_IsNumber(en) && en->valueint != 0);
+        }
+        json_str_to_buf(cJSON_GetObjectItem(wechat, "bot_token"), s_config.wechat_bot_token, sizeof(s_config.wechat_bot_token), false);
+        json_str_to_buf(cJSON_GetObjectItem(wechat, "bot_id"), s_config.wechat_bot_id, sizeof(s_config.wechat_bot_id), false);
+        json_str_to_buf(cJSON_GetObjectItem(wechat, "user_id"), s_config.wechat_user_id, sizeof(s_config.wechat_user_id), false);
     }
 
     /* proxy (top-level or under a key) */

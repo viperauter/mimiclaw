@@ -82,18 +82,23 @@ mimi_err_t subagent_manager_init(void)
 {
     if (s_inited) return MIMI_OK;
     mimi_err_t err = mimi_mutex_create(&s_mu);
-    if (err != MIMI_OK) return err;
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to create mutex: %d", err);
+        return err;
+    }
     memset(s_tasks, 0, sizeof(s_tasks));
     memset(s_recs, 0, sizeof(s_recs));
     s_count = 0;
     s_id_counter = 0;
     s_inited = true;
+    MIMI_LOGI(TAG, "Subagent manager initialized");
     return MIMI_OK;
 }
 
 void subagent_manager_deinit(void)
 {
     if (!s_inited) return;
+    MIMI_LOGI(TAG, "Subagent manager deinitializing, active tasks: %d", s_count);
     mimi_mutex_lock(s_mu);
     for (int i = 0; i < MAX_SUBAGENTS; i++) {
         if (s_tasks[i]) {
@@ -171,6 +176,9 @@ mimi_err_t subagent_spawn(const subagent_spawn_spec_t *spec,
 
     strncpy(out_id, id, out_id_size - 1);
     out_id[out_id_size - 1] = '\0';
+    
+    MIMI_LOGI(TAG, "Spawned subagent task: id=%s, profile=%s, active=%d", 
+              id, spec->profile, s_count);
     return MIMI_OK;
 }
 

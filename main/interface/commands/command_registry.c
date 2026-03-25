@@ -348,6 +348,7 @@ extern void cmd_set_init(void);
 extern void cmd_memory_read_init(void);
 extern void cmd_ask_init(void);
 extern void cmd_exit_init(void);
+extern void cmd_wechat_login_init(void);
 
 int command_system_auto_init(void)
 {
@@ -363,6 +364,7 @@ int command_system_auto_init(void)
     cmd_memory_read_init();
     cmd_ask_init();
     cmd_exit_init();
+    cmd_wechat_login_init();
 
     return 0;
 }

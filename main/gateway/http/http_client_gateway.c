@@ -172,8 +172,14 @@ mimi_err_t http_client_gateway_configure(const char *base_url, const char *api_t
     return http_client_gateway_init_impl(&g_http_gateway, &cfg);
 }
 
-mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
-                                   char *response, size_t response_len)
+/**
+ * Internal helper for HTTP GET with optional extra headers
+ * (reentrant - uses per-request auth token to avoid race conditions)
+ */
+static mimi_err_t http_client_gateway_get_internal(gateway_t *gw, const char *endpoint,
+                                                   const char *auth_token,     /* NEW: per-request token */
+                                                   const char *extra_headers,
+                                                   char *response, size_t response_len)
 {
     http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
     
@@ -189,23 +195,44 @@ mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
     char url[512];
     snprintf(url, sizeof(url), "%s%s", priv->base_url, endpoint);
     
+    /* Build complete headers: Authorization (from param) + persistent + call-site headers */
+    char headers[768] = {0};
+    int offset = 0;
+    
+    /* Use token from PARAMETER first (caller's stack), fall back to stored config */
+    if (auth_token && auth_token[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "Authorization: Bearer %s\r\n",
+                          auth_token);
+    } else if (priv->api_token[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "Authorization: Bearer %s\r\n",
+                          priv->api_token);
+    }
+    
+    /* Add persistent extra headers */
+    if (priv->extra_headers[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "%s\r\n",
+                          priv->extra_headers);
+    }
+    
+    /* Add call-site extra headers (passed in from caller's stack/heap) */
+    if (extra_headers && extra_headers[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "%s\r\n",
+                          extra_headers);
+    }
+    
     /* Prepare HTTP request */
     mimi_http_request_t req = {
         .method = "GET",
         .url = url,
-        .headers = priv->api_token[0] ? 
-                 "Authorization: Bearer " : NULL,
+        .headers = offset > 0 ? headers : NULL,
         .body = NULL,
         .body_len = 0,
         .timeout_ms = priv->timeout_ms
     };
-    
-    /* Add Authorization header if token is set */
-    char headers[256] = {0};
-    if (priv->api_token[0]) {
-        snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\n", priv->api_token);
-        req.headers = headers;
-    }
     
     /* Execute HTTP request synchronously */
     mimi_http_response_t resp;
@@ -235,9 +262,40 @@ mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
     return MIMI_OK;
 }
 
-mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
-                                    const char *data, size_t data_len,
-                                    char *response, size_t response_len)
+mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
+                                   char *response, size_t response_len)
+{
+    return http_client_gateway_get_internal(gw, endpoint, NULL, NULL, response, response_len);
+}
+
+mimi_err_t http_client_gateway_get_ex(gateway_t *gw, const char *endpoint,
+                                      const char *extra_headers,
+                                      char *response, size_t response_len)
+{
+    return http_client_gateway_get_internal(gw, endpoint, NULL, extra_headers, response, response_len);
+}
+
+/**
+ * Send HTTP GET request with custom auth token (per-request)
+ * @param auth_token If provided, uses this token instead of stored config token
+ */
+mimi_err_t http_client_gateway_get_with_token(gateway_t *gw, const char *endpoint,
+                                              const char *auth_token,
+                                              const char *extra_headers,
+                                              char *response, size_t response_len)
+{
+    return http_client_gateway_get_internal(gw, endpoint, auth_token, extra_headers, response, response_len);
+}
+
+/**
+ * Internal helper for HTTP POST with optional extra headers
+ * (reentrant - uses per-request auth token to avoid race conditions)
+ */
+static mimi_err_t http_client_gateway_post_internal(gateway_t *gw, const char *endpoint,
+                                                    const char *auth_token,     /* NEW: per-request token */
+                                                    const char *extra_headers,
+                                                    const char *data, size_t data_len,
+                                                    char *response, size_t response_len)
 {
     http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
     
@@ -253,12 +311,37 @@ mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
     char url[512];
     snprintf(url, sizeof(url), "%s%s", priv->base_url, endpoint);
     
-    /* Add Authorization header if token is set */
-    char headers[256] = {0};
-    if (priv->api_token[0]) {
-        snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\nContent-Type: application/json\r\n", priv->api_token);
-    } else {
-        snprintf(headers, sizeof(headers), "Content-Type: application/json\r\n");
+    /* Build complete headers: Authorization (from param) + Content-Type + persistent + call-site headers */
+    char headers[768] = {0};
+    int offset = 0;
+    
+    /* Use token from PARAMETER first (caller's stack), fall back to stored config */
+    if (auth_token && auth_token[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "Authorization: Bearer %s\r\n",
+                          auth_token);
+    } else if (priv->api_token[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "Authorization: Bearer %s\r\n",
+                          priv->api_token);
+    }
+    
+    /* Always add Content-Type for POST */
+    offset += snprintf(headers + offset, sizeof(headers) - offset,
+                      "Content-Type: application/json\r\n");
+    
+    /* Add persistent extra headers */
+    if (priv->extra_headers[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "%s\r\n",
+                          priv->extra_headers);
+    }
+    
+    /* Add call-site extra headers (passed in from caller's stack/heap) */
+    if (extra_headers && extra_headers[0]) {
+        offset += snprintf(headers + offset, sizeof(headers) - offset,
+                          "%s\r\n",
+                          extra_headers);
     }
     
     /* Prepare HTTP request */
@@ -299,9 +382,65 @@ mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
     return MIMI_OK;
 }
 
+mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
+                                    const char *data, size_t data_len,
+                                    char *response, size_t response_len)
+{
+    return http_client_gateway_post_internal(gw, endpoint, NULL, NULL, data, data_len, response, response_len);
+}
+
+mimi_err_t http_client_gateway_post_ex(gateway_t *gw, const char *endpoint,
+                                       const char *extra_headers,
+                                       const char *data, size_t data_len,
+                                       char *response, size_t response_len)
+{
+    return http_client_gateway_post_internal(gw, endpoint, NULL, extra_headers, data, data_len, response, response_len);
+}
+
+/**
+ * Send HTTP POST request with custom auth token (per-request)
+ * @param auth_token If provided, uses this token instead of stored config token
+ */
+mimi_err_t http_client_gateway_post_with_token(gateway_t *gw, const char *endpoint,
+                                               const char *auth_token,
+                                               const char *extra_headers,
+                                               const char *data, size_t data_len,
+                                               char *response, size_t response_len)
+{
+    return http_client_gateway_post_internal(gw, endpoint, auth_token, extra_headers, data, data_len, response, response_len);
+}
+
 bool http_client_gateway_is_connected(gateway_t *gw)
 {
     http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
-    return priv->initialized && priv->connected;
+    return priv && priv->initialized && priv->connected;
+}
+
+/**
+ * Set persistent extra headers (remains until explicitly cleared)
+ * Headers format: "Header1: value\r\nHeader2: value"
+ * 
+ * For request-specific headers, use the _ex() variant functions which
+ * accept extra_headers as a parameter (fully reentrant/thread-safe).
+ */
+mimi_err_t http_client_gateway_set_persistent_headers(gateway_t *gw, const char *headers)
+{
+    if (!gw) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    
+    http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
+    if (!priv) {
+        return MIMI_ERR_INVALID_STATE;
+    }
+    
+    if (headers && headers[0]) {
+        strncpy(priv->extra_headers, headers, sizeof(priv->extra_headers) - 1);
+        priv->extra_headers[sizeof(priv->extra_headers) - 1] = '\0';
+    } else {
+        priv->extra_headers[0] = '\0';
+    }
+    
+    return MIMI_OK;
 }
 

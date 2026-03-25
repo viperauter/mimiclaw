@@ -80,6 +80,11 @@ static void set_finished_locked(subagent_task_t *t,
     t->rec.state = SUBAGENT_STATE_FINISHED;
     t->rec.reason = reason;
     rec_touch(t);
+    
+    MIMI_LOGD(TAG, "Task finished id=%s, reason=%s, ok=%d",
+               t->rec.id[0] ? t->rec.id : "unknown",
+               subagent_reason_name(reason),
+               ok);
 
     t->join.finished = true;
     t->join.reason = reason;
@@ -384,9 +389,16 @@ subagent_task_t *subagent_task_create(const char *id,
                                       subagent_task_on_finish_fn on_finish,
                                       void *user_data)
 {
-    if (!id || !spec || !profile || !parent_ctx) return NULL;
+    if (!id || !spec || !profile || !parent_ctx) {
+        MIMI_LOGW(TAG, "Invalid args for task create: id=%p, spec=%p, profile=%p, ctx=%p",
+                  id, spec, profile, parent_ctx);
+        return NULL;
+    }
     subagent_task_t *t = (subagent_task_t *)calloc(1, sizeof(*t));
-    if (!t) return NULL;
+    if (!t) {
+        MIMI_LOGE(TAG, "Failed to allocate subagent task memory");
+        return NULL;
+    }
 
     mimi_err_t err = mimi_mutex_create(&t->mu);
     if (err != MIMI_OK) {
@@ -454,6 +466,10 @@ subagent_task_t *subagent_task_create(const char *id,
 void subagent_task_destroy(subagent_task_t *t)
 {
     if (!t) return;
+    
+    MIMI_LOGD(TAG, "Destroying task id=%s", 
+              t->rec.id[0] ? t->rec.id : "unknown");
+    
     if (t->messages) {
         cJSON_Delete(t->messages);
         t->messages = NULL;
