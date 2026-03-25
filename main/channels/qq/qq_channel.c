@@ -26,6 +26,7 @@
 #include <stdbool.h>
 
 static const char *TAG = "qq";
+static const char *QQ_API_BASE = "https://api.sgroup.qq.com";
 
 /* QQ Channel private data */
 typedef struct {
@@ -63,10 +64,17 @@ static mimi_err_t qq_send_message(const char *channel_id, const char *content)
     cJSON_Delete(body);
     if (!json) return MIMI_ERR_NO_MEM;
 
+    http_request_options_t opts = {
+        .base_url = QQ_API_BASE,
+        .auth_token = s_priv.token,
+        .extra_headers = NULL,
+        .timeout_ms = 30000
+    };
+    
     char response[4096];
-    mimi_err_t err = http_client_gateway_post(s_priv.http_gateway, endpoint, 
-                                          json, strlen(json),
-                                          response, sizeof(response));
+    mimi_err_t err = http_client_gateway_post(s_priv.http_gateway, endpoint, &opts,
+                                              json, strlen(json),
+                                              response, sizeof(response));
     free(json);
 
     if (err != MIMI_OK) {
@@ -209,13 +217,7 @@ mimi_err_t qq_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
         return err;
     }
 
-    /* Configure HTTP Gateway for QQ */
-    err = http_client_gateway_configure("https://api.sgroup.qq.com", 
-                               s_priv.token, 30000);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
-        return err;
-    }
+    /* HTTP Gateway base_url and token will be set per-request via options */
 
     /* Register mapping for Input Processor */
     err = router_register_mapping("qq", "qq");

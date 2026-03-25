@@ -12,6 +12,10 @@ extern "C" {
 #define MIMI_MEM_PROFILE_DEFAULT 0
 #define MIMI_MEM_PROFILE_EMBEDDED 1
 #define MIMI_MEM_PROFILE_HIGH_PERF 2
+// Minimal async configuration (async mode but with minimal memory).
+// Must be defined; otherwise the preprocessor treats it as 0 in comparisons
+// and may accidentally select this branch for the default profile.
+#define MIMI_MEM_PROFILE_MIN_ASYNC 3
 
 // Select memory profile (via CMake: -DMIMI_MEM_PROFILE=1)
 #ifndef MIMI_MEM_PROFILE

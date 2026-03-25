@@ -2,7 +2,17 @@
  * HTTP Client Gateway Interface
  *
  * Provides HTTP client functionality for channels that need HTTP communication.
- * Used by Telegram, Feishu, QQ and other HTTP-based channels.
+ * Used by Telegram, Feishu, QQ, WeChat and other HTTP-based channels.
+ *
+ * Design: All request parameters are passed via http_request_options_t for
+ * full reentrancy and thread-safety. No global state is modified during requests.
+ *
+ * Usage:
+ *   1. Gateway is initialized via gateway_system_init() -> gateway_init(NULL), or pass
+ *      gateway_config_t with type GATEWAY_TYPE_HTTP_CLIENT for default base_url/token/timeout.
+ *   2. Use http_client_gateway_get/post() with options for each request (required when
+ *      no defaults were set at init).
+ *   3. Options can use convenience macros: HTTP_OPTS_BASE(), HTTP_OPTS_TOKEN(), etc.
  */
 
 #ifndef HTTP_CLIENT_GATEWAY_H
@@ -16,127 +26,69 @@
 extern "C" {
 #endif
 
-/* HTTP Client Gateway configuration */
+/**
+ * Per-request options (fully reentrant)
+ * All fields are optional - NULL/0 values will use gateway defaults
+ */
 typedef struct {
-    const char *base_url;           /* Base URL for API requests */
-    const char *api_token;          /* API token for authentication */
-    int timeout_ms;                 /* Request timeout in milliseconds */
-    const char *proxy_host;         /* Proxy host (optional) */
-    int proxy_port;                 /* Proxy port (optional) */
-} http_client_gateway_config_t;
-
-/* HTTP Client Gateway private data */
-typedef struct {
-    char base_url[256];
-    char api_token[128];
-    int timeout_ms;
-    
-    /* Proxy settings */
-    char proxy_host[128];
-    int proxy_port;
-    
-    /* Persistent extra headers (format: "Header1: value\r\nHeader2: value") */
-    char extra_headers[512];
-    
-    /* Connection state */
-    bool initialized;
-    bool connected;
-    
-    /* Gateway reference */
-    gateway_t *gateway;
-} http_client_gateway_priv_t;
+    const char *base_url;      /* Request-level base_url */
+    const char *auth_token;    /* Request-level auth token */
+    const char *extra_headers; /* Extra headers: "X-Custom: value\r\n" */
+    int timeout_ms;            /* Timeout in ms, 0 uses default (30000ms) */
+} http_request_options_t;
 
 /**
- * Initialize HTTP Client Gateway
- * @param gw Gateway object
- * @param cfg HTTP Gateway configuration
- * @return MIMI_OK on success, error code otherwise
+ * Convenience macros for common usage patterns
  */
-mimi_err_t http_client_gateway_init(gateway_t *gw, const http_client_gateway_config_t *cfg);
+#define HTTP_OPTS_DEFAULT          ((http_request_options_t*)NULL)
+#define HTTP_OPTS_BASE(url)        (&(http_request_options_t){.base_url = (url)})
+#define HTTP_OPTS_TOKEN(tok)       (&(http_request_options_t){.auth_token = (tok)})
+#define HTTP_OPTS_BASE_TOKEN(url, tok) \
+    (&(http_request_options_t){.base_url = (url), .auth_token = (tok)})
 
 /**
  * Send HTTP GET request
+ * @param gw Gateway object (from gateway_manager_find("http"))
+ * @param endpoint API endpoint (appended to base_url)
+ * @param opts Request options, NULL uses all defaults
+ * @param response Buffer for response body
+ * @param response_len Size of response buffer
+ * @return MIMI_OK on success, error code otherwise
  */
 mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
+                                   const http_request_options_t *opts,
                                    char *response, size_t response_len);
 
 /**
- * Send HTTP GET request with extra headers
- * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
- */
-mimi_err_t http_client_gateway_get_ex(gateway_t *gw, const char *endpoint,
-                                      const char *extra_headers,
-                                      char *response, size_t response_len);
-
-/**
  * Send HTTP POST request
+ * @param gw Gateway object (from gateway_manager_find("http"))
+ * @param endpoint API endpoint (appended to base_url)
+ * @param opts Request options, NULL uses all defaults
+ * @param data Request body data
+ * @param data_len Length of request body
+ * @param response Buffer for response body
+ * @param response_len Size of response buffer
+ * @return MIMI_OK on success, error code otherwise
  */
 mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
+                                    const http_request_options_t *opts,
                                     const char *data, size_t data_len,
                                     char *response, size_t response_len);
 
 /**
- * Send HTTP POST request with extra headers
- * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
- */
-mimi_err_t http_client_gateway_post_ex(gateway_t *gw, const char *endpoint,
-                                       const char *extra_headers,
-                                       const char *data, size_t data_len,
-                                       char *response, size_t response_len);
-
-/**
- * Send HTTP GET request with custom auth token (per-request)
- * @param auth_token If provided, uses this token instead of stored config token
- * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
- */
-mimi_err_t http_client_gateway_get_with_token(gateway_t *gw, const char *endpoint,
-                                              const char *auth_token,
-                                              const char *extra_headers,
-                                              char *response, size_t response_len);
-
-/**
- * Send HTTP POST request with custom auth token (per-request)
- * @param auth_token If provided, uses this token instead of stored config token
- * @param extra_headers Optional extra headers, format: "Header1: value\r\nHeader2: value"
- */
-mimi_err_t http_client_gateway_post_with_token(gateway_t *gw, const char *endpoint,
-                                               const char *auth_token,
-                                               const char *extra_headers,
-                                               const char *data, size_t data_len,
-                                               char *response, size_t response_len);
-
-/**
- * Check if HTTP Client Gateway is connected
- */
-bool http_client_gateway_is_connected(gateway_t *gw);
-
-/**
  * HTTP Client Gateway module initialization
+ * Called automatically by gateway_system_init()
  */
 mimi_err_t http_client_gateway_module_init(void);
 
 /**
- * Get HTTP Client Gateway instance
+ * Get HTTP Client Gateway singleton instance
+ * @return HTTP Gateway instance
  */
 gateway_t* http_client_gateway_get_instance(void);
-
-/**
- * Configure HTTP Client Gateway
- */
-mimi_err_t http_client_gateway_configure(const char *base_url, const char *api_token, int timeout_ms);
-
-/**
- * Set persistent extra headers (remains until explicitly cleared)
- * Headers format: "Header1: value\r\nHeader2: value"
- * 
- * NOTE: For request-specific headers, use the _ex() variant functions which 
- * accept extra_headers as a parameter (fully reentrant/thread-safe).
- */
-mimi_err_t http_client_gateway_set_persistent_headers(gateway_t *gw, const char *headers);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* HTTP_CLIENT_GATEWAY_H */
-

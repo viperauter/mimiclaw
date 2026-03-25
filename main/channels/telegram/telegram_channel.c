@@ -26,6 +26,7 @@
 
 static const char *TAG = "telegram";
 static const int TG_POLL_TIMEOUT_S = 30;
+static const char *TELEGRAM_API_BASE = "https://api.telegram.org/bot";
 
 /* Telegram Channel private data */
 typedef struct {
@@ -52,11 +53,24 @@ static mimi_err_t tg_http_call(const char *method, const char *json_body,
         return MIMI_ERR_INVALID_STATE;
     }
     
+    /* Build base URL with bot token */
+    char base_url[256];
+    snprintf(base_url, sizeof(base_url), "%s%s/", TELEGRAM_API_BASE, s_priv.bot_token);
+    
+    http_request_options_t opts = {
+        .base_url = base_url,
+        .auth_token = NULL,  /* Telegram uses token in URL, not header */
+        .extra_headers = NULL,
+        .timeout_ms = 35000
+    };
+    
     if (json_body) {
-        return http_client_gateway_post(s_priv.http_gateway, method, json_body, 
-                                        strlen(json_body), response, response_len);
+        return http_client_gateway_post(s_priv.http_gateway, method, &opts,
+                                        json_body, strlen(json_body), 
+                                        response, response_len);
     } else {
-        return http_client_gateway_get(s_priv.http_gateway, method, response, response_len);
+        return http_client_gateway_get(s_priv.http_gateway, method, &opts,
+                                       response, response_len);
     }
 }
 
@@ -178,23 +192,15 @@ mimi_err_t telegram_channel_init_impl(channel_t *ch, const channel_config_t *cfg
         MIMI_LOGI(TAG, "Telegram bot initialized with token prefix %.6s***", s_priv.bot_token);
     }
 
-    /* Get or create HTTP Gateway */
+    /* Get HTTP Gateway */
     s_priv.http_gateway = gateway_manager_find("http");
     if (!s_priv.http_gateway) {
         MIMI_LOGE(TAG, "HTTP Gateway not found");
         return MIMI_ERR_NOT_FOUND;
     }
 
-    /* Configure HTTP Gateway for Telegram */
-    mimi_err_t err = http_client_gateway_configure("https://api.telegram.org/bot", 
-                                          s_priv.bot_token, 35000);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
-        return err;
-    }
-
     /* Register mapping for Input Processor */
-    err = router_register_mapping("telegram", "telegram");
+    mimi_err_t err = router_register_mapping("telegram", "telegram");
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to register input processor mapping");
         return err;
@@ -420,10 +426,7 @@ mimi_err_t telegram_channel_set_token(const char *token)
     strncpy(s_priv.bot_token, token, sizeof(s_priv.bot_token) - 1);
     s_priv.bot_token[sizeof(s_priv.bot_token) - 1] = '\0';
     
-    /* Reconfigure HTTP Gateway with new token */
-    if (s_priv.http_gateway) {
-        http_client_gateway_configure("https://api.telegram.org/bot", s_priv.bot_token, 35000);
-    }
+    /* Token will be used in each request via options, no gateway reconfigure needed */
     
     MIMI_LOGI(TAG, "Telegram bot token updated");
     return MIMI_OK;

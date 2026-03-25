@@ -85,10 +85,6 @@ static mimi_err_t wechat_http_post_auth_timeout(const char *endpoint, const char
     MIMI_LOGD(TAG, "Using token (preview): %.16s...", token);
     MIMI_LOGD(TAG, "Request timeout: %d ms", timeout_ms);
 
-    /* NOTE: No need to call http_client_gateway_configure() here anymore!
-     * We now use _with_token() API which passes token via stack parameter,
-     * eliminating race conditions and duplicate initialization warnings */
-
     /* Prepare WeChat-specific headers (stack allocated - fully reentrant) */
     char x_wechat_uin[64];
     char extra_headers[256];
@@ -100,11 +96,17 @@ static mimi_err_t wechat_http_post_auth_timeout(const char *endpoint, const char
              "X-WECHAT-UIN: %s",
              x_wechat_uin);
 
-    /* Use _with_token() variant: token is passed on caller's stack -> NO RACE CONDITION!
-     * This ensures token cannot be modified by concurrent gateway configuration */
-    return http_client_gateway_post_with_token(s_priv.http_gateway, endpoint, token, extra_headers,
-                                               json_body, strlen(json_body ? json_body : ""),
-                                               response, response_len);
+    /* Use options struct for fully reentrant request */
+    http_request_options_t opts = {
+        .base_url = WECHAT_BASE_URL,
+        .auth_token = token,
+        .extra_headers = extra_headers,
+        .timeout_ms = timeout_ms
+    };
+    
+    return http_client_gateway_post(s_priv.http_gateway, endpoint, &opts,
+                                    json_body, strlen(json_body ? json_body : ""),
+                                    response, response_len);
 }
 
 /**
@@ -355,7 +357,7 @@ static mimi_err_t wechat_channel_init_impl(channel_t *ch, const channel_config_t
     /* Load credentials from config (auto-login if possible) */
     wechat_login_load_from_config();
 
-    /* Get or create HTTP Gateway */
+    /* Get HTTP Gateway */
     s_priv.http_gateway = gateway_manager_find("http");
     if (!s_priv.http_gateway) {
         MIMI_LOGE(TAG, "HTTP Gateway not found");
@@ -363,14 +365,7 @@ static mimi_err_t wechat_channel_init_impl(channel_t *ch, const channel_config_t
         return MIMI_ERR_NOT_FOUND;
     }
 
-    /* Configure HTTP Gateway for WeChat - ONLY to set base_url (NO token here!)
-     * Token is now passed per-request via _with_token() API to avoid race conditions */
-    err = http_client_gateway_configure(WECHAT_BASE_URL, "", WECHAT_API_TIMEOUT_MS);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
-        wechat_login_manager_cleanup();
-        return err;
-    }
+    /* HTTP Gateway base_url and token will be set per-request via options */
 
     /* Register mapping for Input Processor */
     err = router_register_mapping("wechat", "wechat");

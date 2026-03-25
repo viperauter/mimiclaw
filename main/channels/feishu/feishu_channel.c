@@ -259,23 +259,17 @@ mimi_err_t feishu_channel_init_impl(channel_t *ch, const channel_config_t *cfg)
     /* Set WebSocket message handler early to avoid missing initial messages */
     gateway_set_on_message(s_priv.ws_gateway, on_ws_message, ch);
 
-    /* Get or create HTTP Gateway */
+    /* Get HTTP Gateway */
     s_priv.http_gateway = gateway_manager_find("http");
     if (!s_priv.http_gateway) {
         MIMI_LOGE(TAG, "HTTP Gateway not found");
         return MIMI_ERR_NOT_FOUND;
     }
 
-    /* Configure HTTP Gateway for Feishu (base domain only) */
-    mimi_err_t err = http_client_gateway_configure("https://open.feishu.cn",
-                                            NULL, 30000);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to configure HTTP Gateway: %d", err);
-        return err;
-    }
+    /* HTTP Gateway base_url will be set per-request via options */
 
     /* Register mapping for Input Processor */
-    err = router_register_mapping("feishu", "feishu");
+    mimi_err_t err = router_register_mapping("feishu", "feishu");
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to register input processor mapping");
         return err;

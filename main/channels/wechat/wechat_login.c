@@ -17,6 +17,7 @@
 
 static const char *TAG = "wechat_login";
 static const int QR_EXPIRY_SECONDS = 300;  /* 5 minutes */
+static const char *WECHAT_BASE_URL = "https://ilinkai.weixin.qq.com/";
 
 static wechat_login_status_t s_status = {0};
 static wechat_login_state_cb s_callback = NULL;
@@ -68,10 +69,6 @@ static gateway_t* get_http_gateway(void)
         MIMI_LOGE(TAG, "HTTP Gateway not found");
         return NULL;
     }
-
-    /* NOTE: We no longer call http_client_gateway_configure() here for token!
-     * Base URL should be set during channel_init, and per-request auth tokens
-     * are now passed via stack parameters to _with_token() API variants. */
     return gw;
 }
 
@@ -106,11 +103,10 @@ mimi_err_t wechat_login_start_qr(void)
     char response[4096];
     response[0] = '\0';
     
-    /* QR login API does NOT require authentication - pass NULL for token
-     * This avoids calling http_client_gateway_configure() which causes race conditions */
-    mimi_err_t err = http_client_gateway_get_with_token(gw,
+    /* QR login API: use WeChat base_url, no auth token needed */
+    mimi_err_t err = http_client_gateway_get(gw,
                                              "ilink/bot/get_bot_qrcode?bot_type=3",
-                                             NULL, NULL,  /* No auth needed */
+                                             HTTP_OPTS_BASE(WECHAT_BASE_URL),
                                              response, sizeof(response));
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to get QR code: %d", err);
@@ -190,15 +186,20 @@ mimi_err_t wechat_login_check_status(void)
     snprintf(endpoint, sizeof(endpoint),
              "ilink/bot/get_qrcode_status?qrcode=%s",
              s_status.qrcode_id);
-    
+
+    /* QR status API: needs iLink-App-ClientVersion header */
+    http_request_options_t opts = {
+        .base_url = WECHAT_BASE_URL,
+        .auth_token = NULL,
+        .extra_headers = "iLink-App-ClientVersion: 1\r\n",
+        .timeout_ms = 0
+    };
+
     char response[4096];
     response[0] = '\0';
-    
-    /* QR status API does NOT require authentication - pass NULL for token
-     * This avoids calling http_client_gateway_configure() which causes race conditions */
-    mimi_err_t err = http_client_gateway_get_with_token(gw, endpoint,
-                                                        NULL, NULL,  /* No auth needed */
-                                                        response, sizeof(response));
+
+    mimi_err_t err = http_client_gateway_get(gw, endpoint, &opts,
+                                             response, sizeof(response));
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "Failed to check QR status: %d", err);
         return err;

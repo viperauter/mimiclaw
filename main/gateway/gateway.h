@@ -52,10 +52,15 @@ typedef struct {
             int reconnect_interval_ms;  /* Reconnect interval */
         } ws_client;
         
+        /* HTTP client: optional defaults for a shared HTTP gateway instance.
+         * Many backends (Telegram/QQ/WeChat) use different base URLs and tokens per
+         * request; those are supplied via http_request_options_t at call time.
+         * Fields here seed the HTTP client gateway defaults when gateway_init() is
+         * called with cfg->type == GATEWAY_TYPE_HTTP_CLIENT. */
         struct {
-            const char *base_url;       /* Base URL, e.g., "https://api.telegram.org" */
-            const char *token;          /* Authentication token */
-            int timeout_ms;             /* Request timeout */
+            const char *base_url;       /* Default base URL, trailing slash optional */
+            const char *token;          /* Default Bearer token (if applicable) */
+            int timeout_ms;             /* Default request timeout */
         } http;
     } config;
 } gateway_config_t;

@@ -627,6 +627,55 @@ static void start_async_tools(agent_request_ctx_t *ctx, const llm_response_t *re
                     MIMI_LOGE(TAG, "Failed to send confirmation request: %s", mimi_err_to_name(err));
                     tool_call_context_destroy(tool_ctx);
                 }
+            } else {
+                /* IMPORTANT: do not silently drop tools.
+                 * If we can't allocate a confirmation context, provide a clear signal
+                 * in logs and in the conversation history so the LLM can adapt next turn
+                 * (e.g., retry tools sequentially).
+                 */
+                int active = tool_call_context_get_active_count();
+                int pending = tool_call_context_get_pending_count();
+                const char *tool_name = call->name[0] ? call->name : "tool";
+                const char *tool_call_id = call->id[0] ? call->id : "";
+
+                MIMI_LOGE(TAG,
+                          "Tool scheduling failed (no confirmation context slots): tool=%s tool_call_id=%s active=%d pending=%d max=%d",
+                          tool_name, tool_call_id, active, pending, TOOL_CALL_MAX_CONTEXTS);
+
+                char active_buf[16];
+                snprintf(active_buf, sizeof(active_buf), "%d", active);
+                llm_trace_event_kv(ctx->trace_id, "tool_schedule_failed",
+                                   "tool_name", tool_name,
+                                   "tool_call_id", tool_call_id,
+                                   "reason", "no_confirmation_context_slots",
+                                   "active", active_buf);
+
+                char msgbuf[512];
+                snprintf(msgbuf, sizeof(msgbuf),
+                         "Tool scheduling failed: `%s` (tool_call_id=%s). "
+                         "Reason: no available confirmation-context slots (active=%d, pending=%d, max=%d). "
+                         "Please retry; the assistant should call tools sequentially.",
+                         tool_name, tool_call_id[0] ? tool_call_id : "(empty)",
+                         active, pending, TOOL_CALL_MAX_CONTEXTS);
+
+                /* Persist for LLM visibility on subsequent turns */
+                mimi_err_t se = session_append(ctx->channel, ctx->chat_id, "assistant", msgbuf);
+                if (se != MIMI_OK) {
+                    MIMI_LOGW(TAG, "Session append(schedule failure) failed for %s:%s: %s",
+                              ctx->channel, ctx->chat_id, mimi_err_to_name(se));
+                }
+
+                /* Also notify user immediately */
+                mimi_msg_t out = {0};
+                strncpy(out.channel, ctx->channel, sizeof(out.channel) - 1);
+                strncpy(out.chat_id, ctx->chat_id, sizeof(out.chat_id) - 1);
+                out.type = MIMI_MSG_TYPE_TEXT;
+                out.content = strdup(msgbuf);
+                if (out.content) {
+                    if (message_bus_push_outbound(&out) != MIMI_OK) {
+                        free(out.content);
+                    }
+                }
             }
             /* For tools requiring confirmation, we don't increment completed_calls here
              * because the confirmation process will handle it asynchronously */

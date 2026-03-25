@@ -1,6 +1,7 @@
 #include "log.h"
 #include "path_utils.h"
 #include "fs/fs.h"
+#include "mongoose.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -16,6 +17,28 @@ static bool s_log_to_stderr = true;
 static char s_log_file_path[1024];
 static int s_rotate_max_file_bytes = 5 * 1024 * 1024; /* 5MB */
 static int s_rotate_max_files = 3;
+
+/* Mongoose defaults to mg_pfn_stdout (putchar); when file-only logging, route it to the log file. */
+static void mimi_mongoose_log_char(char c, void *param)
+{
+    (void)param;
+    if (!s_log_file) {
+        return;
+    }
+    fputc(c, s_log_file);
+    if (c == '\n') {
+        fflush(s_log_file);
+    }
+}
+
+static void mimi_mongoose_sync_sink(bool file_only_with_open_file)
+{
+    if (file_only_with_open_file) {
+        mg_log_set_fn(mimi_mongoose_log_char, NULL);
+    } else {
+        mg_log_set_fn(mg_pfn_stdout, NULL);
+    }
+}
 
 /* For linenoise compatibility - now using microrl which doesn't need this */
 static int g_prompt_hidden = 0;
@@ -159,6 +182,7 @@ mimi_err_t mimi_log_set_output_file(const char *path, bool also_stderr)
     s_log_to_stderr = also_stderr;
     strncpy(s_log_file_path, path, sizeof(s_log_file_path) - 1);
     s_log_file_path[sizeof(s_log_file_path) - 1] = '\0';
+    mimi_mongoose_sync_sink(!also_stderr);
     return MIMI_OK;
 }
 
@@ -176,6 +200,7 @@ void mimi_log_close_output_file(void)
     }
     s_log_file_path[0] = '\0';
     s_log_to_stderr = true;
+    mimi_mongoose_sync_sink(false);
 }
 
 bool mimi_log_is_enabled(void)

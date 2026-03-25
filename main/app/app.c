@@ -163,11 +163,6 @@ mimi_err_t app_init(const char *config_path,
     const char *feishu_app_id = mimi_cfg_get_str(feishu, "appId", "");
     const char *workspace = mimi_cfg_get_str(defaults, "workspace", "");
 
-    /* Setup logging after config load (config may specify log level) */
-    if (enable_logs) {
-        mimi_log_setup(log_level ? log_level : (log_level_cfg && log_level_cfg[0] ? log_level_cfg : "info"));
-    }
-
     bool log_to_file_cfg = mimi_cfg_get_bool(logging, "toFile", false);
     bool log_to_stderr_cfg = mimi_cfg_get_bool(logging, "toStderr", true);
     const char *log_dir_cfg = mimi_cfg_get_str(logging, "dir", "logs");
@@ -175,20 +170,17 @@ mimi_err_t app_init(const char *config_path,
     int log_max_file_bytes_cfg = mimi_cfg_get_int(logging, "maxFileBytes", 5 * 1024 * 1024);
     int log_max_files_cfg = mimi_cfg_get_int(logging, "maxFiles", 3);
 
-    /* Print OS backend version */
-    MIMI_LOGI("app", "OS backend: %s", mimi_os_get_version());
-    MIMI_LOGI("app", "Config: model=%s provider=%s", model, provider);
+    /* CLI -l/-f or config logging.toFile: enable log pipeline (otherwise config logging is ignored). */
+    bool want_log_output =
+        enable_logs || log_to_file_cfg || (log_file_path && log_file_path[0]);
 
-    MIMI_LOGD("app", "Config loaded: feishu_enabled=%d, feishu_app_id=%s",
-              feishu_enabled, (feishu_app_id && feishu_app_id[0]) ? feishu_app_id : "(empty)");
-
-    if (mimi_workspace_bootstrap(cfg_path, true) != MIMI_OK) {
-        MIMI_LOGE("app", "workspace bootstrap failed");
-        return MIMI_ERR_FAIL;
+    /* Setup logging after config load (config may specify log level) */
+    if (want_log_output) {
+        mimi_log_setup(log_level ? log_level : (log_level_cfg && log_level_cfg[0] ? log_level_cfg : "info"));
     }
 
-    /* Configure file logging after workspace is ready. */
-    if (enable_logs && (log_to_file_cfg || (log_file_path && log_file_path[0]))) {
+    /* File logging before bootstrap and routine MIMI_LOG lines so toStderr is honored. */
+    if (want_log_output && (log_to_file_cfg || (log_file_path && log_file_path[0]))) {
         char resolved_log_path[1024];
         resolved_log_path[0] = '\0';
 
@@ -220,6 +212,18 @@ mimi_err_t app_init(const char *config_path,
             }
         }
     }
+
+    if (mimi_workspace_bootstrap(cfg_path, true) != MIMI_OK) {
+        MIMI_LOGE("app", "workspace bootstrap failed");
+        return MIMI_ERR_FAIL;
+    }
+
+    /* Print OS backend version */
+    MIMI_LOGI("app", "OS backend: %s", mimi_os_get_version());
+    MIMI_LOGI("app", "Config: model=%s provider=%s", model, provider);
+
+    MIMI_LOGD("app", "Config loaded: feishu_enabled=%d, feishu_app_id=%s",
+              feishu_enabled, (feishu_app_id && feishu_app_id[0]) ? feishu_app_id : "(empty)");
 
     MIMI_LOGD("app", "workspace=%s config=%s",
               (workspace && workspace[0]) ? workspace : "(default)", cfg_path);

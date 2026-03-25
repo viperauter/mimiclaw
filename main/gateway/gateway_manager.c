@@ -247,6 +247,10 @@ mimi_err_t gateway_system_init(bool gateway_mode)
     if (http_gw) {
         if (gateway_manager_register(http_gw) != MIMI_OK) {
             MIMI_LOGW(TAG, "Failed to register HTTP gateway");
+        } else {
+            if (gateway_init(http_gw, NULL) != MIMI_OK) {
+                MIMI_LOGW(TAG, "Failed to initialize HTTP gateway");
+            }
         }
     }
     

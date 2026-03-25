@@ -2,6 +2,9 @@
  * HTTP Client Gateway Implementation
  *
  * Provides HTTP client functionality using mongoose.
+ *
+ * Design: All request parameters are passed via http_request_options_t for
+ * full reentrancy and thread-safety. No global state is modified during requests.
  */
 
 #include "gateway/http/http_client_gateway.h"
@@ -16,13 +19,17 @@
 
 static const char *TAG = "gw_http";
 
-/* Synchronous callback for blocking HTTP requests */
+/* HTTP Client Gateway private data */
 typedef struct {
-    mimi_err_t result;
-    bool completed;
-    mimi_mutex_t *mutex;
-    mimi_cond_t *cond;
-} sync_callback_data_t;
+    char base_url[256];
+    char api_token[128];
+    int timeout_ms;
+    char proxy_host[128];
+    int proxy_port;
+    bool initialized;
+    bool connected;
+    gateway_t *gateway;
+} http_client_gateway_priv_t;
 
 /* Global HTTP Client Gateway instance */
 static http_client_gateway_priv_t s_http_priv = {0};
@@ -30,35 +37,35 @@ static gateway_t g_http_gateway = {0};
 
 /* HTTP Client Gateway implementation functions */
 
-static mimi_err_t http_client_gateway_init_impl(gateway_t *gw, const http_client_gateway_config_t *cfg)
+static mimi_err_t http_client_gateway_init_impl(gateway_t *gw, const gateway_config_t *cfg)
 {
     http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
     
-    if (priv->initialized) {
-        MIMI_LOGW(TAG, "HTTP Gateway already initialized");
-        return MIMI_OK;
-    }
+    priv->base_url[0] = '\0';
+    priv->api_token[0] = '\0';
+    priv->timeout_ms = 30000;
     
-    /* Store configuration */
-    if (cfg->base_url) {
-        strncpy(priv->base_url, cfg->base_url, sizeof(priv->base_url) - 1);
-    }
-    if (cfg->api_token) {
-        strncpy(priv->api_token, cfg->api_token, sizeof(priv->api_token) - 1);
-    }
-    priv->timeout_ms = cfg->timeout_ms > 0 ? cfg->timeout_ms : 30000;
-    
-    if (cfg->proxy_host) {
-        strncpy(priv->proxy_host, cfg->proxy_host, sizeof(priv->proxy_host) - 1);
-        priv->proxy_port = cfg->proxy_port > 0 ? cfg->proxy_port : 8080;
+    /* Optional defaults from unified gateway_config_t (per-request opts still override). */
+    if (cfg && cfg->type == GATEWAY_TYPE_HTTP_CLIENT) {
+        if (cfg->config.http.base_url && cfg->config.http.base_url[0]) {
+            strncpy(priv->base_url, cfg->config.http.base_url, sizeof(priv->base_url) - 1);
+            priv->base_url[sizeof(priv->base_url) - 1] = '\0';
+        }
+        if (cfg->config.http.token && cfg->config.http.token[0]) {
+            strncpy(priv->api_token, cfg->config.http.token, sizeof(priv->api_token) - 1);
+            priv->api_token[sizeof(priv->api_token) - 1] = '\0';
+        }
+        if (cfg->config.http.timeout_ms > 0) {
+            priv->timeout_ms = cfg->config.http.timeout_ms;
+        }
     }
     
     priv->gateway = gw;
     priv->initialized = true;
     priv->connected = true;
-    gw->is_initialized = true;
+    /* gw->is_initialized is set only by gateway_init() after this returns. */
     
-    MIMI_LOGD(TAG, "HTTP Gateway initialized (base_url: %s)", priv->base_url);
+    MIMI_LOGD(TAG, "HTTP Gateway initialized");
     return MIMI_OK;
 }
 
@@ -159,29 +166,67 @@ gateway_t* http_client_gateway_get_instance(void)
     return &g_http_gateway;
 }
 
-mimi_err_t http_client_gateway_configure(const char *base_url, const char *api_token, int timeout_ms)
+/**
+ * Internal helper to build URL and headers from options
+ */
+static mimi_err_t build_request_context(http_client_gateway_priv_t *priv,
+                                        const http_request_options_t *opts,
+                                        const char *endpoint,
+                                        char *url, size_t url_size,
+                                        char *headers, size_t headers_size,
+                                        int *timeout_ms,
+                                        bool is_post)
 {
-    http_client_gateway_config_t cfg = {
-        .base_url = base_url,
-        .api_token = api_token,
-        .timeout_ms = timeout_ms > 0 ? timeout_ms : 30000,
-        .proxy_host = NULL,
-        .proxy_port = 0
-    };
+    /* Build URL: use opts->base_url if provided, else priv->base_url */
+    const char *base = (opts && opts->base_url) ? opts->base_url : priv->base_url;
+    if (!base || !base[0]) {
+        MIMI_LOGE(TAG, "HTTP request missing base_url (pass opts->base_url or init with gateway_config_t.http)");
+        return MIMI_ERR_INVALID_ARG;
+    }
+    if (!endpoint || !endpoint[0]) {
+        MIMI_LOGE(TAG, "HTTP request missing endpoint");
+        return MIMI_ERR_INVALID_ARG;
+    }
+    snprintf(url, url_size, "%s%s", base, endpoint);
     
-    return http_client_gateway_init_impl(&g_http_gateway, &cfg);
+    /* Build headers */
+    int offset = 0;
+    
+    /* Authorization: use opts->auth_token if provided, else priv->api_token */
+    const char *token = (opts && opts->auth_token) ? opts->auth_token : priv->api_token;
+    if (token && token[0]) {
+        offset += snprintf(headers + offset, headers_size - offset,
+                          "Authorization: Bearer %s\r\n", token);
+    }
+    
+    /* Content-Type for POST */
+    if (is_post) {
+        offset += snprintf(headers + offset, headers_size - offset,
+                          "Content-Type: application/json\r\n");
+    }
+    
+    /* Extra headers from opts */
+    if (opts && opts->extra_headers && opts->extra_headers[0]) {
+        offset += snprintf(headers + offset, headers_size - offset,
+                          "%s\r\n", opts->extra_headers);
+    }
+    
+    /* Timeout: use opts->timeout_ms if provided and > 0, else priv->timeout_ms */
+    *timeout_ms = (opts && opts->timeout_ms > 0) ? opts->timeout_ms : priv->timeout_ms;
+    return MIMI_OK;
 }
 
-/**
- * Internal helper for HTTP GET with optional extra headers
- * (reentrant - uses per-request auth token to avoid race conditions)
- */
-static mimi_err_t http_client_gateway_get_internal(gateway_t *gw, const char *endpoint,
-                                                   const char *auth_token,     /* NEW: per-request token */
-                                                   const char *extra_headers,
-                                                   char *response, size_t response_len)
+mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
+                                   const http_request_options_t *opts,
+                                   char *response, size_t response_len)
 {
+    if (!gw) {
+        return MIMI_ERR_INVALID_ARG;
+    }
     http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
+    if (!priv) {
+        return MIMI_ERR_INVALID_ARG;
+    }
     
     if (!priv->initialized || !priv->connected) {
         return MIMI_ERR_INVALID_STATE;
@@ -191,47 +236,25 @@ static mimi_err_t http_client_gateway_get_internal(gateway_t *gw, const char *en
         return MIMI_ERR_INVALID_ARG;
     }
     
-    /* Build full URL */
+    /* Build URL and headers */
     char url[512];
-    snprintf(url, sizeof(url), "%s%s", priv->base_url, endpoint);
-    
-    /* Build complete headers: Authorization (from param) + persistent + call-site headers */
     char headers[768] = {0};
-    int offset = 0;
+    int timeout_ms;
     
-    /* Use token from PARAMETER first (caller's stack), fall back to stored config */
-    if (auth_token && auth_token[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "Authorization: Bearer %s\r\n",
-                          auth_token);
-    } else if (priv->api_token[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "Authorization: Bearer %s\r\n",
-                          priv->api_token);
-    }
-    
-    /* Add persistent extra headers */
-    if (priv->extra_headers[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "%s\r\n",
-                          priv->extra_headers);
-    }
-    
-    /* Add call-site extra headers (passed in from caller's stack/heap) */
-    if (extra_headers && extra_headers[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "%s\r\n",
-                          extra_headers);
+    mimi_err_t build_err = build_request_context(priv, opts, endpoint, url, sizeof(url),
+                          headers, sizeof(headers), &timeout_ms, false);
+    if (build_err != MIMI_OK) {
+        return build_err;
     }
     
     /* Prepare HTTP request */
     mimi_http_request_t req = {
         .method = "GET",
         .url = url,
-        .headers = offset > 0 ? headers : NULL,
+        .headers = headers[0] ? headers : NULL,
         .body = NULL,
         .body_len = 0,
-        .timeout_ms = priv->timeout_ms
+        .timeout_ms = timeout_ms
     };
     
     /* Execute HTTP request synchronously */
@@ -262,42 +285,16 @@ static mimi_err_t http_client_gateway_get_internal(gateway_t *gw, const char *en
     return MIMI_OK;
 }
 
-mimi_err_t http_client_gateway_get(gateway_t *gw, const char *endpoint,
-                                   char *response, size_t response_len)
-{
-    return http_client_gateway_get_internal(gw, endpoint, NULL, NULL, response, response_len);
-}
-
-mimi_err_t http_client_gateway_get_ex(gateway_t *gw, const char *endpoint,
-                                      const char *extra_headers,
-                                      char *response, size_t response_len)
-{
-    return http_client_gateway_get_internal(gw, endpoint, NULL, extra_headers, response, response_len);
-}
-
-/**
- * Send HTTP GET request with custom auth token (per-request)
- * @param auth_token If provided, uses this token instead of stored config token
- */
-mimi_err_t http_client_gateway_get_with_token(gateway_t *gw, const char *endpoint,
-                                              const char *auth_token,
-                                              const char *extra_headers,
-                                              char *response, size_t response_len)
-{
-    return http_client_gateway_get_internal(gw, endpoint, auth_token, extra_headers, response, response_len);
-}
-
-/**
- * Internal helper for HTTP POST with optional extra headers
- * (reentrant - uses per-request auth token to avoid race conditions)
- */
-static mimi_err_t http_client_gateway_post_internal(gateway_t *gw, const char *endpoint,
-                                                    const char *auth_token,     /* NEW: per-request token */
-                                                    const char *extra_headers,
-                                                    const char *data, size_t data_len,
-                                                    char *response, size_t response_len)
+mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
+                                    const http_request_options_t *opts,
+                                    const char *data, size_t data_len,
+                                    char *response, size_t response_len)
 {
     http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
+    
+    if (!gw || !priv) {
+        return MIMI_ERR_INVALID_ARG;
+    }
     
     if (!priv->initialized || !priv->connected) {
         return MIMI_ERR_INVALID_STATE;
@@ -307,41 +304,15 @@ static mimi_err_t http_client_gateway_post_internal(gateway_t *gw, const char *e
         return MIMI_ERR_INVALID_ARG;
     }
     
-    /* Build full URL */
+    /* Build URL and headers */
     char url[512];
-    snprintf(url, sizeof(url), "%s%s", priv->base_url, endpoint);
-    
-    /* Build complete headers: Authorization (from param) + Content-Type + persistent + call-site headers */
     char headers[768] = {0};
-    int offset = 0;
+    int timeout_ms;
     
-    /* Use token from PARAMETER first (caller's stack), fall back to stored config */
-    if (auth_token && auth_token[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "Authorization: Bearer %s\r\n",
-                          auth_token);
-    } else if (priv->api_token[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "Authorization: Bearer %s\r\n",
-                          priv->api_token);
-    }
-    
-    /* Always add Content-Type for POST */
-    offset += snprintf(headers + offset, sizeof(headers) - offset,
-                      "Content-Type: application/json\r\n");
-    
-    /* Add persistent extra headers */
-    if (priv->extra_headers[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "%s\r\n",
-                          priv->extra_headers);
-    }
-    
-    /* Add call-site extra headers (passed in from caller's stack/heap) */
-    if (extra_headers && extra_headers[0]) {
-        offset += snprintf(headers + offset, sizeof(headers) - offset,
-                          "%s\r\n",
-                          extra_headers);
+    mimi_err_t build_err = build_request_context(priv, opts, endpoint, url, sizeof(url),
+                          headers, sizeof(headers), &timeout_ms, true);
+    if (build_err != MIMI_OK) {
+        return build_err;
     }
     
     /* Prepare HTTP request */
@@ -351,7 +322,7 @@ static mimi_err_t http_client_gateway_post_internal(gateway_t *gw, const char *e
         .headers = headers,
         .body = (const uint8_t *)data,
         .body_len = data_len,
-        .timeout_ms = priv->timeout_ms
+        .timeout_ms = timeout_ms
     };
     
     /* Execute HTTP request synchronously */
@@ -382,65 +353,8 @@ static mimi_err_t http_client_gateway_post_internal(gateway_t *gw, const char *e
     return MIMI_OK;
 }
 
-mimi_err_t http_client_gateway_post(gateway_t *gw, const char *endpoint,
-                                    const char *data, size_t data_len,
-                                    char *response, size_t response_len)
-{
-    return http_client_gateway_post_internal(gw, endpoint, NULL, NULL, data, data_len, response, response_len);
-}
-
-mimi_err_t http_client_gateway_post_ex(gateway_t *gw, const char *endpoint,
-                                       const char *extra_headers,
-                                       const char *data, size_t data_len,
-                                       char *response, size_t response_len)
-{
-    return http_client_gateway_post_internal(gw, endpoint, NULL, extra_headers, data, data_len, response, response_len);
-}
-
-/**
- * Send HTTP POST request with custom auth token (per-request)
- * @param auth_token If provided, uses this token instead of stored config token
- */
-mimi_err_t http_client_gateway_post_with_token(gateway_t *gw, const char *endpoint,
-                                               const char *auth_token,
-                                               const char *extra_headers,
-                                               const char *data, size_t data_len,
-                                               char *response, size_t response_len)
-{
-    return http_client_gateway_post_internal(gw, endpoint, auth_token, extra_headers, data, data_len, response, response_len);
-}
-
 bool http_client_gateway_is_connected(gateway_t *gw)
 {
     http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
     return priv && priv->initialized && priv->connected;
 }
-
-/**
- * Set persistent extra headers (remains until explicitly cleared)
- * Headers format: "Header1: value\r\nHeader2: value"
- * 
- * For request-specific headers, use the _ex() variant functions which
- * accept extra_headers as a parameter (fully reentrant/thread-safe).
- */
-mimi_err_t http_client_gateway_set_persistent_headers(gateway_t *gw, const char *headers)
-{
-    if (!gw) {
-        return MIMI_ERR_INVALID_ARG;
-    }
-    
-    http_client_gateway_priv_t *priv = (http_client_gateway_priv_t *)gw->priv_data;
-    if (!priv) {
-        return MIMI_ERR_INVALID_STATE;
-    }
-    
-    if (headers && headers[0]) {
-        strncpy(priv->extra_headers, headers, sizeof(priv->extra_headers) - 1);
-        priv->extra_headers[sizeof(priv->extra_headers) - 1] = '\0';
-    } else {
-        priv->extra_headers[0] = '\0';
-    }
-    
-    return MIMI_OK;
-}
-
