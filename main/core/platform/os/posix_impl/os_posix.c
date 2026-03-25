@@ -1,6 +1,7 @@
 #include "os/os.h"
 #include "log.h"
 
+#define _GNU_SOURCE
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +47,13 @@ static void *task_trampoline(void *p)
     strncpy(name, t->name, sizeof(name) - 1);
     name[sizeof(name) - 1] = '\0';
     free(t);
+
+#if defined(__linux__)
+    if (name[0]) {
+        name[15] = '\0';
+        pthread_setname_np(pthread_self(), name);
+    }
+#endif
 
     MIMI_LOGI("os", "task start: %s", name[0] ? name : "(unnamed)");
     fn(arg);

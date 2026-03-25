@@ -5,6 +5,7 @@
 #include "tools/tool_files.h"
 #include "tools/tool_cron.h"
 #include "tools/tool_exec.h"
+#include "tools/tool_mcp_refresh.h"
 #include "tools/tool_provider.h"
 #include "tools/providers/mcp_provider.h"
 #include "mimi_config.h"
@@ -99,7 +100,9 @@ static void build_tools_json(void)
     }
     cJSON_Delete(provider_arr);
 
-    free(s_tools_json);
+    /* Avoid freeing the old JSON buffer here: other threads/loops may still
+     * hold the previous pointer. We treat refreshed JSON as a short-lived
+     * generation and leak previous buffers (updated only at init/refresh). */
     s_tools_json = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
 
@@ -213,6 +216,16 @@ mimi_err_t tool_registry_init(void)
     };
     register_tool(&exec);
 
+    /* Register MCP refresh tool (background discovery + rebuild tools_json) */
+    mimi_tool_t mcp_rf = {
+        .name = "mcp_refresh",
+        .description = tool_mcp_refresh_description(),
+        .schema_json = tool_mcp_refresh_schema_json,
+        .requires_confirmation = true,
+        .execute = tool_mcp_refresh_execute,
+    };
+    register_tool(&mcp_rf);
+
 #if MIMI_ENABLE_SUBAGENT
     /* Subagent orchestration: spawn/join/cancel/list/steer */
     (void)subagent_manager_init();
@@ -235,6 +248,15 @@ mimi_err_t tool_registry_init(void)
 const char *tool_registry_get_tools_json(void)
 {
     return s_tools_json;
+}
+
+mimi_err_t tool_registry_refresh_tools_json(void)
+{
+    /* Rebuild provider tools JSON then rebuild the combined tool list JSON. */
+    tool_provider_invalidate_tools_json_cache();
+    build_tools_json();
+    MIMI_LOGI(TAG, "Tool registry JSON refreshed");
+    return MIMI_OK;
 }
 
 mimi_err_t tool_registry_execute(const char *name, const char *input_json,

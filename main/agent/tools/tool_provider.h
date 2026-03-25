@@ -27,3 +27,7 @@ mimi_err_t tool_provider_execute(const char *tool_name, const char *input_json,
                                  char *output, size_t output_size,
                                  const mimi_session_ctx_t *session_ctx);
 bool tool_provider_requires_confirmation(const char *tool_name, bool fallback);
+
+/* Invalidate provider-level cached "all tools json" so a subsequent rebuild
+ * picks up new tool schemas from providers. */
+void tool_provider_invalidate_tools_json_cache(void);

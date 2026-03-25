@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "cJSON.h"
 #include "log.h"
+#include "os/os.h"
 
 static const char *TAG = "tool_provider";
 #define MAX_PROVIDERS 8
@@ -12,16 +13,21 @@ static const char *TAG = "tool_provider";
 static mimi_tool_provider_t s_providers[MAX_PROVIDERS];
 static int s_provider_count = 0;
 static char *s_tools_json_cache = NULL;
+static mimi_mutex_t *s_cache_mu = NULL;
 
 static void invalidate_cache(void)
 {
-    free(s_tools_json_cache);
+    /* Do not free old buffer to avoid potential UAF for readers that still
+     * hold a pointer returned from tool_provider_get_all_tools_json(). */
     s_tools_json_cache = NULL;
 }
 
 mimi_err_t tool_provider_registry_init(void)
 {
     s_provider_count = 0;
+    if (!s_cache_mu) {
+        (void)mimi_mutex_create(&s_cache_mu);
+    }
     invalidate_cache();
     return MIMI_OK;
 }
@@ -59,8 +65,11 @@ mimi_err_t tool_provider_register(const mimi_tool_provider_t *provider)
 
 const char *tool_provider_get_all_tools_json(void)
 {
+    if (s_cache_mu) mimi_mutex_lock(s_cache_mu);
     if (s_tools_json_cache) {
-        return s_tools_json_cache;
+        const char *ret = s_tools_json_cache;
+        if (s_cache_mu) mimi_mutex_unlock(s_cache_mu);
+        return ret;
     }
 
     cJSON *arr = cJSON_CreateArray();
@@ -89,7 +98,16 @@ const char *tool_provider_get_all_tools_json(void)
     if (!s_tools_json_cache) {
         s_tools_json_cache = strdup("[]");
     }
-    return s_tools_json_cache ? s_tools_json_cache : "[]";
+    const char *ret = s_tools_json_cache ? s_tools_json_cache : "[]";
+    if (s_cache_mu) mimi_mutex_unlock(s_cache_mu);
+    return ret;
+}
+
+void tool_provider_invalidate_tools_json_cache(void)
+{
+    if (s_cache_mu) mimi_mutex_lock(s_cache_mu);
+    invalidate_cache();
+    if (s_cache_mu) mimi_mutex_unlock(s_cache_mu);
 }
 
 static bool has_prefix(const char *s, const char *prefix)

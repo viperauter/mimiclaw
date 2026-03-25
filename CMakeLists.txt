@@ -152,6 +152,7 @@ list(APPEND APP_SRC
     main/agent/tools/tool_web_search.c
     main/agent/tools/tool_get_time.c
     main/agent/tools/tool_exec.c
+    main/agent/tools/tool_mcp_refresh.c
     main/agent/tools/tool_subagents.c
 
     # Interface modules (moved to interface/ directory)
@@ -166,6 +167,7 @@ list(APPEND APP_SRC
     main/interface/commands/cmd_ask.c
     main/interface/commands/cmd_exit.c
     main/interface/commands/cmd_wechat_login.c
+    main/interface/commands/cmd_mcp_refresh.c
     main/interface/router/router.c
 
     # Gateway layer

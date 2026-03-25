@@ -4,9 +4,11 @@
 
 #include "config_view.h"
 #include "tools/tool_exec.h"
+#include "tools/tool_registry.h"
 #include "cJSON.h"
 #include "log.h"
 #include "os/os.h"
+#include "runtime.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -29,6 +31,11 @@ static char *s_tools_json_merged = NULL;
 
 static mimi_mutex_t *s_mcp_mu = NULL;
 static uint64_t s_rpc_id_next = 1;
+
+static volatile bool s_discovery_running = false;
+static volatile int s_discovery_req_max_attempts = 4;
+static volatile int s_discovery_req_delay_ms = 500;
+static volatile bool s_tools_dirty = true; /* merged tools json needs rebuild */
 
 static long long now_ms(void)
 {
@@ -135,6 +142,9 @@ static char *rpc_request(mcp_server_t *s, const char *method, cJSON *params)
     if (!s || !method) return NULL;
 
     if (s->use_http) {
+        /* Protect HTTP session state (session_id / SSE last_event_id) which
+         * lives in mcp_server_t and may be mutated by synchronous exchange. */
+        lock_mcp();
         char id_str[32];
         snprintf(id_str, sizeof(id_str), "%llu", (unsigned long long)s_rpc_id_next++);
         cJSON *req = cJSON_CreateObject();
@@ -144,9 +154,13 @@ static char *rpc_request(mcp_server_t *s, const char *method, cJSON *params)
         if (params) cJSON_AddItemToObject(req, "params", params);
         char *body = cJSON_PrintUnformatted(req);
         cJSON_Delete(req);
-        if (!body) return NULL;
+        if (!body) {
+            unlock_mcp();
+            return NULL;
+        }
         char *ret = mcp_http_exchange(s, id_str, body, handle_server_notification, handle_server_request);
         free(body);
+        unlock_mcp();
         return ret;
     }
     lock_mcp();
@@ -160,15 +174,20 @@ static mimi_err_t rpc_notify(mcp_server_t *s, const char *method, cJSON *params)
 {
     if (!s || !method) return MIMI_ERR_INVALID_ARG;
     if (s->use_http) {
+        lock_mcp();
         cJSON *req = cJSON_CreateObject();
         cJSON_AddStringToObject(req, "jsonrpc", "2.0");
         cJSON_AddStringToObject(req, "method", method);
         if (params) cJSON_AddItemToObject(req, "params", params);
         char *body = cJSON_PrintUnformatted(req);
         cJSON_Delete(req);
-        if (!body) return MIMI_ERR_NO_MEM;
+        if (!body) {
+            unlock_mcp();
+            return MIMI_ERR_NO_MEM;
+        }
         mimi_err_t herr = mcp_http_notify_post(s, body);
         free(body);
+        unlock_mcp();
         return herr;
     }
 
@@ -192,10 +211,125 @@ static mimi_err_t mcp_ping_if_needed(mcp_server_t *s)
 static mimi_err_t refresh_server_tools(mcp_server_t *s)
 {
     if (!s) return MIMI_ERR_INVALID_ARG;
+    MIMI_LOGI(TAG, "Refreshing tools for MCP server: %s (use_http=%d)", s->name, s->use_http);
     mimi_err_t err = mcp_do_initialize(s);
-    if (err != MIMI_OK) return err;
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "MCP initialize failed: server=%s err=%d", s->name, err);
+        return err;
+    }
+    MIMI_LOGI(TAG, "MCP initialize success: server=%s", s->name);
     (void)mcp_ping_if_needed(s);
-    return mcp_core_refresh_server_tools(s, mcp_do_initialize, rpc_request);
+    err = mcp_core_refresh_server_tools(s, mcp_do_initialize, rpc_request);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "MCP refresh tools failed: server=%s err=%d", s->name, err);
+    } else {
+        MIMI_LOGI(TAG, "MCP refresh tools success: server=%s", s->name);
+    }
+    return err;
+}
+
+static void mcp_discovery_task(void *arg)
+{
+    (void)arg;
+
+    /* Wait until the runtime event-loop thread is running, so synchronous
+     * HTTP/SSE discovery can make progress. */
+    for (int waited_ms = 0; waited_ms < 20000; waited_ms += 100) {
+        if (mimi_runtime_is_running()) break;
+        if (mimi_runtime_should_exit()) {
+            s_discovery_running = false;
+            return;
+        }
+        mimi_sleep_ms(100);
+    }
+
+    if (!mimi_runtime_is_running()) {
+        s_discovery_running = false;
+        return;
+    }
+
+    /* Short retry window during initialization. */
+    int max_attempts = s_discovery_req_max_attempts;
+    int delay_ms = s_discovery_req_delay_ms;
+    if (max_attempts < 1) max_attempts = 1;
+    if (delay_ms < 0) delay_ms = 0;
+
+    MIMI_LOGI(TAG, "MCP discovery started (max_attempts=%d delay_ms=%d)", max_attempts, delay_ms);
+
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        MIMI_LOGI(TAG, "MCP discovery attempt %d/%d", attempt + 1, max_attempts);
+
+        /* If any MCP server becomes available, we refresh the tool list
+         * immediately and don't wait for other slow/failed servers. */
+        bool any_ok = false;
+
+        for (int i = 0; i < s_server_count; i++) {
+            mcp_server_t *srv = &s_servers[i];
+            if (!srv->name[0]) continue;
+
+            size_t tools_len_before = 0;
+            bool tools_non_empty_before = false;
+            lock_mcp();
+            if (srv->tools_json) {
+                tools_len_before = strlen(srv->tools_json);
+                tools_non_empty_before = (strcmp(srv->tools_json, "[]") != 0);
+            }
+            unlock_mcp();
+
+            (void)refresh_server_tools(srv);
+
+            size_t tools_len_after = 0;
+            bool tools_non_empty_after = false;
+            lock_mcp();
+            if (srv->tools_json) {
+                tools_len_after = strlen(srv->tools_json);
+                tools_non_empty_after = (strcmp(srv->tools_json, "[]") != 0);
+            }
+            if (tools_non_empty_after) {
+                any_ok = true;
+                s_tools_dirty = true;
+            }
+            unlock_mcp();
+
+            MIMI_LOGI(TAG,
+                      "MCP server '%s': tools_before_non_empty=%d len_before=%zu tools_after_non_empty=%d len_after=%zu",
+                      srv->name,
+                      (int)tools_non_empty_before, tools_len_before,
+                      (int)tools_non_empty_after, tools_len_after);
+
+            if (any_ok) {
+                MIMI_LOGI(TAG, "MCP discovery: at least one server has tools; refreshing tool registry JSON");
+                (void)tool_registry_refresh_tools_json();
+                s_discovery_running = false;
+                return;
+            }
+        }
+
+        mimi_sleep_ms((uint32_t)delay_ms);
+        delay_ms *= 2;
+        if (delay_ms > 4000) delay_ms = 4000;
+    }
+
+    s_discovery_running = false;
+    MIMI_LOGW(TAG, "MCP discovery finished without finding any non-empty tools");
+}
+
+void mcp_provider_request_refresh(int max_attempts, int delay_ms)
+{
+    if (max_attempts < 1) max_attempts = 1;
+    if (delay_ms < 0) delay_ms = 0;
+
+    s_discovery_req_max_attempts = max_attempts;
+    s_discovery_req_delay_ms = delay_ms;
+
+    /* Only one discovery task at a time. */
+    if (s_discovery_running) {
+        MIMI_LOGI(TAG, "MCP discovery already running; request ignored");
+        return;
+    }
+
+    s_discovery_running = true; /* reserve slot; task will clear on exit */
+    (void)mimi_task_create_detached("mcp_discovery", mcp_discovery_task, NULL);
 }
 
 static mimi_err_t mcp_init(void)
@@ -238,11 +372,14 @@ static mimi_err_t mcp_init(void)
         dst->last_event_id[0] = '\0';
         dst->sse_retry_ms = 1000;
         dst->tools_json = NULL;
-        if (dst->name[0] && ((dst->use_http && dst->url[0]) || (!dst->use_http && dst->command[0]))) {
-            (void)refresh_server_tools(dst);
-        }
+        /* Do NOT do network discovery here. It would block startup and
+         * depends on the runtime event loop for progress. */
     }
     MIMI_LOGI(TAG, "Configured %d MCP servers", s_server_count);
+
+    /* Kick off initial discovery asynchronously. */
+    mcp_provider_request_refresh(4, 500);
+
     return MIMI_OK;
 }
 
@@ -266,14 +403,17 @@ static void rebuild_merged_tools_json(void)
 
 static const char *mcp_get_tools_json(void)
 {
-    for (int i = 0; i < s_server_count; i++) {
-        if (!s_servers[i].tools_json || strcmp(s_servers[i].tools_json, "[]") == 0) {
-            (void)refresh_server_tools(&s_servers[i]);
-        }
+    lock_mcp();
+    if (s_tools_dirty) {
+        clear_cache();
+        rebuild_merged_tools_json();
+        s_tools_dirty = false;
+    } else if (!s_tools_json_merged) {
+        rebuild_merged_tools_json();
     }
-    clear_cache();
-    if (!s_tools_json_merged) rebuild_merged_tools_json();
-    return s_tools_json_merged ? s_tools_json_merged : "[]";
+    const char *ret = s_tools_json_merged ? s_tools_json_merged : "[]";
+    unlock_mcp();
+    return ret;
 }
 
 static mcp_server_t *find_server_by_tool(const char *tool_name, const char **out_local_tool)

@@ -200,6 +200,7 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
     MIMI_LOGD(TAG, "HTTP exchange: err=%d status=%d body_len=%zu content_type=%s",
               herr, hresp.status, hresp.body_len, hresp.content_type ? hresp.content_type : "(null)");
     if (herr != MIMI_OK) {
+        MIMI_LOGE(TAG, "HTTP exchange failed: err=%d server=%s url=%s", herr, s->name, s->url);
         mimi_http_response_free(&hresp);
         return NULL;
     }
@@ -214,14 +215,20 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
         return NULL;
     }
     if (hresp.status >= 400 || !hresp.body) {
+        MIMI_LOGE(TAG, "HTTP exchange error: status=%d body_len=%zu server=%s url=%s",
+                  hresp.status, hresp.body_len, s->name, s->url);
         mimi_http_response_free(&hresp);
         return NULL;
     }
 
     char *ret = NULL;
     bool is_sse = (hresp.content_type && strstr(hresp.content_type, "text/event-stream"));
+    MIMI_LOGD(TAG, "HTTP exchange: is_sse=%d server=%s", is_sse, s->name);
     if (is_sse) ret = parse_sse_for_response(s, (const char *)hresp.body, id_str, on_notification, on_request);
     else ret = process_jsonrpc_message(s, (const char *)hresp.body, id_str, on_notification, on_request);
+    if (!ret) {
+        MIMI_LOGW(TAG, "HTTP exchange: no response parsed server=%s is_sse=%d", s->name, is_sse);
+    }
     mimi_http_response_free(&hresp);
 
     if (!ret && is_sse) {

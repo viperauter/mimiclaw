@@ -21,6 +21,8 @@ mimi_err_t tool_registry_init(void);
 
 const char *tool_registry_get_tools_json(void);
 
+mimi_err_t tool_registry_refresh_tools_json(void);
+
 mimi_err_t tool_registry_execute(const char *name, const char *input_json,
                                  char *output, size_t output_size,
                                  const mimi_session_ctx_t *session_ctx);
