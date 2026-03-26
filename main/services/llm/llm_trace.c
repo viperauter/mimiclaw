@@ -116,18 +116,12 @@ static void add_ts_fields(cJSON *obj, uint64_t ts_ms)
 
 static mimi_err_t ensure_trace_dir(char *dir_out, size_t dir_out_size)
 {
-    mimi_cfg_obj_t tracing = mimi_cfg_section("tracing");
     mimi_cfg_obj_t defaults = mimi_cfg_get_obj(mimi_cfg_section("agents"), "defaults");
     const char *workspace = mimi_cfg_get_str(defaults, "workspace", "./");
-    const char *dir_cfg = mimi_cfg_get_str(tracing, "dir", "traces");
+    const char *dir_cfg = "logs"; /* Fixed to workspace/logs (user cannot override). */
 
-    if (mimi_path_is_absolute(dir_cfg)) {
-        strncpy(dir_out, dir_cfg, dir_out_size - 1);
-        dir_out[dir_out_size - 1] = '\0';
-    } else {
-        if (mimi_path_join(workspace, dir_cfg, dir_out, dir_out_size) != 0) {
-            return MIMI_ERR_NO_MEM;
-        }
+    if (mimi_path_join(workspace, dir_cfg, dir_out, dir_out_size) != 0) {
+        return MIMI_ERR_NO_MEM;
     }
 
     /* Create directory (direct POSIX, supports absolute path). */
@@ -148,7 +142,7 @@ static mimi_err_t trace_file_path(char *path_out, size_t path_out_size, const ch
     if (err != MIMI_OK) return err;
 
     mimi_cfg_obj_t tracing = mimi_cfg_section("tracing");
-    const char *mode = mimi_cfg_get_str(tracing, "mode", "single"); /* "single" | "perSession" */
+    const char *mode = mimi_cfg_get_str(tracing, "mode", "perSession"); /* "single" | "perSession" */
 
     if (mode && strcmp(mode, "perSession") == 0) {
         const trace_bind_t *b = find_bind(trace_id);

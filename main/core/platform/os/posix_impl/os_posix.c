@@ -1,7 +1,7 @@
+#define _GNU_SOURCE
+
 #include "os/os.h"
 #include "log.h"
-
-#define _GNU_SOURCE
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>

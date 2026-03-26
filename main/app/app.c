@@ -165,7 +165,8 @@ mimi_err_t app_init(const char *config_path,
 
     bool log_to_file_cfg = mimi_cfg_get_bool(logging, "toFile", false);
     bool log_to_stderr_cfg = mimi_cfg_get_bool(logging, "toStderr", true);
-    const char *log_dir_cfg = mimi_cfg_get_str(logging, "dir", "logs");
+    /* Directory is fixed to workspace/logs (user cannot override). */
+    const char *log_dir_cfg = "logs";
     const char *log_file_cfg = mimi_cfg_get_str(logging, "file", "mimiclaw.log");
     int log_max_file_bytes_cfg = mimi_cfg_get_int(logging, "maxFileBytes", 5 * 1024 * 1024);
     int log_max_files_cfg = mimi_cfg_get_int(logging, "maxFiles", 3);

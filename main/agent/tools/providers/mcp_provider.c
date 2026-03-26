@@ -61,9 +61,11 @@ static void free_server(mcp_server_t *s)
     if (!s) return;
     free(s->tools_json);
     s->tools_json = NULL;
+    s->extra_http_headers[0] = '\0';
     if (!s->use_http && s->started) {
         if (s->to_child >= 0) close(s->to_child);
         if (s->from_child >= 0) close(s->from_child);
+        if (s->err_from_child >= 0) close(s->err_from_child);
         if (s->pid > 0) {
             (void)kill(s->pid, SIGTERM);
             (void)waitpid(s->pid, NULL, 0);
@@ -78,6 +80,34 @@ static void free_server(mcp_server_t *s)
     s->pid = 0;
     s->to_child = -1;
     s->from_child = -1;
+    s->err_from_child = -1;
+    s->stderr_accum_len = 0;
+}
+
+typedef struct {
+    mcp_server_t *s;
+    size_t off;
+} mcp_hdr_build_ctx_t;
+
+static void mcp_hdr_key_cb(void *ctx, const char *key, mimi_cfg_obj_t value)
+{
+    mcp_hdr_build_ctx_t *c = (mcp_hdr_build_ctx_t *)ctx;
+    if (!c || !c->s || !key || !key[0]) return;
+
+    const char *val = mimi_cfg_as_str(value, "");
+    if (!val || !val[0]) return;
+
+    const size_t max = sizeof(c->s->extra_http_headers);
+    if (c->off >= max) return;
+
+    int n = snprintf(c->s->extra_http_headers + c->off, max - c->off,
+                     "%s: %s\r\n", key, val);
+    if (n > 0) {
+        size_t add = (size_t)n;
+        /* snprintf returns the number of bytes that would have been written
+         * excluding '\0'. Only advance if it fits. */
+        if (c->off + add < max) c->off += add;
+    }
 }
 
 static void clear_cache(void)
@@ -296,13 +326,13 @@ static void mcp_discovery_task(void *arg)
                       srv->name,
                       (int)tools_non_empty_before, tools_len_before,
                       (int)tools_non_empty_after, tools_len_after);
+        }
 
-            if (any_ok) {
-                MIMI_LOGI(TAG, "MCP discovery: at least one server has tools; refreshing tool registry JSON");
-                (void)tool_registry_refresh_tools_json();
-                s_discovery_running = false;
-                return;
-            }
+        if (any_ok) {
+            MIMI_LOGI(TAG, "MCP discovery: at least one server has tools; refreshing tool registry JSON");
+            (void)tool_registry_refresh_tools_json();
+            s_discovery_running = false;
+            return;
         }
 
         mimi_sleep_ms((uint32_t)delay_ms);
@@ -363,9 +393,17 @@ static mimi_err_t mcp_init(void)
         strncpy(dst->args, mimi_cfg_get_str(node, "args", ""), sizeof(dst->args) - 1);
         strncpy(dst->url, url, sizeof(dst->url) - 1);
         dst->requires_confirmation = mimi_cfg_get_bool(node, "requires_confirmation", true);
+        dst->extra_http_headers[0] = '\0';
+        mimi_cfg_obj_t hdrs = mimi_cfg_get_obj(node, "headers");
+        if (mimi_cfg_is_object(hdrs)) {
+            mcp_hdr_build_ctx_t hctx = { .s = dst, .off = 0 };
+            mimi_cfg_each_key(hdrs, mcp_hdr_key_cb, &hctx);
+        }
         dst->pid = 0;
         dst->to_child = -1;
         dst->from_child = -1;
+        dst->err_from_child = -1;
+        dst->stderr_accum_len = 0;
         dst->started = false;
         dst->negotiated_protocol_version[0] = '\0';
         dst->session_id[0] = '\0';

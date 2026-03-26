@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <stddef.h>
 
 typedef struct {
     bool use_http;
@@ -14,9 +15,16 @@ typedef struct {
     char url[512];
     bool requires_confirmation;
 
+    /* Optional extra HTTP headers for MCP HTTP/SSE transport.
+     * Stored as a single CRLF-separated header block, e.g.:
+     *   Authorization: Bearer xxx\r\nX-Foo: bar\r\n
+     */
+    char extra_http_headers[1024];
+
     pid_t pid;
     int to_child;   /* parent writes -> child stdin */
     int from_child; /* parent reads  <- child stdout */
+    int err_from_child; /* parent reads <- child stderr */
     bool started;
 
     bool initialized;
@@ -27,6 +35,12 @@ typedef struct {
     long long last_ping_ms;
 
     char *tools_json;
+
+    /* Stderr is not part of MCP protocol; we capture and forward it to logs.
+     * This avoids polluting interactive CLI output with progress spinners.
+     */
+    char stderr_accum[2048];
+    size_t stderr_accum_len;
 } mcp_server_t;
 
 typedef void (*mcp_server_msg_cb_t)(mcp_server_t *s, cJSON *msg);
