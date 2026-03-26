@@ -81,9 +81,9 @@ static void app_main_task(void *arg)
     err = app_run();
 
     app_stop();
-    app_destroy();
-
+    /* Log before app_destroy() closes the log output file. */
     MIMI_LOGI("main", "MimiClaw exited with code: %s", mimi_err_to_name(err));
+    app_destroy();
 }
 
 int main(int argc, char **argv)

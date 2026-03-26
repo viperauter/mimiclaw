@@ -31,12 +31,24 @@ static void mimi_mongoose_log_char(char c, void *param)
     }
 }
 
-static void mimi_mongoose_sync_sink(bool file_only_with_open_file)
+static void mimi_mongoose_discard_log_char(char c, void *param)
 {
-    if (file_only_with_open_file) {
+    (void)param;
+    (void)c;
+}
+
+static void mimi_mongoose_sync_sink(void)
+{
+    /* Mongoose logs are routed separately from MIMI_LOG* (which already writes to file/stderr).
+     * When file-only logging is configured, prevent late Mongoose logs from reappearing on stdout
+     * after the file is closed.
+     */
+    if (s_log_file && !s_log_to_stderr) {
         mg_log_set_fn(mimi_mongoose_log_char, NULL);
-    } else {
+    } else if (s_log_to_stderr) {
         mg_log_set_fn(mg_pfn_stdout, NULL);
+    } else {
+        mg_log_set_fn(mimi_mongoose_discard_log_char, NULL);
     }
 }
 
@@ -182,7 +194,7 @@ mimi_err_t mimi_log_set_output_file(const char *path, bool also_stderr)
     s_log_to_stderr = also_stderr;
     strncpy(s_log_file_path, path, sizeof(s_log_file_path) - 1);
     s_log_file_path[sizeof(s_log_file_path) - 1] = '\0';
-    mimi_mongoose_sync_sink(!also_stderr);
+    mimi_mongoose_sync_sink();
     return MIMI_OK;
 }
 
@@ -199,8 +211,8 @@ void mimi_log_close_output_file(void)
         s_log_file = NULL;
     }
     s_log_file_path[0] = '\0';
-    s_log_to_stderr = true;
-    mimi_mongoose_sync_sink(false);
+    /* Keep toStderr behavior as configured so shutdown doesn't spam terminal output. */
+    mimi_mongoose_sync_sink();
 }
 
 bool mimi_log_is_enabled(void)

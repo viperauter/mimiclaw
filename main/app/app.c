@@ -425,8 +425,10 @@ void app_destroy(void)
     
     /* Deinitialize tool registry */
     tool_registry_deinit();
-    mimi_log_close_output_file();
 
     s_app_initialized = false;
     MIMI_LOGI("app", "Application destroyed");
+
+    /* Close the log output after the final log line. */
+    mimi_log_close_output_file();
 }

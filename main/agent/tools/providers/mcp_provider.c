@@ -74,6 +74,7 @@ static void free_server(mcp_server_t *s)
     s->started = false;
     s->initialized = false;
     s->last_ping_ms = 0;
+    s->http_mode = MCP_HTTP_MODE_UNKNOWN;
     s->session_id[0] = '\0';
     s->last_event_id[0] = '\0';
     s->sse_retry_ms = 1000;
@@ -114,6 +115,91 @@ static void clear_cache(void)
 {
     free(s_tools_json_merged);
     s_tools_json_merged = NULL;
+}
+
+static bool is_name_char_ok(char c)
+{
+    return (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           c == '_' || c == '-' || c == '.';
+}
+
+static void sanitize_server_name(char *s)
+{
+    if (!s) return;
+    /* Trim leading spaces */
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    /* Replace invalid chars in-place (best-effort). */
+    for (char *p = s; *p; p++) {
+        if (!is_name_char_ok(*p)) *p = '_';
+    }
+}
+
+static void extract_host_from_url(const char *url, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!url || !url[0]) return;
+    const char *p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    const char *end = p;
+    while (*end && *end != '/' && *end != ':' && *end != '?' && *end != '#') end++;
+    size_t n = (size_t)(end - p);
+    if (n == 0) return;
+    if (n >= out_sz) n = out_sz - 1;
+    memcpy(out, p, n);
+    out[n] = '\0';
+}
+
+static void extract_basename(const char *path, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!path || !path[0]) return;
+    const char *p = strrchr(path, '/');
+    p = p ? (p + 1) : path;
+    snprintf(out, out_sz, "%s", p);
+}
+
+static bool server_name_exists(const char *name, int up_to_index)
+{
+    if (!name || !name[0]) return false;
+    for (int i = 0; i < up_to_index; i++) {
+        if (s_servers[i].name[0] && strcmp(s_servers[i].name, name) == 0) return true;
+    }
+    return false;
+}
+
+static void assign_server_name_if_missing(mcp_server_t *dst, int index)
+{
+    if (!dst) return;
+    if (dst->name[0]) return;
+
+    char candidate[64] = {0};
+    extract_host_from_url(dst->url, candidate, sizeof(candidate));
+    if (!candidate[0]) extract_basename(dst->command, candidate, sizeof(candidate));
+    if (!candidate[0]) snprintf(candidate, sizeof(candidate), "mcp_server_%d", index);
+    sanitize_server_name(candidate);
+    if (!candidate[0]) snprintf(candidate, sizeof(candidate), "mcp_server_%d", index);
+
+    /* Ensure uniqueness across configured servers */
+    if (server_name_exists(candidate, index)) {
+        char suffix[16];
+        snprintf(suffix, sizeof(suffix), "_%d", index);
+        size_t suffix_len = strlen(suffix);
+        size_t max_base = sizeof(candidate) - 1;
+        if (suffix_len < max_base) {
+            max_base -= suffix_len;
+        } else {
+            max_base = 0;
+        }
+        candidate[max_base] = '\0'; /* truncate base to make room */
+        strncat(candidate, suffix, sizeof(candidate) - 1 - strlen(candidate));
+    }
+
+    strncpy(dst->name, candidate, sizeof(dst->name) - 1);
+    dst->name[sizeof(dst->name) - 1] = '\0';
 }
 
 static mimi_err_t start_server(mcp_server_t *s)
@@ -392,6 +478,7 @@ static mimi_err_t mcp_init(void)
         strncpy(dst->command, mimi_cfg_get_str(node, "command", ""), sizeof(dst->command) - 1);
         strncpy(dst->args, mimi_cfg_get_str(node, "args", ""), sizeof(dst->args) - 1);
         strncpy(dst->url, url, sizeof(dst->url) - 1);
+        assign_server_name_if_missing(dst, s_server_count - 1);
         dst->requires_confirmation = mimi_cfg_get_bool(node, "requires_confirmation", true);
         dst->extra_http_headers[0] = '\0';
         mimi_cfg_obj_t hdrs = mimi_cfg_get_obj(node, "headers");

@@ -7,6 +7,12 @@
 #include <sys/types.h>
 #include <stddef.h>
 
+typedef enum {
+    MCP_HTTP_MODE_UNKNOWN = 0,
+    MCP_HTTP_MODE_STREAMABLE = 1, /* Streamable HTTP: single MCP endpoint supports POST+GET */
+    MCP_HTTP_MODE_LEGACY_HTTP_SSE = 2, /* Deprecated HTTP+SSE: SSE endpoint returns `endpoint` event */
+} mcp_http_mode_t;
+
 typedef struct {
     bool use_http;
     char name[64];
@@ -29,8 +35,11 @@ typedef struct {
 
     bool initialized;
     char negotiated_protocol_version[32];
+    mcp_http_mode_t http_mode;
+
     char session_id[192];
     char last_event_id[128];
+    char sse_message_url[512];
     int sse_retry_ms;
     long long last_ping_ms;
 

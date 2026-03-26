@@ -33,7 +33,7 @@ mimi_err_t mimi_log_set_output_file(const char *path, bool also_stderr);
 /* Configure file rotation. max_file_bytes<=0 disables rotate checks. */
 void mimi_log_set_rotation(int max_file_bytes, int max_files);
 
-/* Close file logger and reset to stderr-only output. */
+/* Close file logger; late logs are routed based on current toStderr config. */
 void mimi_log_close_output_file(void);
 
 /* Check if logging is enabled */

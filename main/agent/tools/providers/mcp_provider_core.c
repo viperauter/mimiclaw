@@ -94,8 +94,10 @@ mimi_err_t mcp_core_initialize(mcp_server_t *s,
     }
     if (s->initialized) return MIMI_OK;
 
+    s->http_mode = MCP_HTTP_MODE_UNKNOWN;
     s->session_id[0] = '\0';
     s->last_event_id[0] = '\0';
+    s->sse_message_url[0] = '\0';
     s->sse_retry_ms = 1000;
 
     mimi_err_t err = start_fn(s);
