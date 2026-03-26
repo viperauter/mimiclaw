@@ -610,21 +610,42 @@ static void mcp_legacy_finish_sse_wait_ctx(mcp_sse_wait_ctx_t *sse_ctx, char **i
     free(sse_ctx);
 }
 
-static bool mcp_should_fallback_streamable_to_legacy(int http_status)
+static bool mcp_should_fallback_streamable_to_legacy(mcp_server_t *s, int http_status, bool is_empty_response)
 {
-    return http_status == 400 || http_status == 404 || http_status == 405;
+    /* Skip auto-fallback if transport type is explicitly configured:
+     * - MCP_TRANSPORT_SSE = force legacy mode
+     * - MCP_TRANSPORT_STREAMABLE_HTTP = force streamable mode
+     * Only auto-detect mode (MCP_TRANSPORT_HTTP) allows fallback.
+     */
+    if (s->transport_type == MCP_TRANSPORT_SSE ||
+        s->transport_type == MCP_TRANSPORT_STREAMABLE_HTTP) {
+        return false;
+    }
+    
+    /* Fallback triggers:
+     * 400 = Bad Request (invalid request format)
+     * 404 = Not Found (endpoint doesn't exist)
+     * 405 = Method Not Allowed (POST not supported)
+     * 409 = Conflict (protocol version/mode conflict, MCP spec)
+     * 200 + empty response body = false positive detection (e.g. DashScope)
+     */
+    bool is_error_status = (http_status == 400 || http_status == 404 || 
+                            http_status == 405 || http_status == 409);
+    bool is_false_positive = (http_status >= 200 && http_status < 300 && is_empty_response);
+    
+    return is_error_status || is_false_positive;
 }
 
-static bool mcp_try_fallback_to_legacy(mcp_server_t *s, int http_status)
+static bool mcp_try_fallback_to_legacy(mcp_server_t *s, int http_status, bool is_empty_response)
 {
     if (!s) return false;
     if (s->http_mode == MCP_HTTP_MODE_STREAMABLE &&
-        mcp_should_fallback_streamable_to_legacy(http_status)) {
+        mcp_should_fallback_streamable_to_legacy(s, http_status, is_empty_response)) {
         s->http_mode = MCP_HTTP_MODE_LEGACY_HTTP_SSE;
         s->sse_message_url[0] = '\0';
         s->last_event_id[0] = '\0';
-        MIMI_LOGI(TAG, "HTTP transport fallback: streamable_http -> legacy_http_sse status=%d server=%s",
-                  http_status, s->name);
+        MIMI_LOGI(TAG, "HTTP transport fallback: streamable_http -> legacy_http_sse status=%d empty=%d server=%s",
+                  http_status, is_empty_response, s->name);
         return true;
     }
     return false;
@@ -722,7 +743,29 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
                       dump_len, (int)dump_len, (const char *)hresp.body);
         }
 
+        bool is_empty_response = (hresp.body_len == 0 || !hresp.body || !hresp.body[0]);
+        
+        /* False positive detection: HTTP client may return error for empty 200 responses,
+         * but we need to check for fallback FIRST to handle servers that
+         * incorrectly return empty success responses (e.g. DashScope)
+         */
+        if (hresp.status >= 200 && hresp.status < 300 && is_empty_response) {
+            MIMI_LOGW(TAG, "Empty 200 response in streamable mode, checking fallback server=%s", s->name);
+            if (mcp_try_fallback_to_legacy(s, hresp.status, is_empty_response)) {
+                mimi_http_response_free(&hresp);
+                continue;
+            }
+        }
+
         if (herr != MIMI_OK) {
+            /* Also try fallback on HTTP error (some servers close connection with empty body,
+             * which may cause HTTP client to report error even with 200 status)
+             */
+            if (hresp.status >= 200 && hresp.status < 300 &&
+                mcp_try_fallback_to_legacy(s, hresp.status, is_empty_response)) {
+                mimi_http_response_free(&hresp);
+                continue;
+            }
             MIMI_LOGE(TAG, "HTTP exchange failed: err=%d server=%s url=%s",
                       herr, s->name, s->url);
             mimi_http_response_free(&hresp);
@@ -743,7 +786,7 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
 
         if (hresp.status >= 400 || !hresp.body) {
             /* Streamable-first: if the server says the endpoint doesn't exist, fall back. */
-            if (mcp_try_fallback_to_legacy(s, hresp.status)) {
+            if (mcp_try_fallback_to_legacy(s, hresp.status, is_empty_response)) {
                 mimi_http_response_free(&hresp);
                 continue;
             }
@@ -756,7 +799,7 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
 
         char *ret = NULL;
         bool is_sse = (hresp.content_type && strstr(hresp.content_type, "text/event-stream"));
-        MIMI_LOGD(TAG, "HTTP exchange: is_sse=%d server=%s", is_sse, s->name);
+        MIMI_LOGD(TAG, "HTTP exchange: is_sse=%d server=%s empty_response=%d", is_sse, s->name, is_empty_response);
         if (is_sse) {
             ret = parse_sse_for_response(s, (const char *)hresp.body, id_str, on_notification, on_request);
         } else {
@@ -821,7 +864,8 @@ mimi_err_t mcp_http_notify_post(mcp_server_t *s, const char *request_json)
             s->session_id[0] = '\0';
         }
 
-        if (!mcp_try_fallback_to_legacy(s, hresp.status)) {
+        bool is_empty_response = (hresp.body_len == 0 || !hresp.body || !hresp.body[0]);
+        if (!mcp_try_fallback_to_legacy(s, hresp.status, is_empty_response)) {
             int status = hresp.status;
             bool ok = (status == 202 || (status >= 200 && status < 300));
             mimi_http_response_free(&hresp);

@@ -13,6 +13,18 @@ typedef enum {
     MCP_HTTP_MODE_LEGACY_HTTP_SSE = 2, /* Deprecated HTTP+SSE: SSE endpoint returns `endpoint` event */
 } mcp_http_mode_t;
 
+/* HTTP transport mode override for configuration.
+ * Allows forcing a specific transport mode instead of auto-detection.
+ * Values match MCP standard "type" field: stdio, sse, streamable-http.
+ */
+typedef enum {
+    MCP_TRANSPORT_UNKNOWN = 0,
+    MCP_TRANSPORT_STDIO = 1,      /* type: "stdio" */
+    MCP_TRANSPORT_SSE = 2,        /* type: "sse" (legacy HTTP+SSE) */
+    MCP_TRANSPORT_STREAMABLE_HTTP = 3, /* type: "streamable-http" */
+    MCP_TRANSPORT_HTTP = 4,       /* type: "http" (auto-detect) */
+} mcp_transport_type_t;
+
 typedef struct {
     bool use_http;
     char name[64];
@@ -35,7 +47,8 @@ typedef struct {
 
     bool initialized;
     char negotiated_protocol_version[32];
-    mcp_http_mode_t http_mode;
+    mcp_transport_type_t transport_type; /* Configured transport type from "type" field */
+    mcp_http_mode_t http_mode;           /* Current HTTP mode (runtime detected) */
 
     char session_id[192];
     char last_event_id[128];

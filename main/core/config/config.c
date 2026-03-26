@@ -48,7 +48,7 @@ static mimi_err_t write_text_file_vfs(const char *path, const char *data, size_t
 
 /* Bump when the config JSON schema changes.
  * Loader will auto-merge missing keys and write back merged config. */
-#define MIMI_CONFIG_SCHEMA_VERSION 4
+#define MIMI_CONFIG_SCHEMA_VERSION 5
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
 {

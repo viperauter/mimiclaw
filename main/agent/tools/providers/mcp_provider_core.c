@@ -94,7 +94,18 @@ mimi_err_t mcp_core_initialize(mcp_server_t *s,
     }
     if (s->initialized) return MIMI_OK;
 
-    s->http_mode = MCP_HTTP_MODE_UNKNOWN;
+    /* Preserve configured HTTP mode for explicitly specified transport types:
+     * - MCP_TRANSPORT_SSE = force legacy SSE mode
+     * - MCP_TRANSPORT_STREAMABLE_HTTP = force streamable mode
+     * Only reset to UNKNOWN for auto-detection mode.
+     */
+    if (s->transport_type == MCP_TRANSPORT_SSE) {
+        s->http_mode = MCP_HTTP_MODE_LEGACY_HTTP_SSE;
+    } else if (s->transport_type == MCP_TRANSPORT_STREAMABLE_HTTP) {
+        s->http_mode = MCP_HTTP_MODE_STREAMABLE;
+    } else {
+        s->http_mode = MCP_HTTP_MODE_UNKNOWN;
+    }
     s->session_id[0] = '\0';
     s->last_event_id[0] = '\0';
     s->sse_message_url[0] = '\0';

@@ -74,7 +74,17 @@ static void free_server(mcp_server_t *s)
     s->started = false;
     s->initialized = false;
     s->last_ping_ms = 0;
-    s->http_mode = MCP_HTTP_MODE_UNKNOWN;
+    /* Reset HTTP mode based on configured transport type:
+     * - For forced modes (sse/streamable-http), preserve the configured mode
+     * - For auto modes (http/unknown), reset to UNKNOWN for re-detection
+     */
+    if (s->transport_type == MCP_TRANSPORT_SSE) {
+        s->http_mode = MCP_HTTP_MODE_LEGACY_HTTP_SSE;
+    } else if (s->transport_type == MCP_TRANSPORT_STREAMABLE_HTTP) {
+        s->http_mode = MCP_HTTP_MODE_STREAMABLE;
+    } else {
+        s->http_mode = MCP_HTTP_MODE_UNKNOWN;
+    }
     s->session_id[0] = '\0';
     s->last_event_id[0] = '\0';
     s->sse_retry_ms = 1000;
@@ -471,9 +481,36 @@ static mimi_err_t mcp_init(void)
         memset(dst, 0, sizeof(*dst));
         strncpy(dst->name, mimi_cfg_get_str(node, "name", ""), sizeof(dst->name) - 1);
         const char *transport = mimi_cfg_get_str(node, "transport", "");
+        const char *type = mimi_cfg_get_str(node, "type", "");
         const char *url = mimi_cfg_get_str(node, "url", "");
-        if ((transport[0] && strcmp(transport, "http") == 0) || url[0]) {
+        
+        /* Parse standard MCP "type" field (Cursor compatible):
+         * - "stdio": local process via stdin/stdout
+         * - "sse": HTTP+SSE legacy mode
+         * - "streamable-http": modern streamable HTTP
+         * - "http": auto-detect mode
+         */
+        if (type[0]) {
+            if (strcmp(type, "sse") == 0) {
+                dst->use_http = true;
+                dst->transport_type = MCP_TRANSPORT_SSE;
+                dst->http_mode = MCP_HTTP_MODE_LEGACY_HTTP_SSE;
+            } else if (strcmp(type, "streamable-http") == 0) {
+                dst->use_http = true;
+                dst->transport_type = MCP_TRANSPORT_STREAMABLE_HTTP;
+                dst->http_mode = MCP_HTTP_MODE_STREAMABLE;
+            } else if (strcmp(type, "stdio") == 0) {
+                dst->use_http = false;
+                dst->transport_type = MCP_TRANSPORT_STDIO;
+            } else if (strcmp(type, "http") == 0) {
+                dst->use_http = true;
+                dst->transport_type = MCP_TRANSPORT_HTTP;
+                dst->http_mode = MCP_HTTP_MODE_UNKNOWN;
+            }
+        } else if ((transport[0] && strcmp(transport, "http") == 0) || url[0]) {
+            /* Legacy "transport" field support */
             dst->use_http = true;
+            dst->transport_type = MCP_TRANSPORT_HTTP;
         }
         strncpy(dst->command, mimi_cfg_get_str(node, "command", ""), sizeof(dst->command) - 1);
         strncpy(dst->args, mimi_cfg_get_str(node, "args", ""), sizeof(dst->args) - 1);
