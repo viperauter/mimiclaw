@@ -141,6 +141,7 @@ static void apply_defaults(void)
 
     /* Tools */
     s_config.search_api_key[0] = '\0';
+    s_config.search_enabled = false;
 
     /* Internal tunables */
     s_config.bus_queue_len = 16;
@@ -374,6 +375,7 @@ static cJSON *config_build_json_full_from_config(const mimi_config_t *cfg, int s
     cJSON *tools = cJSON_CreateObject();
     cJSON *search = cJSON_CreateObject();
     if (tools && search) {
+        cJSON_AddBoolToObject(search, "enabled", cfg->search_enabled);
         cJSON_AddStringToObject(search, "apiKey", cfg->search_api_key);
         cJSON_AddItemToObject(tools, "search", search);
         cJSON_AddItemToObject(root, "tools", tools);
@@ -942,8 +944,13 @@ mimi_err_t mimi_config_load(const char *path)
     cJSON *tools = cJSON_GetObjectItem(root, "tools");
     cJSON *search = tools && cJSON_IsObject(tools) ? cJSON_GetObjectItem(tools, "search") : NULL;
     if (!search && cJSON_IsObject(tools)) search = cJSON_GetObjectItem(tools, "brave");
-    if (cJSON_IsObject(search))
+    if (cJSON_IsObject(search)) {
         json_str_to_buf(cJSON_GetObjectItem(search, "apiKey"), s_config.search_api_key, sizeof(s_config.search_api_key), false);
+        cJSON *enabled = cJSON_GetObjectItem(search, "enabled");
+        if (enabled && (cJSON_IsBool(enabled) || cJSON_IsNumber(enabled))) {
+            s_config.search_enabled = cJSON_IsTrue(enabled) || (cJSON_IsNumber(enabled) && enabled->valueint != 0);
+        }
+    }
     
     /* logging */
     cJSON *logging = cJSON_GetObjectItem(root, "logging");

@@ -24,6 +24,34 @@
 #include <linux/filter.h>
 #include <linux/audit.h>
 #include <sys/syscall.h>
+
+#include <asm/unistd.h>
+
+#ifndef __NR_alarm
+#define __NR_alarm 37
+#endif
+#ifndef __NR_dup2
+#define __NR_dup2 33
+#endif
+#ifndef __NR_open
+#define __NR_open __NR_openat
+#endif
+#ifndef __NR_pipe
+#define __NR_pipe 22
+#endif
+#ifndef __NR_readlink
+#define __NR_readlink 78
+#endif
+#ifndef __NR_getdents
+#define __NR_getdents 61
+#endif
+#ifndef __NR_getdents64
+#define __NR_getdents64 62
+#endif
+#ifndef __NR_unlink
+#define __NR_unlink 87
+#endif
+
 #endif
 
 static const char *TOOL_DESCRIPTION =

@@ -66,6 +66,7 @@ typedef struct mimi_config {
     char proxy_type[16];
 
     char search_api_key[MIMI_CONFIG_TOKEN_LEN];
+    bool search_enabled;
 
     int bus_queue_len;
     int ws_port;
