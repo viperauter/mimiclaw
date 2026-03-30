@@ -62,18 +62,6 @@ static void safe_strcpy(char *dst, size_t dst_size, const char *src)
     dst[n] = '\0';
 }
 
-static void expand_tilde_inplace(char *path_buf, size_t path_buf_size)
-{
-    if (!path_buf || path_buf_size == 0) return;
-    if (!(path_buf[0] == '~' && path_buf[1] == '/')) return;
-    const char *home = getenv("HOME");
-    if (!home || home[0] == '\0') return;
-
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s/%s", home, path_buf + 2);
-    safe_strcpy(path_buf, path_buf_size, tmp);
-}
-
 static void apply_defaults(void)
 {
     memset(&s_config, 0, sizeof(s_config));
@@ -780,12 +768,14 @@ mimi_err_t mimi_config_load(const char *path)
         if (working && cJSON_IsBool(working)) s_config.send_working_status = cJSON_IsTrue(working);
     }
 
-    expand_tilde_inplace(s_config.workspace, sizeof(s_config.workspace));
-    
-    /* Normalize path separators to platform-specific format */
-    char normalized_workspace[512];
-    if (mimi_path_normalize(s_config.workspace, normalized_workspace, sizeof(normalized_workspace)) == 0) {
-        safe_strcpy(s_config.workspace, sizeof(s_config.workspace), normalized_workspace);
+    /* Canonicalize user-provided workspace:
+     * - Expand "~/" (shell-like) when possible
+     * - Normalize separators to platform-specific format */
+    {
+        char canonical[512];
+        if (mimi_path_canonicalize(s_config.workspace, canonical, sizeof(canonical)) == 0) {
+            safe_strcpy(s_config.workspace, sizeof(s_config.workspace), canonical);
+        }
     }
 
     /* agents.subagents: load static subagent configs (inproc/future fork/tcp) */

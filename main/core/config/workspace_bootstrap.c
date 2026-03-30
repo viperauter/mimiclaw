@@ -6,6 +6,7 @@
 #include "log.h"
 #include "path_utils.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "workspace";
@@ -28,13 +29,9 @@ static int ensure_parent_dir_posix(const char *file_path)
     if (mimi_path_dirname(file_path, dir, sizeof(dir)) != 0) {
         return 0;  /* No directory component */
     }
-    if (dir[0] == '~' && dir[1] == '/') {
-        const char *home = getenv("HOME");
-        if (home && home[0] != '\0') {
-            char expanded[512];
-            snprintf(expanded, sizeof(expanded), "%s%s", home, dir + 1);
-            return mimi_fs_mkdir_p_direct(expanded);
-        }
+    char canonical[512];
+    if (mimi_path_canonicalize(dir, canonical, sizeof(canonical)) == 0) {
+        return mimi_fs_mkdir_p_direct(canonical);
     }
     return mimi_fs_mkdir_p_direct(dir);
 }
@@ -216,13 +213,9 @@ mimi_err_t mimi_workspace_bootstrap(const char *config_path,
         base = "./";
     }
 
-    char expanded_base[512];
-    if (base[0] == '~' && base[1] == '/') {
-        const char *home = getenv("HOME");
-        if (home && home[0] != '\0') {
-            snprintf(expanded_base, sizeof(expanded_base), "%s%s", home, base + 1);
-            base = expanded_base;
-        }
+    char canonical_base[512];
+    if (mimi_path_canonicalize(base, canonical_base, sizeof(canonical_base)) == 0) {
+        base = canonical_base;
     }
 
     /* Create and activate default workspace */

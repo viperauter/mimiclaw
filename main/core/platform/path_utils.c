@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int mimi_path_join(const char *base, const char *component, char *out, size_t out_size)
 {
@@ -159,6 +160,51 @@ int mimi_path_normalize(const char *path, char *out, size_t out_size)
     }
 
     out[j] = '\0';
+    return 0;
+}
+
+int mimi_path_expand_tilde(const char *path, char *out, size_t out_size)
+{
+    if (!path || !out || out_size == 0) return -1;
+
+    /* Only expand the common "~/" form (shell-like). */
+    if (!(path[0] == '~' && path[1] == '/')) {
+        size_t n = strnlen(path, out_size - 1);
+        memcpy(out, path, n);
+        out[n] = '\0';
+        return (path[n] == '\0') ? 0 : -1;
+    }
+
+    const char *home = getenv("HOME");
+#ifdef _WIN32
+    if (!home || home[0] == '\0') home = getenv("USERPROFILE");
+#endif
+    if (!home || home[0] == '\0') {
+        /* No home directory available; keep the path unchanged. */
+        size_t n = strnlen(path, out_size - 1);
+        memcpy(out, path, n);
+        out[n] = '\0';
+        return (path[n] == '\0') ? 0 : -1;
+    }
+
+    /* Join as: <home>/<rest-after-~/> */
+    int written = snprintf(out, out_size, "%s/%s", home, path + 2);
+    return (written >= 0 && (size_t)written < out_size) ? 0 : -1;
+}
+
+int mimi_path_canonicalize(const char *path, char *out, size_t out_size)
+{
+    if (!path || !out || out_size == 0) return -1;
+
+    char expanded[512];
+    if (mimi_path_expand_tilde(path, expanded, sizeof(expanded)) != 0) {
+        return -1;
+    }
+
+    /* Normalize separators to platform-specific style. */
+    if (mimi_path_normalize(expanded, out, out_size) != 0) {
+        return -1;
+    }
     return 0;
 }
 

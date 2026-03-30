@@ -53,6 +53,31 @@ const char *mimi_path_basename(const char *path);
 int mimi_path_normalize(const char *path, char *out, size_t out_size);
 
 /**
+ * Expand a leading "~/" to the user's home directory (if available).
+ *
+ * Notes:
+ * - "~" expansion is a shell feature; it is NOT performed automatically by libc APIs.
+ * - This helper only expands the common "~/" form (not "~user/").
+ * - If HOME (or USERPROFILE on Windows) is missing, the input path is copied as-is.
+ *
+ * Returns 0 on success, -1 on error (e.g., output buffer too small).
+ */
+int mimi_path_expand_tilde(const char *path, char *out, size_t out_size);
+
+/**
+ * Canonicalize a user-provided path in a platform-friendly way:
+ * - Expand "~/" to the user's home directory when possible
+ * - Normalize path separators to the platform-specific separator
+ *
+ * This function intentionally does NOT:
+ * - Resolve relative paths against CWD
+ * - Resolve symlinks or ".." segments
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int mimi_path_canonicalize(const char *path, char *out, size_t out_size);
+
+/**
  * Check if a path is absolute.
  * Returns true if absolute, false if relative.
  */
