@@ -76,6 +76,9 @@ static void build_tools_json(void)
     cJSON *arr = cJSON_CreateArray();
 
     for (int i = 0; i < s_tool_count; i++) {
+        if (strcmp(s_tools[i].name, "web_search") == 0 && !tool_web_search_should_expose()) {
+            continue;
+        }
         cJSON *tool = cJSON_CreateObject();
         cJSON_AddStringToObject(tool, "name", s_tools[i].name);
         cJSON_AddStringToObject(tool, "description", s_tools[i].description);

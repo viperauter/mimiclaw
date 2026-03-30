@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mimi_err.h"
+#include "mimi_config.h"
 #include "cJSON.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -31,7 +32,7 @@ mimi_err_t llm_set_model(const char *model);
 
 typedef struct {
     char id[64];        /* "toolu_xxx" */
-    char name[32];      /* "web_search" */
+    char name[MIMI_MAX_TOOL_NAME_LEN]; /* built-in or mcp::<server>::<tool> */
     char *input;        /* heap-allocated JSON string */
     size_t input_len;
 } llm_tool_call_t;

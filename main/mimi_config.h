@@ -32,6 +32,7 @@ extern "C" {
 #define MIMI_CHANNEL_NAME_LEN 64
 #define MIMI_CHAT_ID_LEN 128
 #define MIMI_MAX_ITERS 10
+#define MIMI_AGENT_ASYNC_USER_TEXT_SIZE (16 * 1024)
 
 #elif MIMI_MEM_PROFILE == MIMI_MEM_PROFILE_HIGH_PERF
 // High performance configuration (suitable for servers, RAM > 2G)
@@ -43,6 +44,7 @@ extern "C" {
 #define MIMI_CHANNEL_NAME_LEN 64
 #define MIMI_CHAT_ID_LEN 128
 #define MIMI_MAX_ITERS 20
+#define MIMI_AGENT_ASYNC_USER_TEXT_SIZE (64 * 1024)
 
 #elif MIMI_MEM_PROFILE == MIMI_MEM_PROFILE_MIN_ASYNC
 // Minimal async configuration (async mode but with minimal memory)
@@ -54,6 +56,7 @@ extern "C" {
 #define MIMI_CHANNEL_NAME_LEN 64
 #define MIMI_CHAT_ID_LEN 128
 #define MIMI_MAX_ITERS 10
+#define MIMI_AGENT_ASYNC_USER_TEXT_SIZE (16 * 1024)
 
 #else
 // Default configuration (suitable for desktop/server, RAM > 1G)
@@ -65,6 +68,31 @@ extern "C" {
 #define MIMI_CHANNEL_NAME_LEN 64
 #define MIMI_CHAT_ID_LEN 128
 #define MIMI_MAX_ITERS 10
+#define MIMI_AGENT_ASYNC_USER_TEXT_SIZE (32 * 1024)
+#endif
+
+/* Longest tool name we preserve end-to-end (incl. MCP fq: mcp::<server>::<tool>).
+ * Keep >= mcp_provider_core.c OpenAI export buffer (fq[192]). */
+#ifndef MIMI_MAX_TOOL_NAME_LEN
+#define MIMI_MAX_TOOL_NAME_LEN 192
+#endif
+
+/* Control manager + bus message fixed buffers */
+#ifndef MIMI_CONTROL_REQUEST_ID_LEN
+#define MIMI_CONTROL_REQUEST_ID_LEN 64
+#endif
+/* llm_trace correlation id (llm_trace_make_id output + bind table) */
+#ifndef MIMI_TRACE_ID_LEN
+#define MIMI_TRACE_ID_LEN 64
+#endif
+#ifndef MIMI_CONTROL_MAX_REQUESTS
+#define MIMI_CONTROL_MAX_REQUESTS 16
+#endif
+#ifndef MIMI_MSG_CONTROL_DATA_LEN
+#define MIMI_MSG_CONTROL_DATA_LEN 1024
+#endif
+#ifndef MIMI_MSG_STATUS_KEY_LEN
+#define MIMI_MSG_STATUS_KEY_LEN 64
 #endif
 
 // ============================================

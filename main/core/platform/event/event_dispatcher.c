@@ -1,4 +1,5 @@
 #include "event_dispatcher.h"
+#include "event_bus.h"
 #include "os/os.h"
 #include "log.h"
 #include "mongoose.h"
@@ -258,6 +259,20 @@ void event_dispatcher_drain_send(event_dispatcher_t *disp)
                 if (msg.buf) {
                     io_buf_unref(msg.buf);
                 }
+                break;
+            }
+
+            case EVENT_CALL: {
+                /* Execute callback in reactor/event-loop thread */
+                /* Defined in event_bus.c; keep a local mirror to avoid leaking internal headers. */
+                typedef struct {
+                    event_bus_call_fn_t fn;
+                    void *arg;
+                } event_bus_call_msg_t_local;
+                event_bus_call_msg_t_local *c = (event_bus_call_msg_t_local *)ID_TO_CONN(msg.conn_id);
+                if (c && c->fn) c->fn(c->arg);
+                free(c);
+                if (msg.buf) io_buf_unref(msg.buf);
                 break;
             }
             

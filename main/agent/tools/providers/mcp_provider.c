@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <stdatomic.h>
 
 static const char *TAG = "mcp_provider";
 #define MAX_MCP_SERVERS 8
@@ -36,6 +37,75 @@ static volatile bool s_discovery_running = false;
 static volatile int s_discovery_req_max_attempts = 4;
 static volatile int s_discovery_req_delay_ms = 500;
 static volatile bool s_tools_dirty = true; /* merged tools json needs rebuild */
+
+typedef struct {
+    mcp_server_t *srv;
+    int attempt;
+} mcp_refresh_job_t;
+
+static atomic_int s_refresh_pending = 0;
+static atomic_bool s_refresh_any_ok = false;
+static atomic_bool s_refresh_registry_done = false;
+
+/* Forward declarations for async refresh jobs (defined later). */
+static void lock_mcp(void);
+static void unlock_mcp(void);
+static mimi_err_t refresh_server_tools(mcp_server_t *s);
+
+static void mcp_refresh_job_task(void *arg)
+{
+    mcp_refresh_job_t *job = (mcp_refresh_job_t *)arg;
+    if (!job || !job->srv) {
+        if (job) free(job);
+        atomic_fetch_sub_explicit(&s_refresh_pending, 1, memory_order_acq_rel);
+        return;
+    }
+    mcp_server_t *srv = job->srv;
+    (void)job->attempt;
+    free(job);
+
+    size_t tools_len_before = 0;
+    bool tools_non_empty_before = false;
+    lock_mcp();
+    if (srv->tools_json) {
+        tools_len_before = strlen(srv->tools_json);
+        tools_non_empty_before = (strcmp(srv->tools_json, "[]") != 0);
+    }
+    unlock_mcp();
+
+    (void)refresh_server_tools(srv);
+
+    size_t tools_len_after = 0;
+    bool tools_non_empty_after = false;
+    lock_mcp();
+    if (srv->tools_json) {
+        tools_len_after = strlen(srv->tools_json);
+        tools_non_empty_after = (strcmp(srv->tools_json, "[]") != 0);
+    }
+    if (tools_non_empty_after) {
+        s_tools_dirty = true;
+    }
+    unlock_mcp();
+
+    MIMI_LOGI(TAG,
+              "MCP server '%s': tools_before_non_empty=%d len_before=%zu tools_after_non_empty=%d len_after=%zu",
+              srv->name,
+              (int)tools_non_empty_before, tools_len_before,
+              (int)tools_non_empty_after, tools_len_after);
+
+    if (tools_non_empty_after) {
+        atomic_store_explicit(&s_refresh_any_ok, true, memory_order_release);
+        /* Best-effort: refresh tool registry once as soon as any server has tools. */
+        bool expected = false;
+        if (atomic_compare_exchange_strong_explicit(&s_refresh_registry_done, &expected, true,
+                                                    memory_order_acq_rel, memory_order_acquire)) {
+            MIMI_LOGI(TAG, "MCP discovery: at least one server has tools; refreshing tool registry JSON");
+            (void)tool_registry_refresh_tools_json();
+        }
+    }
+
+    atomic_fetch_sub_explicit(&s_refresh_pending, 1, memory_order_acq_rel);
+}
 
 static long long now_ms(void)
 {
@@ -181,6 +251,8 @@ static bool server_name_exists(const char *name, int up_to_index)
     return false;
 }
 
+/* If "name" is omitted, derive a stable server id from url host, stdio command
+ * basename, or fallback mcp_server_<index>; ensure uniqueness among prior entries. */
 static void assign_server_name_if_missing(mcp_server_t *dst, int index)
 {
     if (!dst) return;
@@ -344,12 +416,45 @@ static mimi_err_t refresh_server_tools(mcp_server_t *s)
         return err;
     }
     MIMI_LOGI(TAG, "MCP initialize success: server=%s", s->name);
-    (void)mcp_ping_if_needed(s);
+    /* Avoid immediate extra request after initialize during discovery refresh.
+     * For rate-limited servers (e.g. DashScope), a ping right here increases
+     * 429 probability before tools/list.
+     */
     err = mcp_core_refresh_server_tools(s, mcp_do_initialize, rpc_request);
     if (err != MIMI_OK) {
         MIMI_LOGE(TAG, "MCP refresh tools failed: server=%s err=%d", s->name, err);
     } else {
         MIMI_LOGI(TAG, "MCP refresh tools success: server=%s", s->name);
+
+        /* Print tool list for visibility/debug. The tools_json is in OpenAI-like
+         * format produced by mcp_tools_to_openai_json():
+         *   [{"name":"mcp::<server>::<tool>","description":...,"input_schema":...}, ...]
+         */
+        lock_mcp();
+        const char *tools_json_snapshot = s->tools_json;
+        if (tools_json_snapshot) {
+            /* Parse under lock to avoid races with concurrent refresh/free. */
+            cJSON *arr = cJSON_Parse(tools_json_snapshot);
+            if (arr && cJSON_IsArray(arr)) {
+                int n = cJSON_GetArraySize(arr);
+                MIMI_LOGI(TAG, "MCP server '%s' tools: count=%d", s->name, n);
+                int max_print = n < 20 ? n : 20;
+                for (int i = 0; i < max_print; i++) {
+                    cJSON *it = cJSON_GetArrayItem(arr, i);
+                    if (!it) continue;
+                    cJSON *name = cJSON_GetObjectItemCaseSensitive(it, "name");
+                    const char *sn = (name && cJSON_IsString(name)) ? name->valuestring : NULL;
+                    if (sn && sn[0]) MIMI_LOGI(TAG, "MCP tool[%d]=%s", i, sn);
+                }
+                if (n > max_print) {
+                    MIMI_LOGI(TAG, "MCP tool list truncated: showing %d/%d", max_print, n);
+                }
+            } else {
+                MIMI_LOGW(TAG, "MCP server '%s' tools_json is not an array (or parse failed)", s->name);
+            }
+            if (arr) cJSON_Delete(arr);
+        }
+        unlock_mcp();
     }
     return err;
 }
@@ -385,50 +490,32 @@ static void mcp_discovery_task(void *arg)
     for (int attempt = 0; attempt < max_attempts; attempt++) {
         MIMI_LOGI(TAG, "MCP discovery attempt %d/%d", attempt + 1, max_attempts);
 
-        /* If any MCP server becomes available, we refresh the tool list
-         * immediately and don't wait for other slow/failed servers. */
-        bool any_ok = false;
+        atomic_store_explicit(&s_refresh_any_ok, false, memory_order_release);
+        atomic_store_explicit(&s_refresh_registry_done, false, memory_order_release);
 
+        /* Run per-server refresh in parallel so a slow HTTP POST doesn't stall the whole attempt. */
+        atomic_store_explicit(&s_refresh_pending, 0, memory_order_release);
         for (int i = 0; i < s_server_count; i++) {
             mcp_server_t *srv = &s_servers[i];
             if (!srv->name[0]) continue;
-
-            size_t tools_len_before = 0;
-            bool tools_non_empty_before = false;
-            lock_mcp();
-            if (srv->tools_json) {
-                tools_len_before = strlen(srv->tools_json);
-                tools_non_empty_before = (strcmp(srv->tools_json, "[]") != 0);
-            }
-            unlock_mcp();
-
-            (void)refresh_server_tools(srv);
-
-            size_t tools_len_after = 0;
-            bool tools_non_empty_after = false;
-            lock_mcp();
-            if (srv->tools_json) {
-                tools_len_after = strlen(srv->tools_json);
-                tools_non_empty_after = (strcmp(srv->tools_json, "[]") != 0);
-            }
-            if (tools_non_empty_after) {
-                any_ok = true;
-                s_tools_dirty = true;
-            }
-            unlock_mcp();
-
-            MIMI_LOGI(TAG,
-                      "MCP server '%s': tools_before_non_empty=%d len_before=%zu tools_after_non_empty=%d len_after=%zu",
-                      srv->name,
-                      (int)tools_non_empty_before, tools_len_before,
-                      (int)tools_non_empty_after, tools_len_after);
+            mcp_refresh_job_t *job = (mcp_refresh_job_t *)calloc(1, sizeof(*job));
+            if (!job) continue;
+            job->srv = srv;
+            job->attempt = attempt;
+            atomic_fetch_add_explicit(&s_refresh_pending, 1, memory_order_acq_rel);
+            (void)mimi_task_create_detached("mcp_refresh_srv", mcp_refresh_job_task, job);
         }
 
-        if (any_ok) {
-            MIMI_LOGI(TAG, "MCP discovery: at least one server has tools; refreshing tool registry JSON");
-            (void)tool_registry_refresh_tools_json();
-            s_discovery_running = false;
-            return;
+        /* Wait until either some server has tools, or all refresh jobs complete, or we should exit. */
+        const long long wait_deadline = now_ms() + 20000;
+        while (!mimi_runtime_should_exit()) {
+            if (atomic_load_explicit(&s_refresh_any_ok, memory_order_acquire)) {
+                s_discovery_running = false;
+                return;
+            }
+            if (atomic_load_explicit(&s_refresh_pending, memory_order_acquire) <= 0) break;
+            if (now_ms() >= wait_deadline) break;
+            mimi_sleep_ms(50);
         }
 
         mimi_sleep_ms((uint32_t)delay_ms);
@@ -471,14 +558,25 @@ static mimi_err_t mcp_init(void)
     mimi_cfg_obj_t tools = mimi_cfg_section("tools");
     mimi_cfg_obj_t servers = mimi_cfg_get_arr(tools, "mcpServers");
     if (!mimi_cfg_is_array(servers)) {
+        /* Diagnostic: without this, /mcp_refresh looks like it "does nothing". */
+        mimi_cfg_obj_t raw = mimi_cfg_get_obj(tools, "mcpServers");
+        MIMI_LOGW(TAG, "No tools.mcpServers configured (tools section present=%d mcpServers_is_object=%d)",
+                  mimi_cfg_is_object(tools), mimi_cfg_is_object(raw));
         return MIMI_OK;
     }
     int sn = mimi_cfg_arr_size(servers);
     for (int i = 0; i < sn && s_server_count < MAX_MCP_SERVERS; i++) {
         mimi_cfg_obj_t node = mimi_cfg_arr_get(servers, i);
         if (!mimi_cfg_is_object(node)) continue;
+        /* enabled: optional, default true (omit = load server). false = skip entirely. */
+        if (!mimi_cfg_get_bool(node, "enabled", true)) {
+            MIMI_LOGI(TAG, "Skipping MCP server (enabled=false): %s",
+                      mimi_cfg_get_str(node, "name", "(unnamed)"));
+            continue;
+        }
         mcp_server_t *dst = &s_servers[s_server_count++];
         memset(dst, 0, sizeof(*dst));
+        /* name: optional; assign_server_name_if_missing() fills from url/command if empty. */
         strncpy(dst->name, mimi_cfg_get_str(node, "name", ""), sizeof(dst->name) - 1);
         const char *transport = mimi_cfg_get_str(node, "transport", "");
         const char *type = mimi_cfg_get_str(node, "type", "");
@@ -487,7 +585,7 @@ static mimi_err_t mcp_init(void)
         /* Parse standard MCP "type" field (Cursor compatible):
          * - "stdio": local process via stdin/stdout
          * - "sse": HTTP+SSE legacy mode
-         * - "streamable-http": modern streamable HTTP
+         * - "streamable-http" / "streamableHttp": modern streamable HTTP
          * - "http": auto-detect mode
          */
         if (type[0]) {
@@ -495,7 +593,7 @@ static mimi_err_t mcp_init(void)
                 dst->use_http = true;
                 dst->transport_type = MCP_TRANSPORT_SSE;
                 dst->http_mode = MCP_HTTP_MODE_LEGACY_HTTP_SSE;
-            } else if (strcmp(type, "streamable-http") == 0) {
+            } else if (strcmp(type, "streamable-http") == 0 || strcmp(type, "streamableHttp") == 0) {
                 dst->use_http = true;
                 dst->transport_type = MCP_TRANSPORT_STREAMABLE_HTTP;
                 dst->http_mode = MCP_HTTP_MODE_STREAMABLE;

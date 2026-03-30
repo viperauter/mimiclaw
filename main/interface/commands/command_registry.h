@@ -30,7 +30,8 @@ bool command_system_is_initialized(void);
  */
 int command_parse_input(const char *input,
                         char *cmd_name, size_t cmd_name_len,
-                        const char **args, int max_args);
+                        const char **args, int max_args,
+                        char **out_owned_buf);
 
 #ifdef __cplusplus
 }

@@ -13,6 +13,7 @@
 #include "llm/llm_proxy.h"
 #include "channels/telegram/telegram_channel.h"
 #include "tools/tool_web_search.h"
+#include "tools/tool_registry.h"
 #include "bus/message_bus.h"
 #include "log.h"
 #include <string.h>
@@ -59,6 +60,9 @@ static int cmd_set_execute(const char **args, int arg_count,
         setting_name = "Telegram token";
     } else if (strcmp(sub, "search_key") == 0) {
         err = tool_web_search_set_key(value);
+        if (err == MIMI_OK) {
+            (void)tool_registry_refresh_tools_json();
+        }
         setting_name = "Search key";
     } else {
         snprintf(output, output_len,

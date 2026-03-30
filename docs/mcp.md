@@ -101,6 +101,7 @@ MCP servers are configured in the application's configuration file under the `to
   "tools": {
     "mcpServers": [
       {
+        "enabled": true,
         "name": "example_stdio",
         "type": "stdio",
         "command": "/path/to/mcp/server",
@@ -108,7 +109,6 @@ MCP servers are configured in the application's configuration file under the `to
         "requires_confirmation": true
       },
       {
-        "name": "example_http",
         "type": "http",
         "url": "http://localhost:8000",
         "requires_confirmation": false
@@ -134,23 +134,36 @@ MCP servers are configured in the application's configuration file under the `to
           "X-API-Key": "secret"
         },
         "requires_confirmation": false
+      },
+      {
+        "enabled": false,
+        "name": "paused_server",
+        "type": "sse",
+        "url": "http://localhost:9999/sse"
       }
     ]
   }
 }
 ```
 
+Omitting `enabled` is equivalent to `"enabled": true`. When `enabled` is `false`, that entry is skipped: no discovery, and its tools are not merged into the model tool list.
+
+`name` is optional. If empty or omitted, the runtime assigns a stable display name (for example from the URL host, the stdio command basename, or `mcp_server_<index>`), and ensures it does not collide with other configured servers.
+
+`requires_confirmation` defaults to `true` if omitted. When `true`, all tools from this server require user confirmation before execution.
+
 ### Configuration Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `name` | string | Unique name for the MCP server (alphanumeric, _, -, . allowed) |
+| `enabled` | boolean | Optional. Defaults to `true` if omitted. If `false`, this server is not loaded and its tools are not exposed to the LLM. |
+| `name` | string | Optional. Human-readable id used in tool names (`mcp::<name>::<tool>`). If omitted, a name is derived from `url` or `command` (see above). |
 | `type` | string | Transport type: "stdio", "http", "sse", "streamable-http" |
 | `command` | string | Command to run for stdio transport |
 | `args` | string | Additional arguments for stdio command (space-separated) |
 | `url` | string | URL for HTTP/SSE/streamable-http transport |
 | `headers` | object | HTTP headers for HTTP/SSE/streamable-http transport |
-| `requires_confirmation` | boolean | Whether this tool requires user confirmation before execution |
+| `requires_confirmation` | boolean | Optional. Defaults to `true`. Whether this tool requires user confirmation before execution |
 
 ## Transport Methods
 

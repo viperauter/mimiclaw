@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -60,12 +61,98 @@ typedef struct {
     event_bus_t *bus;
 } http_async_req_t;
 
+typedef enum {
+    HTTP_INTERNAL_ASYNC_COMPLETE = 1,
+    HTTP_INTERNAL_STREAM_EVENT = 2,
+} http_internal_msg_type_t;
+
 typedef struct {
+    http_internal_msg_type_t type;
+} http_internal_msg_base_t;
+
+typedef enum {
+    HTTP_STREAM_EVENT_OPEN = 1,
+    HTTP_STREAM_EVENT_SSE = 2,
+    HTTP_STREAM_EVENT_DATA = 3,
+    HTTP_STREAM_EVENT_CLOSE = 4,
+} http_stream_event_kind_t;
+
+typedef struct {
+    http_internal_msg_type_t type;
     mimi_err_t result;
     mimi_http_response_t *resp;
     mimi_http_callback_t callback;
     void *callback_data;
-} http_async_complete_t;
+} http_internal_async_complete_t;
+
+typedef struct mimi_http_stream_handle {
+    atomic_bool close_requested;
+    atomic_int refcnt;
+} mimi_http_stream_handle_t;
+
+static void http_stream_handle_release(mimi_http_stream_handle_t *h)
+{
+    if (!h) return;
+    if (atomic_fetch_sub_explicit(&h->refcnt, 1, memory_order_acq_rel) == 1) {
+        free(h);
+    }
+}
+
+typedef struct {
+    http_internal_msg_type_t type;
+    http_stream_event_kind_t kind;
+    mimi_http_stream_callbacks_t callbacks;
+    void *user_data;
+    mimi_err_t err;
+    mimi_http_response_t open_meta;
+    char *event_name;
+    char *event_data;
+    char *event_id;
+    int retry_ms;
+    uint8_t *data;
+    size_t data_len;
+} http_stream_event_msg_t;
+
+/* Body framing after response headers (mg_connect raw path; avoids mongoose http_cb
+ * waiting for a terminal chunked chunk on infinite SSE). */
+typedef enum {
+    HTTP_STREAM_BODY_CHUNKED = 1,
+    HTTP_STREAM_BODY_FIXED_LEN = 2,
+    HTTP_STREAM_BODY_RAW = 3,
+} http_stream_body_mode_t;
+
+typedef struct {
+    mimi_http_request_t req;      /* owned deep copy */
+    mimi_http_stream_callbacks_t callbacks;
+    void *user_data;
+    mimi_err_t result;
+    bool done;
+    bool posted_close;
+    bool opened;
+    bool is_sse;
+    bool headers_parsed;
+    uint8_t body_mode; /* http_stream_body_mode_t */
+    size_t fixed_remain;
+    char host_name[128];
+    struct mg_mgr *mgr;
+    struct mg_connection *conn;
+    struct mg_timer *timeout_timer;
+    event_bus_t *bus;
+    mimi_http_stream_handle_t *handle;
+    mimi_http_response_t open_meta;
+    char *sse_buf;
+    size_t sse_buf_len;
+    size_t sse_buf_cap;
+    uint32_t connect_timeout_ms;
+    uint32_t read_idle_ms;
+} http_stream_req_t;
+
+static void http_stream_rearm_read_idle(http_stream_req_t *ctx);
+
+static mimi_err_t http_stream_open_internal(const mimi_http_request_t *req,
+                                            const mimi_http_stream_callbacks_t *callbacks,
+                                            void *user_data,
+                                            mimi_http_stream_handle_t **out_handle);
 
 static void http_send_request(struct mg_connection *c, http_ctx_t *ctx)
 {
@@ -155,8 +242,9 @@ static void http_async_post_complete(http_async_req_t *ctx)
     event_bus_t *bus = event_bus_get_global();
     if (!bus) return;
 
-    http_async_complete_t *c = (http_async_complete_t *)calloc(1, sizeof(*c));
+    http_internal_async_complete_t *c = (http_internal_async_complete_t *)calloc(1, sizeof(*c));
     if (!c) return;
+    c->type = HTTP_INTERNAL_ASYNC_COMPLETE;
     c->result = ctx->result;
     c->resp = ctx->resp;
     c->callback = ctx->callback;
@@ -191,6 +279,322 @@ static void http_async_timeout_cb(void *arg)
     http_async_req_t *ctx = (http_async_req_t *)arg;
     if (!ctx || ctx->done) return;
     http_async_finish(ctx, MIMI_ERR_TIMEOUT);
+}
+
+static void http_stream_free_open_meta(mimi_http_response_t *meta)
+{
+    if (!meta) return;
+    free(meta->content_type);
+    meta->content_type = NULL;
+    if (meta->captured_headers) {
+        for (size_t i = 0; i < meta->captured_headers_count; i++) {
+            free(meta->captured_headers[i].name);
+            free(meta->captured_headers[i].value);
+        }
+        free(meta->captured_headers);
+    }
+    meta->captured_headers = NULL;
+    meta->captured_headers_count = 0;
+}
+
+static void http_stream_free_owned(http_stream_req_t *ctx)
+{
+    if (!ctx) return;
+    free((void *)ctx->req.method);
+    free((void *)ctx->req.url);
+    free((void *)ctx->req.headers);
+    free((void *)ctx->req.body);
+    if (ctx->req.capture_response_headers) {
+        for (size_t i = 0; i < ctx->req.capture_response_headers_count; i++) {
+            free((void *)ctx->req.capture_response_headers[i]);
+        }
+        free((void *)ctx->req.capture_response_headers);
+    }
+    ctx->req.method = NULL;
+    ctx->req.url = NULL;
+    ctx->req.headers = NULL;
+    ctx->req.body = NULL;
+    ctx->req.capture_response_headers = NULL;
+    ctx->req.capture_response_headers_count = 0;
+    free(ctx->sse_buf);
+    ctx->sse_buf = NULL;
+    ctx->sse_buf_len = 0;
+    ctx->sse_buf_cap = 0;
+    http_stream_free_open_meta(&ctx->open_meta);
+}
+
+static void http_stream_destroy_timeout_timer(http_stream_req_t *ctx)
+{
+    if (!ctx || !ctx->timeout_timer) return;
+    if (ctx->mgr && ctx->mgr->timers == NULL) {
+        ctx->timeout_timer = NULL;
+        return;
+    }
+    if (ctx->mgr) mg_timer_free(&ctx->mgr->timers, ctx->timeout_timer);
+    free(ctx->timeout_timer);
+    ctx->timeout_timer = NULL;
+}
+
+static void http_stream_post_event(http_stream_req_t *ctx, http_stream_event_msg_t *evt)
+{
+    if (!ctx || !ctx->bus || !evt) return;
+    int post_rc = event_bus_post_recv(ctx->bus,
+                                      EVENT_RECV,
+                                      0,
+                                      CONN_HTTP_CLIENT,
+                                      NULL,
+                                      CONN_TO_ID(evt),
+                                      EVENT_FLAG_INTERNAL);
+    if (post_rc != 0) {
+        http_stream_free_open_meta(&evt->open_meta);
+        free(evt->event_name);
+        free(evt->event_data);
+        free(evt->data);
+        free(evt);
+    }
+}
+
+static void http_stream_post_open(http_stream_req_t *ctx)
+{
+    if (!ctx || ctx->opened) return;
+    ctx->opened = true;
+    /* Connect phase used `connect_timeout_ms`; after headers, use read-idle (reset per chunk). */
+    http_stream_rearm_read_idle(ctx);
+    if (!ctx->callbacks.on_open) return;
+
+    http_stream_event_msg_t *evt = (http_stream_event_msg_t *)calloc(1, sizeof(*evt));
+    if (!evt) return;
+    evt->type = HTTP_INTERNAL_STREAM_EVENT;
+    evt->kind = HTTP_STREAM_EVENT_OPEN;
+    evt->callbacks = ctx->callbacks;
+    evt->user_data = ctx->user_data;
+    evt->open_meta.status = ctx->open_meta.status;
+    if (ctx->open_meta.content_type) {
+        evt->open_meta.content_type = strdup(ctx->open_meta.content_type);
+    }
+    evt->open_meta.captured_headers_count = ctx->open_meta.captured_headers_count;
+    if (ctx->open_meta.captured_headers_count > 0 && ctx->open_meta.captured_headers) {
+        evt->open_meta.captured_headers = (mimi_http_header_kv_t *)calloc(
+            ctx->open_meta.captured_headers_count, sizeof(mimi_http_header_kv_t));
+        if (!evt->open_meta.captured_headers) {
+            free(evt->open_meta.content_type);
+            free(evt);
+            return;
+        }
+        for (size_t i = 0; i < ctx->open_meta.captured_headers_count; i++) {
+            if (ctx->open_meta.captured_headers[i].name) {
+                evt->open_meta.captured_headers[i].name =
+                    strdup(ctx->open_meta.captured_headers[i].name);
+            }
+            if (ctx->open_meta.captured_headers[i].value) {
+                evt->open_meta.captured_headers[i].value =
+                    strdup(ctx->open_meta.captured_headers[i].value);
+            }
+        }
+    }
+    http_stream_post_event(ctx, evt);
+}
+
+static void http_stream_post_sse_ex(http_stream_req_t *ctx,
+                                    const char *event_name,
+                                    const char *data,
+                                    const char *event_id,
+                                    int retry_ms)
+{
+    if (!ctx || (!ctx->callbacks.on_sse_event && !ctx->callbacks.on_sse_event_ex) || !data) return;
+    http_stream_event_msg_t *evt = (http_stream_event_msg_t *)calloc(1, sizeof(*evt));
+    if (!evt) return;
+    evt->type = HTTP_INTERNAL_STREAM_EVENT;
+    evt->kind = HTTP_STREAM_EVENT_SSE;
+    evt->callbacks = ctx->callbacks;
+    evt->user_data = ctx->user_data;
+    evt->retry_ms = retry_ms;
+    if (event_name && event_name[0]) evt->event_name = strdup(event_name);
+    if (event_id && event_id[0]) evt->event_id = strdup(event_id);
+    evt->event_data = strdup(data);
+    if (!evt->event_data) {
+        free(evt->event_name);
+        free(evt->event_id);
+        free(evt);
+        return;
+    }
+    http_stream_post_event(ctx, evt);
+}
+
+static void http_stream_post_data(http_stream_req_t *ctx, const uint8_t *data, size_t len)
+{
+    if (!ctx || !ctx->callbacks.on_data || !data || len == 0) return;
+    http_stream_event_msg_t *evt = (http_stream_event_msg_t *)calloc(1, sizeof(*evt));
+    if (!evt) return;
+    evt->type = HTTP_INTERNAL_STREAM_EVENT;
+    evt->kind = HTTP_STREAM_EVENT_DATA;
+    evt->callbacks = ctx->callbacks;
+    evt->user_data = ctx->user_data;
+    evt->data = (uint8_t *)malloc(len);
+    if (!evt->data) {
+        free(evt);
+        return;
+    }
+    memcpy(evt->data, data, len);
+    evt->data_len = len;
+    http_stream_post_event(ctx, evt);
+}
+
+static void http_stream_post_close(http_stream_req_t *ctx)
+{
+    if (!ctx || ctx->posted_close || !ctx->callbacks.on_close) return;
+    ctx->posted_close = true;
+    http_stream_event_msg_t *evt = (http_stream_event_msg_t *)calloc(1, sizeof(*evt));
+    if (!evt) return;
+    evt->type = HTTP_INTERNAL_STREAM_EVENT;
+    evt->kind = HTTP_STREAM_EVENT_CLOSE;
+    evt->callbacks = ctx->callbacks;
+    evt->user_data = ctx->user_data;
+    evt->err = ctx->result;
+    http_stream_post_event(ctx, evt);
+}
+
+static mimi_err_t http_stream_sse_append(http_stream_req_t *ctx, const void *chunk, size_t len)
+{
+    if (!ctx || !chunk || len == 0) return MIMI_OK;
+    size_t need = ctx->sse_buf_len + len + 1;
+    if (need > ctx->sse_buf_cap) {
+        size_t cap = ctx->sse_buf_cap ? ctx->sse_buf_cap : 1024;
+        while (cap < need) cap *= 2;
+        char *nb = (char *)realloc(ctx->sse_buf, cap);
+        if (!nb) return MIMI_ERR_NO_MEM;
+        ctx->sse_buf = nb;
+        ctx->sse_buf_cap = cap;
+    }
+    memcpy(ctx->sse_buf + ctx->sse_buf_len, chunk, len);
+    ctx->sse_buf_len += len;
+    ctx->sse_buf[ctx->sse_buf_len] = '\0';
+    return MIMI_OK;
+}
+
+static size_t http_stream_find_event_delim(const char *buf, size_t len, size_t *delim_len)
+{
+    if (!buf || len == 0) return (size_t)-1;
+    for (size_t i = 0; i + 1 < len; i++) {
+        if (buf[i] == '\n' && buf[i + 1] == '\n') {
+            if (delim_len) *delim_len = 2;
+            return i;
+        }
+        if (i + 3 < len &&
+            buf[i] == '\r' && buf[i + 1] == '\n' &&
+            buf[i + 2] == '\r' && buf[i + 3] == '\n') {
+            if (delim_len) *delim_len = 4;
+            return i;
+        }
+    }
+    return (size_t)-1;
+}
+
+static void http_stream_parse_sse_events(http_stream_req_t *ctx)
+{
+    if (!ctx || !ctx->sse_buf || ctx->sse_buf_len == 0) return;
+    for (;;) {
+        size_t delim_len = 0;
+        size_t pos = http_stream_find_event_delim(ctx->sse_buf, ctx->sse_buf_len, &delim_len);
+        if (pos == (size_t)-1) break;
+
+        char *event_name = NULL;
+        char *event_id = NULL;
+        int retry_ms = -1;
+        char *data = (char *)calloc(1, pos + 1);
+        size_t data_len = 0;
+        if (!data) return;
+
+        size_t start = 0;
+        while (start < pos) {
+            size_t end = start;
+            while (end < pos && ctx->sse_buf[end] != '\n') end++;
+            size_t line_len = end - start;
+            if (line_len > 0 && ctx->sse_buf[start + line_len - 1] == '\r') line_len--;
+            const char *line = ctx->sse_buf + start;
+
+            if (line_len > 0 && line[0] != ':') {
+                const char *colon = memchr(line, ':', line_len);
+                size_t key_len = colon ? (size_t)(colon - line) : line_len;
+                const char *val = colon ? colon + 1 : "";
+                size_t val_len = colon ? (line_len - key_len - 1) : 0;
+                if (val_len > 0 && val[0] == ' ') {
+                    val++;
+                    val_len--;
+                }
+                if (key_len == 5 && memcmp(line, "event", 5) == 0) {
+                    free(event_name);
+                    event_name = (char *)malloc(val_len + 1);
+                    if (event_name) {
+                        memcpy(event_name, val, val_len);
+                        event_name[val_len] = '\0';
+                    }
+                } else if (key_len == 2 && memcmp(line, "id", 2) == 0) {
+                    free(event_id);
+                    event_id = (char *)malloc(val_len + 1);
+                    if (event_id) {
+                        memcpy(event_id, val, val_len);
+                        event_id[val_len] = '\0';
+                    }
+                } else if (key_len == 5 && memcmp(line, "retry", 5) == 0) {
+                    if (val_len > 0) {
+                        char tmp[32];
+                        size_t n = val_len >= sizeof(tmp) ? (sizeof(tmp) - 1) : val_len;
+                        memcpy(tmp, val, n);
+                        tmp[n] = '\0';
+                        int r = atoi(tmp);
+                        if (r > 0 && r < 120000) retry_ms = r;
+                    }
+                } else if (key_len == 4 && memcmp(line, "data", 4) == 0) {
+                    if (data_len > 0) data[data_len++] = '\n';
+                    if (val_len > 0) {
+                        memcpy(data + data_len, val, val_len);
+                        data_len += val_len;
+                    }
+                    data[data_len] = '\0';
+                }
+            }
+            start = end + 1;
+        }
+
+        if (data_len > 0) {
+            http_stream_post_sse_ex(ctx, event_name, data, event_id, retry_ms);
+        }
+        free(event_name);
+        free(event_id);
+        free(data);
+
+        size_t consume = pos + delim_len;
+        size_t remain = ctx->sse_buf_len - consume;
+        memmove(ctx->sse_buf, ctx->sse_buf + consume, remain);
+        ctx->sse_buf_len = remain;
+        ctx->sse_buf[ctx->sse_buf_len] = '\0';
+    }
+}
+
+static void http_stream_finish(http_stream_req_t *ctx, mimi_err_t result)
+{
+    if (!ctx || ctx->done) return;
+    ctx->done = true;
+    ctx->result = result;
+    http_stream_destroy_timeout_timer(ctx);
+    if (ctx->conn) ctx->conn->is_closing = 1;
+}
+
+static void http_stream_timeout_cb(void *arg)
+{
+    http_stream_req_t *ctx = (http_stream_req_t *)arg;
+    if (!ctx || ctx->done) return;
+    http_stream_finish(ctx, MIMI_ERR_TIMEOUT);
+}
+
+/* After response headers: idle limit between chunks (httpx `read`); reset on each read. */
+static void http_stream_rearm_read_idle(http_stream_req_t *ctx)
+{
+    if (!ctx || ctx->done || !ctx->opened || !ctx->mgr) return;
+    http_stream_destroy_timeout_timer(ctx);
+    ctx->timeout_timer =
+        mg_timer_add(ctx->mgr, (uint64_t)ctx->read_idle_ms, 0, http_stream_timeout_cb, ctx);
 }
 
 static void http_send_request_async(struct mg_connection *c, http_async_req_t *ctx)
@@ -229,6 +633,46 @@ static void http_send_request_async(struct mg_connection *c, http_async_req_t *c
     if (body_len > 0) {
         mg_send(c, ctx->req.body, body_len);
     }
+}
+
+static void http_send_request_from_req(struct mg_connection *c,
+                                       const mimi_http_request_t *req,
+                                       char *host_name,
+                                       size_t host_name_size)
+{
+    if (!c || !req || !req->url) return;
+    struct mg_str host = mg_url_host(req->url);
+    const char *uri = mg_url_uri(req->url);
+    if (!uri) uri = "/";
+    int port = mg_url_port(req->url);
+    bool is_ssl = mg_url_is_ssl(req->url);
+    if (port == 0) port = is_ssl ? 443 : 80;
+
+    if (host_name && host_name_size > 0) {
+        snprintf(host_name, host_name_size, "%.*s", (int)host.len, host.buf ? host.buf : "");
+    }
+    char host_header[192];
+    bool default_port = (is_ssl && port == 443) || (!is_ssl && port == 80);
+    if (default_port) snprintf(host_header, sizeof(host_header), "%.*s", (int)host.len, host.buf ? host.buf : "");
+    else snprintf(host_header, sizeof(host_header), "%.*s:%d", (int)host.len, host.buf ? host.buf : "", port);
+
+    const char *extra = (req->headers && req->headers[0]) ? req->headers : "";
+    size_t body_len = req->body ? req->body_len : 0;
+    mg_printf(c,
+              "%s %s HTTP/1.1\r\n"
+              "Host: %s\r\n"
+              "Connection: keep-alive\r\n"
+              "%s%s"
+              "Content-Length: %lu\r\n"
+              "\r\n",
+              req->method ? req->method : "GET",
+              uri,
+              host_header,
+              extra,
+              (extra[0] && (extra[strlen(extra) - 1] != '\n')) ? "\r\n" : "",
+              (unsigned long)body_len);
+
+    if (body_len > 0) mg_send(c, req->body, body_len);
 }
 
 static void http_signal_done(http_ctx_t *ctx, mimi_err_t result)
@@ -675,6 +1119,202 @@ static void http_ev_proxy_async(struct mg_connection *c, int ev, void *ev_data)
     }
 }
 
+/* Same semantics as mongoose skip_chunk() (not exported). */
+static bool http_is_hex_digit(int c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int http_skip_chunk(const char *buf, int len, int *pl, int *dl)
+{
+    int i = 0, n = 0;
+    if (len < 3) return 0;
+    while (i < len && http_is_hex_digit(buf[i])) i++;
+    if (i == 0) return -1;
+    if (i > (int)sizeof(int) * 2) return -1;
+    if (len < i + 1 || buf[i] != '\r' || buf[i + 1] != '\n') return -1;
+    if (mg_str_to_num(mg_str_n(buf, (size_t)i), 16, &n, sizeof(n)) == false) return -1;
+    if (n < 0) return -1;
+    if (n > len - i - 4) return 0;
+    if (buf[i + n + 2] != '\r' || buf[i + n + 3] != '\n') return -1;
+    *pl = i + 2;
+    *dl = n;
+    return i + 2 + n + 2;
+}
+
+static void http_stream_consume_body(http_stream_req_t *ctx, struct mg_connection *c)
+{
+    if (!ctx || !c || ctx->done) return;
+
+    if (ctx->body_mode == HTTP_STREAM_BODY_CHUNKED) {
+        for (;;) {
+            if (c->recv.len == 0) return;
+            int pl = 0, dl = 0;
+            int cl = http_skip_chunk((char *)c->recv.buf, (int)c->recv.len, &pl, &dl);
+            if (cl == 0) return;
+            if (cl < 0) {
+                http_stream_finish(ctx, MIMI_ERR_IO);
+                return;
+            }
+            if (dl == 0) {
+                mg_iobuf_del(&c->recv, 0, (size_t)cl);
+                http_stream_finish(ctx, MIMI_OK);
+                return;
+            }
+            const uint8_t *payload = (uint8_t *)c->recv.buf + (size_t)pl;
+            if (ctx->is_sse) {
+                if (http_stream_sse_append(ctx, payload, (size_t)dl) != MIMI_OK) {
+                    http_stream_finish(ctx, MIMI_ERR_NO_MEM);
+                    return;
+                }
+                http_stream_parse_sse_events(ctx);
+            } else {
+                http_stream_post_data(ctx, payload, (size_t)dl);
+            }
+            mg_iobuf_del(&c->recv, 0, (size_t)cl);
+            http_stream_rearm_read_idle(ctx);
+        }
+    } else if (ctx->body_mode == HTTP_STREAM_BODY_FIXED_LEN) {
+        if (ctx->fixed_remain == 0) return;
+        size_t take = c->recv.len;
+        if (take > ctx->fixed_remain) take = ctx->fixed_remain;
+        if (take == 0) return;
+        if (ctx->is_sse) {
+            if (http_stream_sse_append(ctx, c->recv.buf, take) != MIMI_OK) {
+                http_stream_finish(ctx, MIMI_ERR_NO_MEM);
+                return;
+            }
+            http_stream_parse_sse_events(ctx);
+        } else {
+            http_stream_post_data(ctx, c->recv.buf, take);
+        }
+        ctx->fixed_remain -= take;
+        mg_iobuf_del(&c->recv, 0, take);
+        http_stream_rearm_read_idle(ctx);
+        if (ctx->fixed_remain == 0) http_stream_finish(ctx, MIMI_OK);
+    } else {
+        /* RAW / until-close */
+        if (c->recv.len == 0) return;
+        if (ctx->is_sse) {
+            if (http_stream_sse_append(ctx, c->recv.buf, c->recv.len) != MIMI_OK) {
+                http_stream_finish(ctx, MIMI_ERR_NO_MEM);
+                return;
+            }
+            http_stream_parse_sse_events(ctx);
+        } else {
+            http_stream_post_data(ctx, c->recv.buf, c->recv.len);
+        }
+        mg_iobuf_del(&c->recv, 0, c->recv.len);
+        http_stream_rearm_read_idle(ctx);
+    }
+}
+
+/* Raw TCP/TLS read path (mg_connect, no mongoose http_cb). Required for infinite
+ * chunked SSE: http_cb buffers until a terminal zero-length chunk. */
+static void http_stream_on_read(http_stream_req_t *ctx, struct mg_connection *c)
+{
+    if (!ctx || !c || c->recv.len == 0) return;
+
+    if (!ctx->headers_parsed) {
+        struct mg_http_message hm;
+        int n = mg_http_parse((char *)c->recv.buf, c->recv.len, &hm);
+        if (n < 0) {
+            http_stream_finish(ctx, MIMI_ERR_IO);
+            return;
+        }
+        if (n == 0) return;
+
+        ctx->open_meta.status = mg_http_status(&hm);
+        http_set_content_type(&ctx->open_meta, &hm);
+        http_capture_captured_headers_from_mg(&ctx->open_meta, &hm);
+        ctx->is_sse = ctx->open_meta.content_type &&
+                      strstr(ctx->open_meta.content_type, "text/event-stream") != NULL;
+        if (!ctx->is_sse && ctx->req.headers &&
+            strstr(ctx->req.headers, "text/event-stream") != NULL) {
+            ctx->is_sse = true;
+        }
+
+        ctx->body_mode = (uint8_t)HTTP_STREAM_BODY_RAW;
+        struct mg_str *te = mg_http_get_header(&hm, "Transfer-Encoding");
+        if (te && mg_strcasecmp(*te, mg_str("chunked")) == 0) {
+            ctx->body_mode = (uint8_t)HTTP_STREAM_BODY_CHUNKED;
+        } else {
+            struct mg_str *clh = mg_http_get_header(&hm, "Content-Length");
+            if (clh && clh->buf && clh->len > 0 && clh->len < 64) {
+                char tmp[64];
+                memcpy(tmp, clh->buf, clh->len);
+                tmp[clh->len] = '\0';
+                unsigned long long clv = strtoull(tmp, NULL, 10);
+                ctx->fixed_remain = (size_t)clv;
+                ctx->body_mode = (uint8_t)HTTP_STREAM_BODY_FIXED_LEN;
+            }
+        }
+
+        ctx->headers_parsed = true;
+        http_stream_post_open(ctx);
+        mg_iobuf_del(&c->recv, 0, (size_t)n);
+    }
+
+    http_stream_consume_body(ctx, c);
+}
+
+static void http_ev_stream_direct(struct mg_connection *c, int ev, void *ev_data)
+{
+    http_stream_req_t *ctx = (http_stream_req_t *)c->fn_data;
+    if (!ctx) return;
+    ctx->conn = c;
+
+    if (ctx->handle &&
+        atomic_load_explicit(&ctx->handle->close_requested, memory_order_acquire) &&
+        !ctx->done) {
+        http_stream_finish(ctx, MIMI_ERR_EXIT);
+    }
+
+    if (ev == MG_EV_CONNECT) {
+        int status = ev_data ? *(int *)ev_data : 0;
+        if (status != 0) {
+            http_stream_finish(ctx, MIMI_ERR_IO);
+            c->is_closing = 1;
+            return;
+        }
+        struct mg_str host = mg_url_host(ctx->req.url);
+        if (mg_url_is_ssl(ctx->req.url)) {
+            struct mg_tls_opts opts;
+            memset(&opts, 0, sizeof(opts));
+            char host_name[128];
+            snprintf(host_name, sizeof(host_name), "%.*s", (int)host.len, host.buf ? host.buf : "");
+            opts.name = mg_str(host_name);
+            opts.skip_verification = 1;
+            mg_tls_init(c, &opts);
+        } else {
+            http_send_request_from_req(c, &ctx->req, ctx->host_name, sizeof(ctx->host_name));
+        }
+    } else if (ev == MG_EV_TLS_HS) {
+        int status = ev_data ? *(int *)ev_data : 0;
+        if (status != 0) {
+            http_stream_finish(ctx, MIMI_ERR_IO);
+            c->is_closing = 1;
+            return;
+        }
+        http_send_request_from_req(c, &ctx->req, ctx->host_name, sizeof(ctx->host_name));
+    } else if (ev == MG_EV_READ) {
+        http_stream_on_read(ctx, c);
+    } else if (ev == MG_EV_ERROR) {
+        http_stream_finish(ctx, MIMI_ERR_IO);
+        c->is_closing = 1;
+    } else if (ev == MG_EV_CLOSE) {
+        http_stream_destroy_timeout_timer(ctx);
+        if (!ctx->done) ctx->result = MIMI_ERR_IO;
+        http_stream_post_close(ctx);
+        if (ctx->handle) {
+            http_stream_handle_release(ctx->handle); /* release stream context ownership */
+            ctx->handle = NULL;
+        }
+        http_stream_free_owned(ctx);
+        free(ctx);
+    }
+}
+
 static void http_ev_direct(struct mg_connection *c, int ev, void *ev_data)
 {
     http_ctx_t *ctx = (http_ctx_t *)c->fn_data;
@@ -723,10 +1363,9 @@ static void http_ev_direct(struct mg_connection *c, int ev, void *ev_data)
         http_set_content_type(ctx->resp, hm);
         http_capture_captured_headers_from_mg(ctx->resp, hm);
 
-        bool wants_sse = (ctx->req->headers && strstr(ctx->req->headers, "text/event-stream") != NULL);
         bool is_sse_resp = (ctx->resp && ctx->resp->content_type &&
                             strstr(ctx->resp->content_type, "text/event-stream") != NULL);
-        if ((is_sse_resp || wants_sse) && hm->body.len == 0) {
+        if (is_sse_resp && hm->body.len == 0) {
             /* SSE: don't finish on headers-only/empty body; wait for a complete SSE event in MG_EV_READ. */
             return;
         }
@@ -1080,9 +1719,16 @@ mimi_err_t mimi_http_exec(const mimi_http_request_t *req, mimi_http_response_t *
 mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_response_t *resp,
                                        mimi_http_callback_t callback, void *user_data)
 {
-    if (!req || !resp || !callback) {
+    if (!req) {
         return MIMI_ERR_INVALID_ARG;
     }
+
+    if (req->mode == MIMI_HTTP_CALL_STREAM) {
+        if (!req->stream_callbacks || !req->out_stream_handle) return MIMI_ERR_INVALID_ARG;
+        return http_stream_open_internal(req, req->stream_callbacks, user_data, req->out_stream_handle);
+    }
+
+    if (!resp || !callback) return MIMI_ERR_INVALID_ARG;
 
     event_bus_t *bus = event_bus_get_global();
     if (!bus) return MIMI_ERR_INVALID_STATE;
@@ -1184,6 +1830,111 @@ mimi_err_t mimi_http_exec_async(const mimi_http_request_t *req, mimi_http_respon
     return MIMI_OK;
 }
 
+static mimi_err_t http_stream_open_internal(const mimi_http_request_t *req,
+                                            const mimi_http_stream_callbacks_t *callbacks,
+                                            void *user_data,
+                                            mimi_http_stream_handle_t **out_handle)
+{
+    if (!req || !callbacks || !out_handle || !req->url || !req->url[0]) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    if (!callbacks->on_open && !callbacks->on_sse_event &&
+        !callbacks->on_data && !callbacks->on_close) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+    if (http_proxy_is_enabled()) {
+        /* Stream mode currently supports direct connections only. */
+        return MIMI_ERR_NOT_SUPPORTED;
+    }
+
+    event_bus_t *bus = event_bus_get_global();
+    struct mg_mgr *mgr = (struct mg_mgr *)mimi_runtime_get_event_loop();
+    if (!bus || !mgr) return MIMI_ERR_INVALID_STATE;
+
+    http_stream_req_t *ctx = (http_stream_req_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) return MIMI_ERR_NO_MEM;
+    ctx->req.method = req->method ? strdup(req->method) : NULL;
+    ctx->req.url = req->url ? strdup(req->url) : NULL;
+    ctx->req.headers = req->headers ? strdup(req->headers) : NULL;
+    ctx->req.timeout_ms = req->timeout_ms;
+    ctx->req.stream_read_idle_ms = req->stream_read_idle_ms;
+    if (req->body && req->body_len > 0) {
+        uint8_t *b = (uint8_t *)malloc(req->body_len);
+        if (!b) {
+            http_stream_free_owned(ctx);
+            free(ctx);
+            return MIMI_ERR_NO_MEM;
+        }
+        memcpy(b, req->body, req->body_len);
+        ctx->req.body = b;
+        ctx->req.body_len = req->body_len;
+    }
+    ctx->req.capture_response_headers_count = req->capture_response_headers_count;
+    if (req->capture_response_headers_count > 0 && req->capture_response_headers) {
+        ctx->req.capture_response_headers = (const char **)calloc(
+            req->capture_response_headers_count, sizeof(char *));
+        if (!ctx->req.capture_response_headers) {
+            http_stream_free_owned(ctx);
+            free(ctx);
+            return MIMI_ERR_NO_MEM;
+        }
+        for (size_t i = 0; i < req->capture_response_headers_count; i++) {
+            const char *n = req->capture_response_headers[i];
+            if (n && n[0]) ((char **)ctx->req.capture_response_headers)[i] = strdup(n);
+        }
+    }
+    http_response_init_captured_headers(&ctx->open_meta, &ctx->req);
+    ctx->callbacks = *callbacks;
+    ctx->user_data = user_data;
+    ctx->bus = bus;
+    ctx->mgr = mgr;
+    ctx->result = MIMI_ERR_TIMEOUT;
+    ctx->connect_timeout_ms = req->timeout_ms ? req->timeout_ms : 30000;
+    ctx->read_idle_ms = req->stream_read_idle_ms ? req->stream_read_idle_ms : 60000;
+
+    mimi_http_stream_handle_t *handle = (mimi_http_stream_handle_t *)calloc(1, sizeof(*handle));
+    if (!handle) {
+        http_stream_free_owned(ctx);
+        free(ctx);
+        return MIMI_ERR_NO_MEM;
+    }
+    atomic_init(&handle->close_requested, false);
+    /* shared by stream context + caller */
+    atomic_init(&handle->refcnt, 2);
+    ctx->handle = handle;
+
+    /* Until response headers: connect / time-to-first-byte (httpx pool/connect style).
+     * After `http_stream_post_open`, timer switches to read-idle between chunks. */
+    ctx->timeout_timer =
+        mg_timer_add(mgr, (uint64_t)ctx->connect_timeout_ms, 0, http_stream_timeout_cb, ctx);
+    /* mg_http_connect installs http_cb, which waits for a complete chunked body (terminal
+     * zero chunk). Infinite SSE never sends that — use raw mg_connect per mongoose
+     * streaming-client tutorial. */
+    ctx->conn = mg_connect(mgr, ctx->req.url, http_ev_stream_direct, ctx);
+    if (!ctx->conn) {
+        http_stream_destroy_timeout_timer(ctx);
+        free(handle);
+        ctx->handle = NULL;
+        http_stream_free_owned(ctx);
+        free(ctx);
+        return MIMI_ERR_IO;
+    }
+
+    *out_handle = handle;
+    return MIMI_OK;
+}
+
+void mimi_http_exec_async_cancel(mimi_http_stream_handle_t *stream_handle)
+{
+    if (!stream_handle) return;
+    atomic_store_explicit(&stream_handle->close_requested, true, memory_order_release);
+}
+
+void mimi_http_stream_handle_release(mimi_http_stream_handle_t *stream_handle)
+{
+    http_stream_handle_release(stream_handle);
+}
+
 /* HTTP event handler for internal async completions (runs on dispatcher workers) */
 static void http_event_handler(event_dispatcher_t *disp, event_msg_t *msg, void *user_data)
 {
@@ -1191,11 +1942,40 @@ static void http_event_handler(event_dispatcher_t *disp, event_msg_t *msg, void 
     (void)user_data;
 
     if (msg->type == EVENT_RECV && (msg->flags & EVENT_FLAG_INTERNAL) && msg->user_data) {
-        http_async_complete_t *c = (http_async_complete_t *)(uintptr_t)msg->user_data;
-        if (c->callback) {
-            c->callback(c->result, c->resp, c->callback_data);
+        http_internal_msg_base_t *base = (http_internal_msg_base_t *)(uintptr_t)msg->user_data;
+        http_internal_msg_type_t type = base->type;
+        if (type == HTTP_INTERNAL_ASYNC_COMPLETE) {
+            http_internal_async_complete_t *c =
+                (http_internal_async_complete_t *)(uintptr_t)msg->user_data;
+            if (c->callback) c->callback(c->result, c->resp, c->callback_data);
+            free(c);
+        } else if (type == HTTP_INTERNAL_STREAM_EVENT) {
+            http_stream_event_msg_t *evt = (http_stream_event_msg_t *)(uintptr_t)msg->user_data;
+            if (evt->kind == HTTP_STREAM_EVENT_OPEN && evt->callbacks.on_open) {
+                evt->callbacks.on_open(&evt->open_meta, evt->user_data);
+            } else if (evt->kind == HTTP_STREAM_EVENT_SSE &&
+                       (evt->callbacks.on_sse_event_ex || evt->callbacks.on_sse_event)) {
+                if (evt->callbacks.on_sse_event_ex) {
+                    evt->callbacks.on_sse_event_ex(evt->event_name,
+                                                   evt->event_data,
+                                                   evt->event_id,
+                                                   evt->retry_ms,
+                                                   evt->user_data);
+                } else if (evt->callbacks.on_sse_event) {
+                    evt->callbacks.on_sse_event(evt->event_name, evt->event_data, evt->user_data);
+                }
+            } else if (evt->kind == HTTP_STREAM_EVENT_DATA && evt->callbacks.on_data) {
+                evt->callbacks.on_data(evt->data, evt->data_len, evt->user_data);
+            } else if (evt->kind == HTTP_STREAM_EVENT_CLOSE && evt->callbacks.on_close) {
+                evt->callbacks.on_close(evt->err, evt->user_data);
+            }
+            http_stream_free_open_meta(&evt->open_meta);
+            free(evt->event_name);
+            free(evt->event_data);
+            free(evt->event_id);
+            free(evt->data);
+            free(evt);
         }
-        free(c);
     } else if (msg->type == EVENT_ERROR) {
         MIMI_LOGE("http_posix", "HTTP error: %d", msg->error_code);
     }

@@ -1,12 +1,16 @@
 #pragma once
 
 #include "mimi_err.h"
+#include <stdbool.h>
 #include <stddef.h>
 
 /**
  * Initialize web search tool.
  */
 mimi_err_t tool_web_search_init(void);
+
+/** True if web_search should appear in the LLM tools list (enabled in config and API key set). */
+bool tool_web_search_should_expose(void);
 const char *tool_web_search_schema_json(void);
 const char *tool_web_search_description(void);
 

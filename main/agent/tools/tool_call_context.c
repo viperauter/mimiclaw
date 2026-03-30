@@ -23,7 +23,7 @@ static bool s_initialized = false;
 
 /* Always allowed tools list (simple array for now) */
 #define MAX_ALWAYS_ALLOWED_TOOLS 32
-static char s_always_allowed[MAX_ALWAYS_ALLOWED_TOOLS][64];
+static char s_always_allowed[MAX_ALWAYS_ALLOWED_TOOLS][MIMI_MAX_TOOL_NAME_LEN];
 static int s_always_allowed_count = 0;
 
 mimi_err_t tool_call_context_manager_init(void)
@@ -119,8 +119,8 @@ tool_call_context_t *tool_call_context_create(
     if (agent_ctx) {
         /* Cast to agent_request_ctx_t to access channel and chat_id */
         typedef struct {
-            char channel[64];
-            char chat_id[128];
+            char channel[MIMI_CHANNEL_NAME_LEN];
+            char chat_id[MIMI_CHAT_ID_LEN];
         } agent_ctx_t;
         agent_ctx_t *ctx_ptr = (agent_ctx_t *)agent_ctx;
         
@@ -327,8 +327,9 @@ mimi_err_t tool_call_context_mark_always_allowed(const char *tool_name)
     
     /* Add to list */
     if (s_always_allowed_count < MAX_ALWAYS_ALLOWED_TOOLS) {
-        strncpy(s_always_allowed[s_always_allowed_count], tool_name, 63);
-        s_always_allowed[s_always_allowed_count][63] = '\0';
+        strncpy(s_always_allowed[s_always_allowed_count], tool_name,
+                sizeof(s_always_allowed[s_always_allowed_count]) - 1);
+        s_always_allowed[s_always_allowed_count][sizeof(s_always_allowed[s_always_allowed_count]) - 1] = '\0';
         s_always_allowed_count++;
         
         mimi_mutex_unlock(s_mutex);

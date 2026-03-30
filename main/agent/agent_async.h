@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include "mimi_err.h"
+#include "mimi_config.h"
 #include "cJSON.h"
 
 /**
@@ -9,18 +10,18 @@
  * Used to track state of asynchronous agent processing
  */
 typedef struct {
-    char system_prompt[16384];  /* System prompt */
+    char system_prompt[MIMI_CONTEXT_BUF_SIZE];
     cJSON *messages;           /* Message history */
     const char *tools_json;     /* Tools JSON schema */
-    char channel[64];           /* Channel identifier */
-    char chat_id[64];           /* Chat ID */
-    char trace_id[64];          /* Trace ID for llm_trace correlation */
-    char content[32768];        /* User content */
-    char final_text[32768];     /* Final response text */
+    char channel[MIMI_CHANNEL_NAME_LEN];
+    char chat_id[MIMI_CHAT_ID_LEN];
+    char trace_id[MIMI_TRACE_ID_LEN]; /* Trace ID for llm_trace correlation */
+    char content[MIMI_AGENT_ASYNC_USER_TEXT_SIZE];
+    char final_text[MIMI_AGENT_ASYNC_USER_TEXT_SIZE];
     int iteration;              /* Current iteration */
     int max_iters;              /* Maximum iterations */
     bool sent_working_status;    /* Whether working status was sent */
-    char tool_output[8192];     /* Tool output buffer */
+    char tool_output[MIMI_TOOL_OUTPUT_SIZE];
     void *user_data;            /* User data */
     void (*completion_callback)(mimi_err_t result, const char *text, void *user_data);
 } agent_async_ctx_t;

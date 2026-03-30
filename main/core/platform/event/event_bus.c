@@ -183,6 +183,46 @@ int event_bus_post_close(event_bus_t *bus,
     return 0;
 }
 
+typedef struct {
+    event_bus_call_fn_t fn;
+    void *arg;
+} event_bus_call_msg_t;
+
+int event_bus_post_call(event_bus_t *bus, event_bus_call_fn_t fn, void *arg)
+{
+    if (!bus || !bus->send_queue || !fn) {
+        return -1;
+    }
+
+    event_bus_call_msg_t *c = (event_bus_call_msg_t *)calloc(1, sizeof(*c));
+    if (!c) return -1;
+    c->fn = fn;
+    c->arg = arg;
+
+    event_msg_t msg = {
+        .conn_id = CONN_TO_ID(c),
+        .user_data = 0,
+        .timestamp_ns = (uint64_t)mimi_time_ms() * 1000000,
+        .type = EVENT_CALL,
+        .conn_type = CONN_UNKNOWN,
+        .flags = EVENT_FLAG_INTERNAL,
+        .error_code = 0,
+        .buf = NULL
+    };
+
+    mimi_err_t err = mimi_queue_try_send(bus->send_queue, &msg);
+    if (err != MIMI_OK) {
+        free(c);
+        MIMI_LOGW(TAG, "Send queue full, dropping call request");
+        return -1;
+    }
+
+    if (bus->wakeup_fn) {
+        bus->wakeup_fn(bus->wakeup_arg);
+    }
+    return 0;
+}
+
 int event_bus_post_error(event_bus_t *bus,
                         uint64_t conn_id,
                         conn_type_t conn_type,

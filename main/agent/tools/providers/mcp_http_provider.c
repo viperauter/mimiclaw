@@ -13,8 +13,11 @@ static const char *TAG = "mcp_http_provider";
 static const char *MCP_PROTOCOL_VERSION = "2025-11-25";
 static const uint32_t MCP_HTTP_TIMEOUT_MS = 3000;
 static const uint32_t MCP_SSE_WAIT_TIMEOUT_MS = 9000;
-static const int MCP_HTTP_429_MAX_RETRIES = 2;
-static const uint32_t MCP_HTTP_429_BASE_DELAY_MS = 800;
+/* Match test/integration/webparse_simple.py: httpx.Timeout(30.0, read=60.0) */
+static const uint32_t MCP_HTTP_SSE_CONNECT_MS = 30000;
+static const uint32_t MCP_HTTP_SSE_READ_IDLE_MS = 60000;
+static const int MCP_HTTP_429_MAX_RETRIES = 4;
+static const uint32_t MCP_HTTP_429_BASE_DELAY_MS = 1200;
 
 static const char *MCP_CAPTURE_HEADERS[] = {
     "MCP-Session-Id",
@@ -151,6 +154,531 @@ static char *parse_sse_for_response(mcp_server_t *s, const char *body, const cha
     return NULL;
 }
 
+static void mcp_sse_build_poll_headers(mcp_server_t *s, char *out, size_t out_sz);
+static const char *effective_url(const char *url, char *buf, size_t buf_sz);
+static bool url_join_origin_path(const char *base_url, const char *path, char *out, size_t out_sz);
+
+typedef struct {
+    mcp_server_t *s;
+    mimi_mutex_t *mu;
+    mimi_cond_t *cv;
+    mimi_http_stream_handle_t *stream_handle;
+    bool opened;
+    bool closed;
+    mimi_err_t close_err;
+    char wait_id[64];
+    char *matched_resp;
+    mcp_server_msg_cb_t on_notification;
+    mcp_server_msg_cb_t on_request;
+} mcp_legacy_sse_pump_t;
+
+static mcp_legacy_sse_pump_t g_legacy_sse_pumps[8];
+
+static void mcp_legacy_update_endpoint_from_event(mcp_server_t *s, const char *data)
+{
+    if (!s || !data || !data[0]) return;
+    char msg_url[512] = {0};
+    if (strncmp(data, "http://", 7) == 0 || strncmp(data, "https://", 8) == 0) {
+        snprintf(msg_url, sizeof(msg_url), "%s", data);
+    } else {
+        if (!url_join_origin_path(s->url, data, msg_url, sizeof(msg_url))) return;
+    }
+    if (msg_url[0]) {
+        strncpy(s->sse_message_url, msg_url, sizeof(s->sse_message_url) - 1);
+        s->sse_message_url[sizeof(s->sse_message_url) - 1] = '\0';
+    }
+
+    const char *sid_key = strstr(msg_url, "sessionId=");
+    if (!sid_key) sid_key = strstr(msg_url, "session_id=");
+    if (sid_key) {
+        const char *sid = strchr(sid_key, '=');
+        if (sid) sid++;
+        if (sid && *sid) {
+            const char *end = sid;
+            while (*end && *end != '&' && *end != ' ' && *end != '\r' && *end != '\n') end++;
+            size_t n = (size_t)(end - sid);
+            if (n > 0) {
+                if (n >= sizeof(s->session_id)) n = sizeof(s->session_id) - 1;
+                memcpy(s->session_id, sid, n);
+                s->session_id[n] = '\0';
+            }
+        }
+    }
+}
+
+static mcp_legacy_sse_pump_t *mcp_get_legacy_sse_pump(mcp_server_t *s, bool create_if_missing)
+{
+    if (!s) return NULL;
+    mcp_legacy_sse_pump_t *free_slot = NULL;
+    for (size_t i = 0; i < sizeof(g_legacy_sse_pumps) / sizeof(g_legacy_sse_pumps[0]); i++) {
+        mcp_legacy_sse_pump_t *p = &g_legacy_sse_pumps[i];
+        if (p->s == s) return p;
+        if (!p->s && !free_slot) free_slot = p;
+    }
+    if (!create_if_missing || !free_slot) return NULL;
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->s = s;
+    if (mimi_mutex_create(&free_slot->mu) != MIMI_OK) {
+        memset(free_slot, 0, sizeof(*free_slot));
+        return NULL;
+    }
+    if (mimi_cond_create(&free_slot->cv) != MIMI_OK) {
+        mimi_mutex_destroy(free_slot->mu);
+        memset(free_slot, 0, sizeof(*free_slot));
+        return NULL;
+    }
+    return free_slot;
+}
+
+static void mcp_legacy_sse_pump_on_open(const mimi_http_response_t *meta, void *user_data)
+{
+    mcp_legacy_sse_pump_t *p = (mcp_legacy_sse_pump_t *)user_data;
+    if (!p || !p->mu || !p->cv) return;
+    MIMI_LOGI(TAG, "SSE pump open: server=%s status=%d content_type=%s",
+              p->s ? p->s->name : "(null)",
+              meta ? meta->status : 0,
+              (meta && meta->content_type) ? meta->content_type : "(null)");
+    (void)mimi_mutex_lock(p->mu);
+    p->opened = true;
+    (void)mimi_cond_signal(p->cv);
+    (void)mimi_mutex_unlock(p->mu);
+}
+
+static void mcp_legacy_sse_pump_on_event_ex(const char *event_name,
+                                            const char *data,
+                                            const char *event_id,
+                                            int retry_ms,
+                                            void *user_data)
+{
+    mcp_legacy_sse_pump_t *p = (mcp_legacy_sse_pump_t *)user_data;
+    if (!p || !p->s || !p->mu || !p->cv || !data) return;
+    if (event_id && event_id[0]) {
+        strncpy(p->s->last_event_id, event_id, sizeof(p->s->last_event_id) - 1);
+        p->s->last_event_id[sizeof(p->s->last_event_id) - 1] = '\0';
+    }
+    if (retry_ms > 0 && retry_ms < 120000) p->s->sse_retry_ms = retry_ms;
+    MIMI_LOGI(TAG, "SSE pump event: server=%s event=%s id=%s retry=%d data=%.*s",
+              p->s->name,
+              (event_name && event_name[0]) ? event_name : "(none)",
+              (event_id && event_id[0]) ? event_id : "(none)",
+              retry_ms,
+              (int)(strlen(data) > 160 ? 160 : strlen(data)), data);
+
+    /* DashScope legacy behavior: endpoint updates can arrive as SSE events. */
+    if (event_name && strcmp(event_name, "endpoint") == 0) {
+        mcp_legacy_update_endpoint_from_event(p->s, data);
+    }
+
+    (void)mimi_mutex_lock(p->mu);
+    const char *expect_id = p->wait_id[0] ? p->wait_id : NULL;
+    char *matched = process_jsonrpc_message(p->s, data, expect_id, p->on_notification, p->on_request);
+    if (matched) {
+        if (p->matched_resp) free(p->matched_resp);
+        p->matched_resp = matched;
+        (void)mimi_cond_signal(p->cv);
+    }
+    (void)mimi_mutex_unlock(p->mu);
+}
+
+static void mcp_legacy_sse_pump_on_close(mimi_err_t err, void *user_data)
+{
+    mcp_legacy_sse_pump_t *p = (mcp_legacy_sse_pump_t *)user_data;
+    if (!p || !p->mu || !p->cv) return;
+    MIMI_LOGI(TAG, "SSE pump close: server=%s err=%d", p->s ? p->s->name : "(null)", err);
+    (void)mimi_mutex_lock(p->mu);
+    p->closed = true;
+    p->close_err = err;
+    p->stream_handle = NULL;
+    (void)mimi_cond_signal(p->cv);
+    (void)mimi_mutex_unlock(p->mu);
+}
+
+static bool mcp_legacy_sse_pump_ensure(mcp_server_t *s,
+                                       mcp_server_msg_cb_t on_notification,
+                                       mcp_server_msg_cb_t on_request)
+{
+    if (!s || !s->url[0]) return false;
+    mcp_legacy_sse_pump_t *p = mcp_get_legacy_sse_pump(s, true);
+    if (!p) return false;
+    (void)mimi_mutex_lock(p->mu);
+    p->on_notification = on_notification;
+    p->on_request = on_request;
+    bool need_start = (p->stream_handle == NULL || p->closed);
+    if (need_start) {
+        p->opened = false;
+        p->closed = false;
+        p->close_err = MIMI_OK;
+        p->wait_id[0] = '\0';
+        if (p->matched_resp) {
+            free(p->matched_resp);
+            p->matched_resp = NULL;
+        }
+    }
+    (void)mimi_mutex_unlock(p->mu);
+
+    if (!need_start) return true;
+
+    char sse_url_buf[768];
+    const char *sse_url = effective_url(s->url, sse_url_buf, sizeof(sse_url_buf));
+    char poll_headers[1024];
+    mcp_sse_build_poll_headers(s, poll_headers, sizeof(poll_headers));
+
+    static const mimi_http_stream_callbacks_t cb = {
+        .on_open = mcp_legacy_sse_pump_on_open,
+        .on_sse_event = NULL,
+        .on_sse_event_ex = mcp_legacy_sse_pump_on_event_ex,
+        .on_data = NULL,
+        .on_close = mcp_legacy_sse_pump_on_close,
+    };
+
+    mimi_http_stream_handle_t *handle = NULL;
+    mimi_http_request_t req = {
+        .method = "GET",
+        .url = sse_url,
+        .headers = poll_headers,
+        .timeout_ms = MCP_HTTP_SSE_CONNECT_MS,
+        .stream_read_idle_ms = MCP_HTTP_SSE_READ_IDLE_MS,
+        .mode = MIMI_HTTP_CALL_STREAM,
+        .stream_callbacks = &cb,
+        .out_stream_handle = &handle,
+        .capture_response_headers = MCP_CAPTURE_HEADERS,
+        .capture_response_headers_count = MCP_CAPTURE_HEADERS_COUNT,
+    };
+    mimi_err_t err = mimi_http_exec_async(&req, NULL, NULL, p);
+    if (err != MIMI_OK || !handle) return false;
+
+    (void)mimi_mutex_lock(p->mu);
+    p->stream_handle = handle;
+    long long deadline = now_ms() + 1500;
+    while (!p->opened && !p->closed) {
+        long long rem = deadline - now_ms();
+        if (rem <= 0) break;
+        (void)mimi_cond_wait(p->cv, p->mu, (uint32_t)rem);
+    }
+    bool ok = p->opened && !p->closed;
+    (void)mimi_mutex_unlock(p->mu);
+    return ok;
+}
+
+/* So SSE can match JSON-RPC results that arrive while the synchronous POST is still in flight. */
+static void mcp_legacy_sse_pump_arm(mcp_server_t *s, const char *id_str)
+{
+    if (!s || !id_str || !id_str[0]) return;
+    mcp_legacy_sse_pump_t *p = mcp_get_legacy_sse_pump(s, false);
+    if (!p || !p->mu) return;
+    (void)mimi_mutex_lock(p->mu);
+    snprintf(p->wait_id, sizeof(p->wait_id), "%s", id_str);
+    if (p->matched_resp) {
+        free(p->matched_resp);
+        p->matched_resp = NULL;
+    }
+    (void)mimi_mutex_unlock(p->mu);
+}
+
+static void mcp_legacy_sse_pump_disarm(mcp_server_t *s)
+{
+    mcp_legacy_sse_pump_t *p = mcp_get_legacy_sse_pump(s, false);
+    if (!p || !p->mu) return;
+    (void)mimi_mutex_lock(p->mu);
+    p->wait_id[0] = '\0';
+    if (p->matched_resp) {
+        free(p->matched_resp);
+        p->matched_resp = NULL;
+    }
+    (void)mimi_mutex_unlock(p->mu);
+}
+
+static char *mcp_legacy_sse_pump_wait_response(mcp_server_t *s, const char *id_str, uint32_t timeout_ms)
+{
+    if (!s || !id_str) return NULL;
+    mcp_legacy_sse_pump_t *p = mcp_get_legacy_sse_pump(s, false);
+    if (!p || !p->mu || !p->cv) return NULL;
+    long long deadline = now_ms() + (long long)timeout_ms;
+    for (;;) {
+        (void)mimi_mutex_lock(p->mu);
+        snprintf(p->wait_id, sizeof(p->wait_id), "%s", id_str);
+        if (p->matched_resp) {
+            char *ret = p->matched_resp;
+            p->matched_resp = NULL;
+            p->wait_id[0] = '\0';
+            (void)mimi_mutex_unlock(p->mu);
+            return ret;
+        }
+        while (!p->matched_resp && !p->closed) {
+            long long rem = deadline - now_ms();
+            if (rem <= 0) break;
+            (void)mimi_cond_wait(p->cv, p->mu, (uint32_t)rem);
+        }
+        if (p->matched_resp) {
+            char *ret = p->matched_resp;
+            p->matched_resp = NULL;
+            p->wait_id[0] = '\0';
+            (void)mimi_mutex_unlock(p->mu);
+            return ret;
+        }
+        bool was_closed = p->closed;
+        p->wait_id[0] = '\0';
+        (void)mimi_mutex_unlock(p->mu);
+
+        long long rem = deadline - now_ms();
+        if (rem <= 0) return NULL;
+        if (!was_closed) return NULL;
+
+        /* Stream closed before response; reconnect and keep waiting until timeout. */
+        (void)mcp_legacy_sse_pump_ensure(s, p->on_notification, p->on_request);
+    }
+}
+
+typedef struct {
+    mcp_server_t *s;
+    char *expect_id; /* owned copy */
+    mcp_server_msg_cb_t on_notification;
+    mcp_server_msg_cb_t on_request;
+    mimi_mutex_t *mu;
+    mimi_cond_t *cv;
+    bool done;
+    bool stream_closed;
+    bool stream_opened;
+    bool should_free_on_close;
+    mimi_err_t close_err;
+    char *ret; /* owned result; freed by waiter if not returned */
+    mimi_http_stream_handle_t *stream_handle;
+} mcp_sse_stream_wait_ctx_t;
+
+static void mcp_sse_on_open(const mimi_http_response_t *meta, void *user_data)
+{
+    mcp_sse_stream_wait_ctx_t *ctx = (mcp_sse_stream_wait_ctx_t *)user_data;
+    if (!ctx || !ctx->mu || !ctx->cv) return;
+    MIMI_LOGI(TAG, "SSE wait open: server=%s status=%d content_type=%s",
+              ctx->s ? ctx->s->name : "(null)",
+              meta ? meta->status : 0,
+              (meta && meta->content_type) ? meta->content_type : "(null)");
+    (void)mimi_mutex_lock(ctx->mu);
+    ctx->stream_opened = true;
+    (void)mimi_cond_signal(ctx->cv);
+    (void)mimi_mutex_unlock(ctx->mu);
+}
+
+static void mcp_sse_on_event_ex(const char *event_name,
+                                const char *data,
+                                const char *event_id,
+                                int retry_ms,
+                                void *user_data)
+{
+    (void)event_name;
+    mcp_sse_stream_wait_ctx_t *ctx = (mcp_sse_stream_wait_ctx_t *)user_data;
+    if (!ctx || !ctx->s || !data) return;
+
+    if (event_id && event_id[0]) {
+        strncpy(ctx->s->last_event_id, event_id, sizeof(ctx->s->last_event_id) - 1);
+        ctx->s->last_event_id[sizeof(ctx->s->last_event_id) - 1] = '\0';
+    }
+    if (retry_ms > 0 && retry_ms < 120000) {
+        ctx->s->sse_retry_ms = retry_ms;
+    }
+    if (data && data[0]) {
+        size_t n = strlen(data);
+        if (n > 160) n = 160;
+        MIMI_LOGI(TAG, "SSE wait event: server=%s event=%s id=%s retry=%d data=%.*s",
+                  ctx->s->name,
+                  (event_name && event_name[0]) ? event_name : "(none)",
+                  (event_id && event_id[0]) ? event_id : "(none)",
+                  retry_ms,
+                  (int)n, data);
+    } else {
+        MIMI_LOGI(TAG, "SSE wait event: server=%s event=%s id=%s retry=%d data=(empty)",
+                  ctx->s->name,
+                  (event_name && event_name[0]) ? event_name : "(none)",
+                  (event_id && event_id[0]) ? event_id : "(none)",
+                  retry_ms);
+    }
+
+    char *matched = process_jsonrpc_message(ctx->s, data, ctx->expect_id, ctx->on_notification, ctx->on_request);
+    if (matched) {
+        (void)mimi_mutex_lock(ctx->mu);
+        if (!ctx->ret) ctx->ret = matched;
+        else free(matched);
+        ctx->done = true;
+        (void)mimi_cond_signal(ctx->cv);
+        (void)mimi_mutex_unlock(ctx->mu);
+    }
+}
+
+static void mcp_sse_on_close(mimi_err_t err, void *user_data)
+{
+    mcp_sse_stream_wait_ctx_t *ctx = (mcp_sse_stream_wait_ctx_t *)user_data;
+    if (!ctx) return;
+    MIMI_LOGI(TAG, "SSE wait close: server=%s err=%d", ctx->s ? ctx->s->name : "(null)", err);
+    if (ctx->mu && ctx->cv) {
+        (void)mimi_mutex_lock(ctx->mu);
+        ctx->close_err = err;
+        ctx->stream_closed = true;
+        ctx->done = true;
+        (void)mimi_cond_signal(ctx->cv);
+        (void)mimi_mutex_unlock(ctx->mu);
+    } else {
+        ctx->close_err = err;
+        ctx->stream_closed = true;
+        ctx->done = true;
+    }
+
+    if (ctx->should_free_on_close) {
+        if (ctx->ret) {
+            free(ctx->ret);
+            ctx->ret = NULL;
+        }
+        if (ctx->expect_id) {
+            free(ctx->expect_id);
+            ctx->expect_id = NULL;
+        }
+        if (ctx->cv) mimi_cond_destroy(ctx->cv);
+        if (ctx->mu) mimi_mutex_destroy(ctx->mu);
+        free(ctx);
+    }
+}
+
+static mcp_sse_stream_wait_ctx_t *mcp_sse_stream_wait_start(mcp_server_t *s,
+                                                            const char *sse_url,
+                                                            const char *expect_id,
+                                                            mcp_server_msg_cb_t on_notification,
+                                                            mcp_server_msg_cb_t on_request)
+{
+    if (!s || !sse_url || !expect_id) return NULL;
+
+    mcp_sse_stream_wait_ctx_t *ctx = (mcp_sse_stream_wait_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) return NULL;
+    ctx->s = s;
+    ctx->expect_id = strdup(expect_id);
+    ctx->on_notification = on_notification;
+    ctx->on_request = on_request;
+    ctx->done = false;
+    ctx->stream_closed = false;
+    ctx->stream_opened = false;
+    ctx->should_free_on_close = false;
+    ctx->close_err = MIMI_OK;
+    ctx->ret = NULL;
+    ctx->stream_handle = NULL;
+
+    if (!ctx->expect_id) {
+        free(ctx);
+        return NULL;
+    }
+
+    ctx->mu = NULL;
+    ctx->cv = NULL;
+    if (mimi_mutex_create(&ctx->mu) != MIMI_OK || mimi_cond_create(&ctx->cv) != MIMI_OK) {
+        if (ctx->cv) mimi_cond_destroy(ctx->cv);
+        if (ctx->mu) mimi_mutex_destroy(ctx->mu);
+        free(ctx->expect_id);
+        free(ctx);
+        return NULL;
+    }
+
+    char poll_headers[1024];
+    mcp_sse_build_poll_headers(s, poll_headers, sizeof(poll_headers));
+
+    static const mimi_http_stream_callbacks_t cb = {
+        .on_open = mcp_sse_on_open,
+        .on_sse_event = NULL,
+        .on_sse_event_ex = mcp_sse_on_event_ex,
+        .on_data = NULL,
+        .on_close = mcp_sse_on_close,
+    };
+
+    mimi_http_stream_handle_t *handle = NULL;
+    mimi_http_request_t req = {
+        .method = "GET",
+        .url = sse_url,
+        .headers = poll_headers,
+        .timeout_ms = MCP_HTTP_SSE_CONNECT_MS,
+        .stream_read_idle_ms = MCP_HTTP_SSE_READ_IDLE_MS,
+        .mode = MIMI_HTTP_CALL_STREAM,
+        .stream_callbacks = &cb,
+        .out_stream_handle = &handle,
+        .capture_response_headers = MCP_CAPTURE_HEADERS,
+        .capture_response_headers_count = MCP_CAPTURE_HEADERS_COUNT,
+    };
+
+    mimi_err_t err = mimi_http_exec_async(&req, NULL, NULL, ctx);
+    if (err != MIMI_OK || !handle) {
+        mimi_cond_destroy(ctx->cv);
+        mimi_mutex_destroy(ctx->mu);
+        free(ctx->expect_id);
+        free(ctx);
+        return NULL;
+    }
+    ctx->stream_handle = handle;
+
+    /* Best-effort barrier: wait a short time for stream open callback so
+     * subsequent POST does not race ahead of SSE subscription readiness. */
+    long long open_deadline = now_ms() + 1500;
+    (void)mimi_mutex_lock(ctx->mu);
+    while (!ctx->stream_opened && !ctx->stream_closed) {
+        long long remaining = open_deadline - now_ms();
+        if (remaining <= 0) break;
+        (void)mimi_cond_wait(ctx->cv, ctx->mu, (uint32_t)remaining);
+    }
+    (void)mimi_mutex_unlock(ctx->mu);
+
+    return ctx;
+}
+
+static void mcp_sse_stream_wait_finish(mcp_sse_stream_wait_ctx_t *ctx, uint32_t timeout_ms_wait, char **inout_ret)
+{
+    if (!ctx || !inout_ret) return;
+    long long start_wait = now_ms();
+
+    (void)mimi_mutex_lock(ctx->mu);
+    while (!ctx->done) {
+        long long elapsed = now_ms() - start_wait;
+        if ((uint32_t)elapsed >= timeout_ms_wait) break;
+        (void)mimi_cond_wait(ctx->cv, ctx->mu, timeout_ms_wait - (uint32_t)elapsed);
+    }
+    (void)mimi_mutex_unlock(ctx->mu);
+
+    if (ctx->stream_handle) {
+        mimi_http_exec_async_cancel(ctx->stream_handle);
+        mimi_http_stream_handle_release(ctx->stream_handle);
+        ctx->stream_handle = NULL;
+    }
+
+    /* Wait until the stream is actually closed so callbacks won't run
+     * after we destroy ctx->mu/ctx->cv/ctx itself. */
+    bool can_free_now = false;
+    (void)mimi_mutex_lock(ctx->mu);
+    long long close_deadline = start_wait + (long long)timeout_ms_wait;
+    while (!ctx->stream_closed) {
+        long long remaining = close_deadline - now_ms();
+        if (remaining <= 0) break;
+        (void)mimi_cond_wait(ctx->cv, ctx->mu, (uint32_t)remaining);
+    }
+    can_free_now = ctx->stream_closed;
+
+    if (!*inout_ret && ctx->ret) {
+        *inout_ret = ctx->ret;
+        ctx->ret = NULL;
+    } else if (*inout_ret && ctx->ret) {
+        free(ctx->ret);
+        ctx->ret = NULL;
+    }
+
+    if (!can_free_now) {
+        /* Late on_close might still arrive after we return.
+         * Defer cleanup to the on_close callback to avoid UAF. */
+        ctx->should_free_on_close = true;
+        (void)mimi_mutex_unlock(ctx->mu);
+        return;
+    }
+    (void)mimi_mutex_unlock(ctx->mu);
+
+    /* Safe to destroy primitives now. */
+    free(ctx->ret);
+    free(ctx->expect_id);
+    mimi_cond_destroy(ctx->cv);
+    mimi_mutex_destroy(ctx->mu);
+    free(ctx);
+}
+
 static void build_http_headers(mcp_server_t *s, bool sse_only, char *headers, size_t headers_sz)
 {
     const char *pv = s->negotiated_protocol_version[0] ? s->negotiated_protocol_version : MCP_PROTOCOL_VERSION;
@@ -264,12 +792,53 @@ static bool parse_sse_endpoint_message(const char *body, size_t body_len,
     const char *path_start = data_colon;
     size_t path_len = first_len;
 
+    /* Some servers send an empty `data:` line and put the actual data on the next line(s),
+     * sometimes preceded by an HTTP chunk-size line.
+     * Example (DashScope observed):
+     *   event:endpoint
+     *   data:
+     *   4d
+     *   /api/.../message?sessionId=...
+     */
+    if (first_len == 0) {
+        const char *after = first_end;
+        while (after < body_end && (*after == '\r' || *after == '\n' || *after == ' ' || *after == '\t')) after++;
+        if (after >= body_end) return false;
+        const char *next_end = strpbrk(after, "\r\n");
+        if (!next_end || next_end > body_end) return false;
+        path_start = after;
+        path_len = (size_t)(next_end - after);
+    }
+
     /* Chunk-size heuristic: if first line is short hex and the next non-ws begins with '/', use that next line. */
     if (first_len > 0 && first_len <= 8) {
         char *hex_end = NULL;
         unsigned long maybe_chunk = strtoul(data_colon, &hex_end, 16);
         if (hex_end && hex_end != data_colon && maybe_chunk > 0 && maybe_chunk < 8192) {
             const char *after = first_end;
+            while (after < body_end && (*after == '\r' || *after == '\n' || *after == ' ' || *after == '\t')) after++;
+            if (after < body_end && *after == '/') {
+                const char *next_end = strpbrk(after, "\r\n");
+                if (next_end && next_end <= body_end) {
+                    path_start = after;
+                    path_len = (size_t)(next_end - after);
+                }
+            }
+        }
+    }
+
+    /* If `data:` was empty, path_start now points to the first line after `data:`.
+     * Apply the same chunk-size heuristic to that line. */
+    if (first_len == 0 && path_len > 0 && path_len <= 8) {
+        char tmp[16];
+        size_t n = path_len >= sizeof(tmp) ? sizeof(tmp) - 1 : path_len;
+        memcpy(tmp, path_start, n);
+        tmp[n] = '\0';
+
+        char *hex_end = NULL;
+        unsigned long maybe_chunk = strtoul(tmp, &hex_end, 16);
+        if (hex_end && hex_end != tmp && maybe_chunk > 0 && maybe_chunk < 8192) {
+            const char *after = path_start + path_len;
             while (after < body_end && (*after == '\r' || *after == '\n' || *after == ' ' || *after == '\t')) after++;
             if (after < body_end && *after == '/') {
                 const char *next_end = strpbrk(after, "\r\n");
@@ -373,6 +942,36 @@ static bool ensure_sse_endpoint(mcp_server_t *s, char *url_buf, size_t url_buf_s
     const char *sse_url = effective_url(s->url, url_buf, url_buf_sz);
     mimi_http_response_t gresp = {0};
     mimi_err_t gerr = mcp_legacy_fetch_endpoint_event(s, sse_url, &gresp);
+
+    /* DashScope misconfiguration guard:
+     * Users sometimes paste the non-SSE endpoint (trailing "/mcp") while selecting legacy SSE transport.
+     * If the first GET fails, try replacing the trailing "/mcp" with "/sse" and retry once.
+     */
+    char alt_url_buf[768];
+    const char *trailing_mcp = NULL;
+    if (gerr != MIMI_OK || gresp.status >= 400 || !gresp.body || gresp.body_len == 0) {
+        const char *u = sse_url;
+        size_t ulen = u ? strlen(u) : 0;
+        if (u && ulen >= 4 && strcmp(u + ulen - 4, "/mcp") == 0) trailing_mcp = u + ulen - 4;
+    }
+
+    if (trailing_mcp) {
+        size_t prefix_len = (size_t)(trailing_mcp - sse_url);
+        if (prefix_len + 4 + 1 < sizeof(alt_url_buf)) {
+            memcpy(alt_url_buf, sse_url, prefix_len);
+            memcpy(alt_url_buf + prefix_len, "/sse", 4);
+            alt_url_buf[prefix_len + 4] = '\0';
+
+            MIMI_LOGW(TAG, "SSE endpoint discovery retry: url=%s (from %s) server=%s",
+                      alt_url_buf, sse_url, s->name);
+
+            mimi_http_response_free(&gresp);
+            memset(&gresp, 0, sizeof(gresp));
+            gerr = mcp_legacy_fetch_endpoint_event(s, alt_url_buf, &gresp);
+            sse_url = alt_url_buf;
+        }
+    }
+
     if (gerr != MIMI_OK) {
         MIMI_LOGE(TAG, "SSE endpoint discovery GET failed: err=%d server=%s", gerr, s->name);
         mimi_http_response_free(&gresp);
@@ -406,125 +1005,45 @@ static bool ensure_sse_endpoint(mcp_server_t *s, char *url_buf, size_t url_buf_s
 static void mcp_sse_build_poll_headers(mcp_server_t *s, char *out, size_t out_sz)
 {
     if (!s || !out || out_sz == 0) return;
-    build_http_headers(s, true, out, out_sz);
+    int off = snprintf(out, out_sz,
+                       "Accept: text/event-stream\r\n"
+                       "Cache-Control: no-cache\r\n");
+    if (off < 0) {
+        out[0] = '\0';
+        return;
+    }
+    if (s->extra_http_headers[0]) {
+        size_t extra_len = strlen(s->extra_http_headers);
+        if ((size_t)off + extra_len < out_sz) {
+            memcpy(out + off, s->extra_http_headers, extra_len);
+            out[off + extra_len] = '\0';
+            off += (int)extra_len;
+        }
+    }
     if (s->last_event_id[0]) {
         size_t cur = strlen(out);
         snprintf(out + cur, out_sz - cur, "Last-Event-ID: %s\r\n", s->last_event_id);
     }
 }
 
-static mimi_err_t mcp_sse_poll_get_once(mcp_server_t *s, const char *sse_url, mimi_http_response_t *out_resp)
+static char *sse_stream_until_match(mcp_server_t *s,
+                                    const char *id_str,
+                                    mcp_server_msg_cb_t on_notification,
+                                    mcp_server_msg_cb_t on_request,
+                                    uint32_t timeout_ms_total)
 {
-    if (!s || !sse_url || !out_resp) return MIMI_ERR_INVALID_ARG;
-    char poll_headers[1024];
-    mcp_sse_build_poll_headers(s, poll_headers, sizeof(poll_headers));
-
-    mimi_http_request_t greq = {
-        .method = "GET",
-        .url = sse_url,
-        .headers = poll_headers,
-        .body = NULL,
-        .body_len = 0,
-        .timeout_ms = 5000,
-        .capture_response_headers = MCP_CAPTURE_HEADERS,
-        .capture_response_headers_count = MCP_CAPTURE_HEADERS_COUNT,
-    };
-    mimi_http_response_free(out_resp);
-    memset(out_resp, 0, sizeof(*out_resp));
-    return mimi_http_exec(&greq, out_resp);
-}
-
-static char *mcp_sse_parse_and_dispatch(mcp_server_t *s,
-                                        const mimi_http_response_t *resp,
-                                        const char *id_str,
-                                        mcp_server_msg_cb_t on_notification,
-                                        mcp_server_msg_cb_t on_request)
-{
-    if (!s || !resp || !id_str || !resp->body) return NULL;
-    bool is_sse = (resp->content_type && strstr(resp->content_type, "text/event-stream"));
-    if (is_sse) return parse_sse_for_response(s, (const char *)resp->body, id_str, on_notification, on_request);
-    return process_jsonrpc_message(s, (const char *)resp->body, id_str, on_notification, on_request);
-}
-
-static char *sse_poll_until_match(mcp_server_t *s, const char *id_str,
-                                   mcp_server_msg_cb_t on_notification, mcp_server_msg_cb_t on_request,
-                                   uint32_t timeout_ms_total)
-{
-    if (!s || !id_str) return NULL;
-    if (!s->url[0]) return NULL;
-
+    if (!s || !id_str || !s->url[0]) return NULL;
     char sse_url_buf[768];
     const char *sse_url = effective_url(s->url, sse_url_buf, sizeof(sse_url_buf));
     if (!sse_url || !sse_url[0]) return NULL;
 
-    long long deadline = now_ms() + (long long)timeout_ms_total;
-    while (now_ms() < deadline) {
-        mimi_http_response_t gresp = {0};
-        mimi_err_t gerr = mcp_sse_poll_get_once(s, sse_url, &gresp);
-        if (gerr != MIMI_OK) {
-            MIMI_LOGW(TAG, "SSE poll GET failed: err=%d server=%s url=%s",
-                      gerr, s->name, sse_url);
-            mimi_http_response_free(&gresp);
-            break;
-        }
-        MIMI_LOGD(TAG, "SSE poll GET: status=%d body_len=%zu content_type=%s",
-                  gresp.status, gresp.body_len,
-                  gresp.content_type ? gresp.content_type : "(null)");
-        if (gresp.body && gresp.body_len > 0) {
-            size_t dump_len = gresp.body_len > 256 ? 256 : gresp.body_len;
-            MIMI_LOGD(TAG, "SSE poll GET body (first %zu bytes): %.*s",
-                      dump_len, (int)dump_len, (const char *)gresp.body);
-        }
-
-        const char *session_id = mcp_session_id_from_resp(&gresp);
-        if (session_id && session_id[0]) {
-            strncpy(s->session_id, session_id, sizeof(s->session_id) - 1);
-            s->session_id[sizeof(s->session_id) - 1] = '\0';
-        }
-        if (gresp.status == 404 && s->session_id[0]) {
-            s->initialized = false;
-            s->session_id[0] = '\0';
-            mimi_http_response_free(&gresp);
-            break;
-        }
-        if (gresp.status >= 400 || !gresp.body) {
-            mimi_http_response_free(&gresp);
-            break;
-        }
-
-        char *ret = mcp_sse_parse_and_dispatch(s, &gresp, id_str, on_notification, on_request);
-
-        mimi_http_response_free(&gresp);
-        if (ret) return ret;
-
-        mimi_sleep_ms((uint32_t)(s->sse_retry_ms > 0 ? s->sse_retry_ms : 1000));
+    mcp_sse_stream_wait_ctx_t *ctx =
+        mcp_sse_stream_wait_start(s, sse_url, id_str, on_notification, on_request);
+    char *ret = NULL;
+    if (ctx) {
+        mcp_sse_stream_wait_finish(ctx, timeout_ms_total, &ret);
     }
-    return NULL;
-}
-
-typedef struct {
-    mcp_server_t *s;
-    char *id_str; /* owned copy */
-    mcp_server_msg_cb_t on_notification;
-    mcp_server_msg_cb_t on_request;
-    mimi_mutex_t *mu;
-    mimi_cond_t *cv;
-    bool done;
-    char *ret; /* owned result; free by waiter if not returned */
-} mcp_sse_wait_ctx_t;
-
-static void mcp_sse_wait_task(void *arg)
-{
-    mcp_sse_wait_ctx_t *ctx = (mcp_sse_wait_ctx_t *)arg;
-    if (!ctx || !ctx->s || !ctx->id_str) return;
-    char *ret = sse_poll_until_match(ctx->s, ctx->id_str, ctx->on_notification, ctx->on_request,
-                                     MCP_SSE_WAIT_TIMEOUT_MS);
-    if (mimi_mutex_lock(ctx->mu) == MIMI_OK) {
-        ctx->ret = ret;
-        ctx->done = true;
-        (void)mimi_cond_signal(ctx->cv);
-        (void)mimi_mutex_unlock(ctx->mu);
-    }
+    return ret;
 }
 
 static const char *mcp_http_mode_name(mcp_http_mode_t mode)
@@ -544,70 +1063,6 @@ static void mcp_http_mode_bootstrap(mcp_server_t *s)
     if (s->http_mode == MCP_HTTP_MODE_UNKNOWN) {
         s->http_mode = MCP_HTTP_MODE_STREAMABLE;
     }
-}
-
-static mcp_sse_wait_ctx_t *mcp_legacy_create_sse_wait_ctx(mcp_server_t *s, const char *id_str,
-                                                           mcp_server_msg_cb_t on_notification,
-                                                           mcp_server_msg_cb_t on_request)
-{
-    if (!s || !id_str) return NULL;
-    mcp_sse_wait_ctx_t *ctx = (mcp_sse_wait_ctx_t *)calloc(1, sizeof(*ctx));
-    if (!ctx) return NULL;
-
-    ctx->s = s;
-    ctx->id_str = strdup(id_str);
-    ctx->on_notification = on_notification;
-    ctx->on_request = on_request;
-    ctx->done = false;
-    ctx->ret = NULL;
-
-    if (!ctx->id_str) {
-        free(ctx);
-        return NULL;
-    }
-
-    ctx->mu = NULL;
-    ctx->cv = NULL;
-    if (mimi_mutex_create(&ctx->mu) != MIMI_OK || mimi_cond_create(&ctx->cv) != MIMI_OK) {
-        if (ctx->cv) mimi_cond_destroy(ctx->cv);
-        if (ctx->mu) mimi_mutex_destroy(ctx->mu);
-        free(ctx->id_str);
-        free(ctx);
-        return NULL;
-    }
-
-    (void)mimi_task_create_detached("mcp_sse_wait", mcp_sse_wait_task, ctx);
-    return ctx;
-}
-
-static void mcp_legacy_finish_sse_wait_ctx(mcp_sse_wait_ctx_t *sse_ctx, char **inout_ret)
-{
-    if (!sse_ctx || !inout_ret) return;
-
-    long long start_wait = now_ms();
-    uint32_t timeout_ms = MCP_HTTP_TIMEOUT_MS;
-
-    (void)mimi_mutex_lock(sse_ctx->mu);
-    while (!sse_ctx->done) {
-        long long elapsed = now_ms() - start_wait;
-        if ((uint32_t)elapsed >= timeout_ms) break;
-        (void)mimi_cond_wait(sse_ctx->cv, sse_ctx->mu, timeout_ms - (uint32_t)elapsed);
-    }
-    (void)mimi_mutex_unlock(sse_ctx->mu);
-
-    /* If POST already returned response, keep it and drop SSE duplicate. */
-    if (!*inout_ret && sse_ctx->ret) {
-        *inout_ret = sse_ctx->ret;
-        sse_ctx->ret = NULL;
-    } else if (*inout_ret && sse_ctx->ret) {
-        free(sse_ctx->ret);
-        sse_ctx->ret = NULL;
-    }
-
-    free(sse_ctx->id_str);
-    mimi_cond_destroy(sse_ctx->cv);
-    mimi_mutex_destroy(sse_ctx->mu);
-    free(sse_ctx);
 }
 
 static bool mcp_should_fallback_streamable_to_legacy(mcp_server_t *s, int http_status, bool is_empty_response)
@@ -699,12 +1154,82 @@ static mimi_err_t mcp_http_post_with_429_retry(const char *req_url,
     return herr;
 }
 
+static bool jsonrpc_extract_id_str(const char *json, char *out, size_t out_sz)
+{
+    if (!json || !out || out_sz == 0) return false;
+    out[0] = '\0';
+    const char *p = strstr(json, "\"id\"");
+    if (!p) return false;
+    p = strchr(p, ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p == '"') {
+        p++;
+        const char *e = strchr(p, '"');
+        if (!e) return false;
+        size_t n = (size_t)(e - p);
+        if (n == 0) return false;
+        if (n >= out_sz) n = out_sz - 1;
+        memcpy(out, p, n);
+        out[n] = '\0';
+        return true;
+    } else {
+        /* Numeric id */
+        const char *e = p;
+        while (*e && ((*e >= '0' && *e <= '9') || *e == '-' || *e == '.')) e++;
+        size_t n = (size_t)(e - p);
+        if (n == 0) return false;
+        if (n >= out_sz) n = out_sz - 1;
+        memcpy(out, p, n);
+        out[n] = '\0';
+        return true;
+    }
+}
+
+static char *dashscope_empty_200_workaround(const char *request_json)
+{
+    if (!request_json) return NULL;
+
+    /* DashScope MCP sometimes returns HTTP 200 with empty body for POST requests.
+     * Create minimal JSON-RPC responses so the rest of the MCP pipeline can proceed. */
+    char id[64];
+    if (!jsonrpc_extract_id_str(request_json, id, sizeof(id))) {
+        /* Fallback to "1" if id cannot be parsed */
+        snprintf(id, sizeof(id), "1");
+    }
+
+    if (strstr(request_json, "\"method\":\"initialize\"") != NULL) {
+        const char *tpl = "{\"jsonrpc\":\"2.0\",\"id\":\"%s\",\"result\":{}}";
+        size_t n = (size_t)snprintf(NULL, 0, tpl, id);
+        char *out = (char *)malloc(n + 1);
+        if (!out) return NULL;
+        snprintf(out, n + 1, tpl, id);
+        return out;
+    }
+
+    /* tools/list can be either "tools/list" or "tools.list" depending on client */
+    if (strstr(request_json, "\"method\":\"tools/list\"") != NULL ||
+        strstr(request_json, "\"method\":\"tools.list\"") != NULL) {
+        const char *tpl = "{\"jsonrpc\":\"2.0\",\"id\":\"%s\",\"result\":{\"tools\":[]}}";
+        size_t n = (size_t)snprintf(NULL, 0, tpl, id);
+        char *out = (char *)malloc(n + 1);
+        if (!out) return NULL;
+        snprintf(out, n + 1, tpl, id);
+        return out;
+    }
+
+    return NULL;
+}
+
 char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request_json,
                         mcp_server_msg_cb_t on_notification, mcp_server_msg_cb_t on_request)
 {
     if (!s || !request_json || !id_str) return NULL;
     char headers[1024];
     char sse_url_buf[768];
+
+    mcp_legacy_sse_pump_disarm(s);
 
     /* A single exchange can attempt streamable-first then legacy fallback.
      * Keep this loop explicit to avoid recursive calls that are harder to maintain. */
@@ -718,11 +1243,11 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
         }
         MIMI_LOGD(TAG, "HTTP exchange mode: %s server=%s", mcp_http_mode_name(s->http_mode), s->name);
 
-        /* Start a concurrent SSE reader before POST only in legacy mode.
-         * Streamable HTTP servers MUST NOT send unrelated responses on GET streams. */
-        mcp_sse_wait_ctx_t *sse_ctx = NULL;
+        /* Legacy HTTP+SSE: replies often arrive on SSE while POST is still in flight.
+         * Arm expect_id before POST; block in wait after POST if body is still empty. */
+        bool legacy_pump_ready = true;
         if (s->http_mode == MCP_HTTP_MODE_LEGACY_HTTP_SSE) {
-            sse_ctx = mcp_legacy_create_sse_wait_ctx(s, id_str, on_notification, on_request);
+            legacy_pump_ready = mcp_legacy_sse_pump_ensure(s, on_notification, on_request);
         }
 
         MIMI_LOGD(TAG, "HTTP exchange: server=%s id=%s url=%s body_len=%zu", s->name, id_str, req_url, strlen(request_json));
@@ -731,19 +1256,75 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
         build_http_headers(s, false, headers, sizeof(headers));
         MIMI_LOGD(TAG, "HTTP exchange headers: %s", headers);
 
+        /* Arm wait_id before POST: JSON-RPC reply may arrive on SSE while POST blocks. */
+        if (legacy_pump_ready && s->http_mode == MCP_HTTP_MODE_LEGACY_HTTP_SSE) {
+            mcp_legacy_sse_pump_arm(s, id_str);
+        }
+
         mimi_http_response_t hresp = {0};
         mimi_err_t herr = mcp_http_post_with_429_retry(req_url, headers, request_json, &hresp);
 
-        MIMI_LOGD(TAG, "HTTP exchange: err=%d status=%d body_len=%zu content_type=%s",
-                  herr, hresp.status, hresp.body_len,
-                  hresp.content_type ? hresp.content_type : "(null)");
+        if (hresp.status == 429 || hresp.status == 404 || hresp.status >= 400) {
+            MIMI_LOGI(TAG, "HTTP exchange: err=%d status=%d body_len=%zu content_type=%s server=%s",
+                      herr, hresp.status, hresp.body_len,
+                      hresp.content_type ? hresp.content_type : "(null)", s->name);
+        } else {
+            MIMI_LOGD(TAG, "HTTP exchange: err=%d status=%d body_len=%zu content_type=%s",
+                      herr, hresp.status, hresp.body_len,
+                      hresp.content_type ? hresp.content_type : "(null)");
+        }
         if (hresp.body && hresp.body_len > 0) {
             size_t dump_len = hresp.body_len > 256 ? 256 : hresp.body_len;
-            MIMI_LOGD(TAG, "HTTP exchange body (first %zu bytes): %.*s",
-                      dump_len, (int)dump_len, (const char *)hresp.body);
+            if (hresp.status == 429 || hresp.status == 404 || hresp.status >= 400) {
+                MIMI_LOGI(TAG, "HTTP exchange body (first %zu bytes): %.*s",
+                          dump_len, (int)dump_len, (const char *)hresp.body);
+            } else {
+                MIMI_LOGD(TAG, "HTTP exchange body (first %zu bytes): %.*s",
+                          dump_len, (int)dump_len, (const char *)hresp.body);
+            }
         }
 
         bool is_empty_response = (hresp.body_len == 0 || !hresp.body || !hresp.body[0]);
+
+        /* DashScope compatibility:
+         * Some legacy HTTP+SSE servers return HTTP 200 with an empty body for POST requests,
+         * while delivering the actual JSON-RPC response asynchronously on the SSE stream.
+         *
+         * IMPORTANT: In legacy_http_sse mode we must try SSE wait FIRST, otherwise we
+         * would incorrectly synthesize tools=[] and hide real tools (observed on DashScope).
+         */
+        if (herr == MIMI_OK && hresp.status >= 200 && hresp.status < 300 && is_empty_response) {
+            if (s->http_mode == MCP_HTTP_MODE_LEGACY_HTTP_SSE) {
+                MIMI_LOGI(TAG, "HTTP exchange: empty 2xx in legacy mode, waiting SSE response server=%s id=%s",
+                          s->name, id_str);
+                mimi_http_response_free(&hresp);
+                char *ret = NULL;
+                if (legacy_pump_ready) ret = mcp_legacy_sse_pump_wait_response(s, id_str, MCP_SSE_WAIT_TIMEOUT_MS);
+                if (ret) {
+                    mcp_legacy_sse_pump_disarm(s);
+                    return ret;
+                }
+
+                /* Fallback: if SSE didn't deliver, synthesize minimal JSON-RPC responses
+                 * for core methods so the MCP pipeline can proceed. */
+                char *synthetic = dashscope_empty_200_workaround(request_json);
+                if (synthetic) {
+                    MIMI_LOGW(TAG, "HTTP exchange: SSE wait returned nothing; using synthetic response server=%s id=%s",
+                              s->name, id_str);
+                    mcp_legacy_sse_pump_disarm(s);
+                    return synthetic;
+                }
+                mcp_legacy_sse_pump_disarm(s);
+                return NULL;
+            } else {
+                /* Streamable mode: keep the previous behavior (some servers truly return nothing). */
+                char *synthetic = dashscope_empty_200_workaround(request_json);
+                if (synthetic) {
+                    mimi_http_response_free(&hresp);
+                    return synthetic;
+                }
+            }
+        }
         
         /* False positive detection: HTTP client may return error for empty 200 responses,
          * but we need to check for fallback FIRST to handle servers that
@@ -753,6 +1334,7 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
             MIMI_LOGW(TAG, "Empty 200 response in streamable mode, checking fallback server=%s", s->name);
             if (mcp_try_fallback_to_legacy(s, hresp.status, is_empty_response)) {
                 mimi_http_response_free(&hresp);
+                mcp_legacy_sse_pump_disarm(s);
                 continue;
             }
         }
@@ -764,11 +1346,13 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
             if (hresp.status >= 200 && hresp.status < 300 &&
                 mcp_try_fallback_to_legacy(s, hresp.status, is_empty_response)) {
                 mimi_http_response_free(&hresp);
+                mcp_legacy_sse_pump_disarm(s);
                 continue;
             }
             MIMI_LOGE(TAG, "HTTP exchange failed: err=%d server=%s url=%s",
-                      herr, s->name, s->url);
+                      herr, s->name, req_url);
             mimi_http_response_free(&hresp);
+            mcp_legacy_sse_pump_disarm(s);
             return NULL;
         }
 
@@ -777,23 +1361,29 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
             strncpy(s->session_id, session_id, sizeof(s->session_id) - 1);
             s->session_id[sizeof(s->session_id) - 1] = '\0';
         }
-        if (hresp.status == 404 && s->session_id[0]) {
+        if (hresp.status == 404 && s->http_mode == MCP_HTTP_MODE_LEGACY_HTTP_SSE) {
+            /* Legacy endpoint may expire quickly; force endpoint/session refresh
+             * and retry once within this exchange loop. */
             s->initialized = false;
             s->session_id[0] = '\0';
+            s->sse_message_url[0] = '\0';
             mimi_http_response_free(&hresp);
-            return NULL;
+            mcp_legacy_sse_pump_disarm(s);
+            continue;
         }
 
         if (hresp.status >= 400 || !hresp.body) {
             /* Streamable-first: if the server says the endpoint doesn't exist, fall back. */
             if (mcp_try_fallback_to_legacy(s, hresp.status, is_empty_response)) {
                 mimi_http_response_free(&hresp);
+                mcp_legacy_sse_pump_disarm(s);
                 continue;
             }
 
             MIMI_LOGE(TAG, "HTTP exchange error: status=%d body_len=%zu server=%s url=%s",
                       hresp.status, hresp.body_len, s->name, req_url);
             mimi_http_response_free(&hresp);
+            mcp_legacy_sse_pump_disarm(s);
             return NULL;
         }
 
@@ -809,15 +1399,19 @@ char *mcp_http_exchange(mcp_server_t *s, const char *id_str, const char *request
             MIMI_LOGW(TAG, "HTTP exchange: no response parsed server=%s is_sse=%d", s->name, is_sse);
         }
 
+        /* If POST didn't yield a JSON-RPC response, legacy may still deliver on SSE. */
+        if (!ret && s->http_mode == MCP_HTTP_MODE_LEGACY_HTTP_SSE && legacy_pump_ready) {
+            ret = mcp_legacy_sse_pump_wait_response(s, id_str, MCP_SSE_WAIT_TIMEOUT_MS);
+        }
+
         /* Streamable HTTP: if POST returned only SSE priming/intermediate messages,
          * poll via GET with Last-Event-ID until we receive the matching response. */
         if (!ret && s->http_mode == MCP_HTTP_MODE_STREAMABLE && s->last_event_id[0]) {
-            ret = sse_poll_until_match(s, id_str, on_notification, on_request, MCP_SSE_WAIT_TIMEOUT_MS);
+            ret = sse_stream_until_match(s, id_str, on_notification, on_request, MCP_SSE_WAIT_TIMEOUT_MS);
         }
 
         mimi_http_response_free(&hresp);
-
-        if (sse_ctx) mcp_legacy_finish_sse_wait_ctx(sse_ctx, &ret);
+        mcp_legacy_sse_pump_disarm(s);
         return ret;
     }
     return NULL;

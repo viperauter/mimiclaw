@@ -60,7 +60,7 @@ static void agent_send_status(const char *channel,
 typedef struct {
     char channel[MIMI_CHANNEL_NAME_LEN];
     char chat_id[MIMI_CHAT_ID_LEN];
-    char trace_id[64];
+    char trace_id[MIMI_TRACE_ID_LEN];
     char content[MIMI_CONTEXT_BUF_SIZE];
     char *system_prompt;
     char *history_json_buf;
@@ -1479,7 +1479,7 @@ static mimi_err_t send_tool_confirmation_request(tool_call_context_t *tool_ctx)
     tool_call_context_retain(tool_ctx);
     
     /* Send control request */
-    char request_id[64];
+    char request_id[MIMI_CONTROL_REQUEST_ID_LEN];
     mimi_err_t err = control_manager_send_request(
         agent_ctx->channel,
         agent_ctx->chat_id,

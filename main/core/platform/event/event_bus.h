@@ -25,6 +25,7 @@ typedef enum {
     /* Send path: Worker -> Reactor */
     EVENT_SEND,         /* Request to send data */
     EVENT_CLOSE,        /* Request to close connection */
+    EVENT_CALL,         /* Request to run a callback in reactor thread */
 
     /* Timer */
     EVENT_TIMER,        /* Timer fired */
@@ -102,6 +103,10 @@ int event_bus_post_close(event_bus_t *bus,
                          uint64_t conn_id,
                          conn_type_t conn_type,
                          uint32_t flags);
+
+/* Worker -> Reactor: run a callback in reactor/event-loop thread */
+typedef void (*event_bus_call_fn_t)(void *arg);
+int event_bus_post_call(event_bus_t *bus, event_bus_call_fn_t fn, void *arg);
 
 /* Post error events */
 int event_bus_post_error(event_bus_t *bus,

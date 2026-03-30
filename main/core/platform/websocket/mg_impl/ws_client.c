@@ -18,6 +18,8 @@ typedef struct {
     
     struct mg_connection *conn;
     bool connected;
+    bool free_on_close;
+    struct mimi_ws_client *owner;
     
     uint64_t last_ping_time;
     uint32_t ping_interval_ms;
@@ -109,6 +111,11 @@ static void ws_event_handler(struct mg_connection *c, int ev, void *ev_data)
             if (bus) {
                 event_bus_post_recv(bus, EVENT_DISCONNECT, (uint64_t)c, ctx->conn_type, NULL, (uint64_t)ctx->user_data, 0);
             }
+
+            /* If destroy requested, free the client now (in event loop thread). */
+            if (ctx->free_on_close && ctx->owner) {
+                free(ctx->owner);
+            }
             break;
         }
     }
@@ -132,6 +139,8 @@ mimi_ws_client_t *mimi_ws_create(const mimi_ws_config_t *config)
     ctx->config = *config;
     ctx->event_cb = config->event_cb;
     ctx->user_data = config->user_data;
+    ctx->free_on_close = false;
+    ctx->owner = ws;
     
     ctx->ping_interval_ms = config->ping_interval_ms > 0 ? 
                            config->ping_interval_ms : 30000;
@@ -148,12 +157,18 @@ void mimi_ws_destroy(mimi_ws_client_t *ws)
     
     mimi_ws_ctx_t *ctx = &ws->ctx;
     
-    /* Disconnect if connected */
     if (ctx->conn) {
-        mg_close_conn(ctx->conn);
+        /* Request close on event loop thread; free when MG_EV_CLOSE arrives. */
+        ctx->free_on_close = true;
+        event_bus_t *bus = event_bus_get_global();
+        if (bus) {
+            (void)event_bus_post_close(bus, (uint64_t)ctx->conn, ctx->conn_type, EVENT_FLAG_INTERNAL);
+        }
         ctx->conn = NULL;
+        ctx->connected = false;
+        return;
     }
-    
+
     free(ws);
 }
 

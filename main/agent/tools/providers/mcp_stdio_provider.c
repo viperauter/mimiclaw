@@ -92,6 +92,43 @@ static void clear_cache(void)
     s_tools_json_merged = NULL;
 }
 
+static bool stdio_server_name_exists(const char *name, int up_to_index)
+{
+    if (!name || !name[0]) return false;
+    for (int i = 0; i < up_to_index; i++) {
+        if (s_servers[i].name[0] && strcmp(s_servers[i].name, name) == 0) return true;
+    }
+    return false;
+}
+
+/* Optional "name": derive from command basename or mcp_server_<index>; keep unique. */
+static void assign_stdio_server_name_if_missing(mcp_server_t *dst, int index)
+{
+    if (!dst || dst->name[0]) return;
+
+    char candidate[64] = {0};
+    const char *cmd = dst->command;
+    if (cmd && cmd[0]) {
+        const char *p = strrchr(cmd, '/');
+        p = p ? p + 1 : cmd;
+        snprintf(candidate, sizeof(candidate), "%s", p);
+    }
+    for (char *p = candidate; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        if (!ok) *p = '_';
+    }
+    if (!candidate[0]) snprintf(candidate, sizeof(candidate), "mcp_server_%d", index);
+    if (stdio_server_name_exists(candidate, index)) {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "%s_%d", candidate, index);
+        snprintf(candidate, sizeof(candidate), "%s", tmp);
+    }
+    strncpy(dst->name, candidate, sizeof(dst->name) - 1);
+    dst->name[sizeof(dst->name) - 1] = '\0';
+}
+
 static int split_cmd(const char *cmd, char **argv, int argv_cap, char *storage, size_t storage_cap)
 {
     if (!cmd || !argv || argv_cap < 2 || !storage || storage_cap == 0) return 0;
@@ -416,17 +453,25 @@ static mimi_err_t mcp_init(void)
     for (int i = 0; i < sn && s_server_count < MAX_MCP_SERVERS; i++) {
         mimi_cfg_obj_t node = mimi_cfg_arr_get(servers, i);
         if (!mimi_cfg_is_object(node)) continue;
+        /* enabled: optional, default true (same semantics as tools.mcpServers in mcp_provider). */
+        if (!mimi_cfg_get_bool(node, "enabled", true)) {
+            MIMI_LOGI(TAG, "Skipping MCP server (enabled=false): %s",
+                      mimi_cfg_get_str(node, "name", "(unnamed)"));
+            continue;
+        }
         mcp_server_t *dst = &s_servers[s_server_count++];
         memset(dst, 0, sizeof(*dst));
+        /* name optional; filled from command if empty (see assign_stdio_server_name_if_missing). */
         strncpy(dst->name, mimi_cfg_get_str(node, "name", ""), sizeof(dst->name) - 1);
         strncpy(dst->command, mimi_cfg_get_str(node, "command", ""), sizeof(dst->command) - 1);
+        assign_stdio_server_name_if_missing(dst, s_server_count - 1);
         dst->requires_confirmation = mimi_cfg_get_bool(node, "requires_confirmation", true);
         dst->pid = 0;
         dst->to_child = -1;
         dst->from_child = -1;
         dst->started = false;
         dst->tools_json = NULL;
-        if (dst->name[0] && dst->command[0]) {
+        if (dst->command[0]) {
             (void)refresh_server_tools(dst);
         }
     }

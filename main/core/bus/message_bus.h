@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "mimi_config.h"
 #include "mimi_err.h"
 
 /* Channel identifiers */
@@ -33,20 +34,20 @@ typedef enum {
 } mimi_control_type_t;
 
 typedef struct {
-    char channel[16];               /* "telegram", "websocket", "cli" */
-    char chat_id[128];              /* Telegram/Feishu chat_id or WS client id */
+    char channel[MIMI_CHANNEL_NAME_LEN];  /* "telegram", "websocket", "cli" */
+    char chat_id[MIMI_CHAT_ID_LEN];       /* Telegram/Feishu chat_id or WS client id */
     char *content;                  /* Heap-allocated message text (caller must free) */
     mimi_msg_type_t type;           /* Message type */
     
     /* Control message specific fields */
     mimi_control_type_t control_type;   /* Control type (for CONTROL messages) */
-    char request_id[64];                /* Unique request ID */
-    char target[64];                    /* Target (e.g., tool name, operation ID) */
-    char data[1024];                    /* Additional data (e.g., tool params) */
+    char request_id[MIMI_CONTROL_REQUEST_ID_LEN];
+    char target[MIMI_MAX_TOOL_NAME_LEN]; /* Target (e.g., tool name, operation ID) */
+    char data[MIMI_MSG_CONTROL_DATA_LEN]; /* Additional data (e.g. tool params) */
 
     /* Status message specific fields (for MIMI_MSG_TYPE_STATUS). */
     mimi_status_phase_t status_phase;   /* Phase of the status update */
-    char status_key[64];                /* Optional logical key (e.g., "agent_turn") */
+    char status_key[MIMI_MSG_STATUS_KEY_LEN];
 } mimi_msg_t;
 
 /**

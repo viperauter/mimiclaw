@@ -40,6 +40,14 @@ void tool_provider_registry_deinit(void)
         }
     }
     s_provider_count = 0;
+    if (s_cache_mu) mimi_mutex_lock(s_cache_mu);
+    free(s_tools_json_cache);
+    s_tools_json_cache = NULL;
+    if (s_cache_mu) {
+        mimi_mutex_unlock(s_cache_mu);
+        mimi_mutex_destroy(s_cache_mu);
+        s_cache_mu = NULL;
+    }
     invalidate_cache();
 }
 

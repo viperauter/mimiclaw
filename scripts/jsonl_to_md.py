@@ -143,14 +143,15 @@ def _collect_multiline_strings(v: Any, path: str = "") -> List[Tuple[str, str]]:
     return out
 
 
-def _collect_role_content_blocks(v: Any) -> Dict[str, List[str]]:
+def _collect_role_content_blocks(v: Any) -> List[Tuple[str, str]]:
     """
-    Collect chat-like content blocks and group by role.
+    Collect chat-like content blocks in order (preserving message sequence).
+    Returns list of (role, content) tuples for turn-based rendering.
     Targets common trace payload shapes:
       - {"role": "...", "content": "..."}
       - {"message": {"role": "...", "content": "..."}}
     """
-    grouped: Dict[str, List[str]] = {}
+    out: List[Tuple[str, str]] = []
     seen: set[Tuple[str, str]] = set()
 
     def add(role: str, content: str) -> None:
@@ -159,13 +160,12 @@ def _collect_role_content_blocks(v: Any) -> Dict[str, List[str]]:
         if key in seen:
             return
         seen.add(key)
-        grouped.setdefault(role_key, []).append(content)
+        out.append((role_key, content))
 
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             role = node.get("role")
             content = node.get("content")
-            # Include any non-empty message text (not only multiline) so short user lines render before JSON.
             if isinstance(role, str) and isinstance(content, str) and content.strip():
                 add(role, content)
 
@@ -186,7 +186,7 @@ def _collect_role_content_blocks(v: Any) -> Dict[str, List[str]]:
                 walk(vv)
 
     walk(v)
-    return grouped
+    return out
 
 
 def _collect_tool_calls_preview(v: Any) -> List[Dict[str, str]]:
@@ -272,7 +272,6 @@ def _write_fold_parsed_human_first(out, field_key: str, parsed: Any) -> None:
     role_blocks = _collect_role_content_blocks(parsed)
     tool_calls = _collect_tool_calls_preview(parsed)
 
-    # Skip redundant heading: tools list uses **tools** below.
     skip_heading = field_key == "json" or (
         field_key == "tools_json"
         and isinstance(parsed, list)
@@ -284,14 +283,12 @@ def _write_fold_parsed_human_first(out, field_key: str, parsed: Any) -> None:
         h = _fold_field_heading(field_key) or field_key
         out.write(f"**{h}**\n\n")
 
-    for role in sorted(role_blocks.keys(), key=_role_sort_key):
-        blocks = role_blocks[role]
-        for idx, s in enumerate(blocks, 1):
-            label = role if len(blocks) == 1 else f"{role} · {idx}"
-            out.write(f"**{label}**\n\n")
-            rendered = clip(s)
-            fence = _best_fence(rendered)
-            out.write(f"{fence}text\n{rendered}\n{fence}\n\n")
+    for idx, (role, content) in enumerate(role_blocks, 1):
+        label = f"{role} · {idx}"
+        out.write(f"**{label}**\n\n")
+        rendered = clip(content)
+        fence = _best_fence(rendered)
+        out.write(f"{fence}text\n{rendered}\n{fence}\n\n")
 
     for tc in tool_calls:
         name = tc.get("name") or "(function)"

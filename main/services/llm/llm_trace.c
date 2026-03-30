@@ -1,5 +1,6 @@
 #include "llm/llm_trace.h"
 #include "config.h"
+#include "mimi_config.h"
 #include "config_view.h"
 #include "cJSON.h"
 #include "core/platform/fs/fs.h"
@@ -17,9 +18,9 @@
 #define TRACE_BIND_MAX 32
 
 typedef struct {
-    char trace_id[64];
-    char channel[32];
-    char chat_id[128];
+    char trace_id[MIMI_TRACE_ID_LEN];
+    char channel[MIMI_CHANNEL_NAME_LEN];
+    char chat_id[MIMI_CHAT_ID_LEN];
 } trace_bind_t;
 
 static trace_bind_t s_binds[TRACE_BIND_MAX];

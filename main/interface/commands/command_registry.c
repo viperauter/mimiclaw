@@ -139,13 +139,17 @@ const command_t* command_find(const char *name)
 
 int command_parse_input(const char *input,
                         char *cmd_name, size_t cmd_name_len,
-                        const char **args, int max_args)
+                        const char **args, int max_args,
+                        char **out_owned_buf)
 {
     if (!input || !cmd_name || !args || max_args <= 0) {
         return -1;
     }
+    if (out_owned_buf) *out_owned_buf = NULL;
 
-    /* Make a copy of input for modification */
+    /* Make a copy of input for modification.
+     * IMPORTANT: `args[]` will point into this buffer, so it must remain
+     * alive until after the command execute() returns. */
     size_t input_len = strlen(input);
     char *input_copy = (char *)malloc(input_len + 1);
     if (!input_copy) {
@@ -226,14 +230,13 @@ int command_parse_input(const char *input,
         arg_count++;
     }
 
-    /* Note: args point into input_copy, which will be freed by caller
-     * This is a design issue - we need to keep the buffer alive
-     * For now, we'll document that args are valid only until next call */
-
-    /* Store the copy pointer for later cleanup (simplified approach) */
-    /* In production, this should use a proper arena allocator */
-
-    free(input_copy);
+    if (out_owned_buf) {
+        *out_owned_buf = input_copy;
+    } else {
+        /* Caller did not request ownership; avoid returning dangling args. */
+        free(input_copy);
+        return -1;
+    }
     return arg_count;
 }
 
@@ -252,8 +255,9 @@ int command_execute(const char *input,
 
     char cmd_name[COMMAND_NAME_MAX_LEN];
     const char *args[16];
+    char *owned_buf = NULL;
     int arg_count = command_parse_input(input, cmd_name, sizeof(cmd_name),
-                                        args, 16);
+                                        args, 16, &owned_buf);
 
     if (arg_count < 0) {
         snprintf(output, output_len, "Failed to parse command");
@@ -274,10 +278,13 @@ int command_execute(const char *input,
 
     /* Execute command */
     if (cmd->execute) {
-        return cmd->execute(args, arg_count, ctx, output, output_len);
+        int rc = cmd->execute(args, arg_count, ctx, output, output_len);
+        free(owned_buf);
+        return rc;
     }
 
     snprintf(output, output_len, "Command '%s' not implemented", cmd_name);
+    free(owned_buf);
     return -1;
 }
 

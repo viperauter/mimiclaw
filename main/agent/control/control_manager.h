@@ -11,6 +11,7 @@
 #define CONTROL_MANAGER_H
 
 #include "mimi_err.h"
+#include "mimi_config.h"
 #include "bus/message_bus.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -20,22 +21,21 @@
 extern "C" {
 #endif
 
-/* Maximum number of concurrent control requests */
-#define CONTROL_MAX_REQUESTS 16
+/* Defaults in mimi_config.h; aliases keep existing names in .c / callers */
+#define CONTROL_MAX_REQUESTS MIMI_CONTROL_MAX_REQUESTS
 
 /* Default timeout for control requests (30 seconds) */
 #define CONTROL_DEFAULT_TIMEOUT_MS 30000
 
-/* Request ID length */
-#define CONTROL_REQUEST_ID_LEN 64
+#define CONTROL_REQUEST_ID_LEN MIMI_CONTROL_REQUEST_ID_LEN
 
 /* Control request structure */
 typedef struct {
-    char request_id[CONTROL_REQUEST_ID_LEN];
-    char channel[16];
-    char chat_id[128];
+    char request_id[MIMI_CONTROL_REQUEST_ID_LEN];
+    char channel[MIMI_CHANNEL_NAME_LEN];
+    char chat_id[MIMI_CHAT_ID_LEN];
     mimi_control_type_t control_type;
-    char target[64];
+    char target[MIMI_MAX_TOOL_NAME_LEN];
     void *context;                  /* Context pointer (e.g., tool_call_context_t) */
     uint64_t timeout;
     void (*callback)(const char *request_id, const char *response, void *context);

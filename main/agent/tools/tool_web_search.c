@@ -5,6 +5,7 @@
 #include "http/http.h"
 #include "log.h"
 
+#include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -17,8 +18,15 @@ static const char *TOOL_DESCRIPTION =
     "Search the web for current information. Use this when you need up-to-date facts, news, weather, or anything beyond your training data.";
 
 static char s_search_key[128] = {0};
+static bool s_search_enabled = true;
 
 #define SEARCH_RESULT_COUNT 5
+
+bool tool_web_search_should_expose(void)
+{
+    if (!s_search_enabled) return false;
+    return s_search_key[0] != '\0';
+}
 
 const char *tool_web_search_schema_json(void) { return TOOL_SCHEMA; }
 const char *tool_web_search_description(void) { return TOOL_DESCRIPTION; }
@@ -82,6 +90,7 @@ static void format_results(cJSON *root, char *output, size_t output_size)
 mimi_err_t tool_web_search_init(void)
 {
     mimi_cfg_obj_t search = mimi_cfg_get_obj(mimi_cfg_section("tools"), "search");
+    s_search_enabled = mimi_cfg_get_bool(search, "enabled", true);
     const char *key = mimi_cfg_get_str(search, "apiKey", "");
     if (key && key[0] != '\0') {
         strncpy(s_search_key, key, sizeof(s_search_key) - 1);

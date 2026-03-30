@@ -139,7 +139,10 @@ static void bootstrap_vfs_layout(void)
         "- Before modifying a file, read it first.\n"
         "- If a tool call fails, analyze the error before retrying with a different approach.\n"
         "- To use a skill, read its full skill file first.\n"
-        "- Do not print tool-call JSON or tool wiring as plain text.\n\n"
+        "- When tools are available, invoke them only through the runtime's native tool/function-calling mechanism (API tool_calls). Do not simulate tools in prose.\n"
+        "- Never put tool invocations inside assistant message text: no `[[...]]` wrappers, no JSON blobs with \"function\" and \"args\"/\"arguments\" in `content`.\n"
+        "- User-visible `content` should stay natural language; the API may still report finish_reason=stop—that does not mean you should embed fake tool calls in text.\n"
+        "- Do not print raw tool-call JSON or provider wiring (names, schemas, MCP prefixes) as plain text unless the user explicitly asked for debugging output.\n\n"
         "## Conversation style\n"
         "- Prefer clarity over verbosity.\n"
         "- Ask concise questions only when necessary.\n");

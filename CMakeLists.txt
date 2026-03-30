@@ -167,7 +167,7 @@ list(APPEND APP_SRC
     main/interface/commands/cmd_ask.c
     main/interface/commands/cmd_exit.c
     main/interface/commands/cmd_wechat_login.c
-    main/interface/commands/cmd_mcp_refresh.c
+    main/interface/commands/cmd_mcp.c
     main/interface/router/router.c
 
     # Gateway layer

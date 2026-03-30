@@ -31,7 +31,7 @@ typedef enum {
 /* Tool call context structure */
 typedef struct {
     /* Tool basic information */
-    char tool_name[64];
+    char tool_name[MIMI_MAX_TOOL_NAME_LEN];
     char tool_call_id[128];
     char tool_input[1024];
 

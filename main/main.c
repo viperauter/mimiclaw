@@ -12,11 +12,13 @@
 #include "app.h"
 #include "log.h"
 #include "os/os.h"
+#include "path_utils.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <getopt.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -143,6 +145,7 @@ int main(int argc, char **argv)
         }
     }
 
+    char *resolved_config_path = NULL;
     if (!args.config_path) {
         char config_buf[512] = {0};
         const char *home = getenv("HOME");
@@ -153,14 +156,34 @@ int main(int argc, char **argv)
 #endif
         if (home && home[0] != '\0') {
             snprintf(config_buf, sizeof(config_buf), "%s/.mimiclaw/config.json", home);
-            args.config_path = config_buf;
+            resolved_config_path = strdup(config_buf);
         } else {
-            args.config_path = "./config.json";
+            resolved_config_path = strdup("./config.json");
+        }
+        args.config_path = resolved_config_path;
+    }
+
+    /* If user provided a relative config path, resolve it against the process CWD.
+     * The config loader interprets relative paths relative to the active workspace base,
+     * which is not what CLI users expect for `-c ./foo.json`. */
+    if (args.config_path && args.config_path[0] && !mimi_path_is_absolute(args.config_path)) {
+        char cwd[512];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            char abs_cfg_buf[1024];
+            snprintf(abs_cfg_buf, sizeof(abs_cfg_buf), "%s/%s", cwd, args.config_path);
+            char *abs_dup = strdup(abs_cfg_buf);
+            if (abs_dup) {
+                /* Replace previous owned path (if any) */
+                free(resolved_config_path);
+                resolved_config_path = abs_dup;
+                args.config_path = resolved_config_path;
+            }
         }
     }
 
     /* Start OS scheduler and run application in task context */
     mimi_err_t err = mimi_os_start_scheduler(app_main_task, &args);
+    free(resolved_config_path);
     
     return (err == MIMI_OK) ? 0 : 1;
 }

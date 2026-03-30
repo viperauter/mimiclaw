@@ -307,7 +307,7 @@ mimi_err_t agent_async_start(agent_async_ctx_t *ctx)
                        NULL, NULL);
     
     /* Build system prompt */
-    context_build_system_prompt(ctx->system_prompt, CONTEXT_BUF_SIZE);
+    context_build_system_prompt(ctx->system_prompt, sizeof(ctx->system_prompt));
     if (ctx->trace_id[0]) {
         llm_trace_event_kv(ctx->trace_id, "system_prompt",
                            "prompt", ctx->system_prompt,

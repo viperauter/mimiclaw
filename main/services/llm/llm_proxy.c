@@ -764,7 +764,7 @@ typedef struct {
     llm_response_t *resp;
     llm_callback_t callback;
     void *user_data;
-    char trace_id[64];
+    char trace_id[MIMI_TRACE_ID_LEN];
 } llm_async_ctx_t;
 
 static void llm_http_callback(mimi_err_t result, mimi_http_response_t *hresp, void *user_data)

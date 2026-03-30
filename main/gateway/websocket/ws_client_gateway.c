@@ -305,6 +305,11 @@ mimi_err_t ws_client_gateway_send_raw(const uint8_t *data, size_t len)
     return (ret == 0) ? MIMI_OK : MIMI_ERR_IO;
 }
 
+static void ws_connect_on_loop(void *arg)
+{
+    (void)mimi_ws_connect((mimi_ws_client_t *)arg);
+}
+
 mimi_err_t ws_client_gateway_connect(gateway_t *gw)
 {
     ws_client_gateway_priv_t *priv = (ws_client_gateway_priv_t *)gw->priv_data;
@@ -318,10 +323,11 @@ mimi_err_t ws_client_gateway_connect(gateway_t *gw)
         return MIMI_ERR_INVALID_ARG;
     }
     
-    /* Close existing connection if any */
+    /* Close existing connection if any (async close; will self-free on close) */
     if (priv->ws) {
         mimi_ws_destroy(priv->ws);
         priv->ws = NULL;
+        priv->connected = false;
     }
     
     /* Create WebSocket configuration */
@@ -344,15 +350,16 @@ mimi_err_t ws_client_gateway_connect(gateway_t *gw)
     /* Set connection type for event messages */
     mimi_ws_set_conn_type(priv->ws, CONN_WS_CLIENT);
     
-    /* Connect to WebSocket server */
-    mimi_err_t err = mimi_ws_connect(priv->ws);
-    if (err != MIMI_OK) {
-        MIMI_LOGE(TAG, "Failed to connect to WebSocket server: %d", err);
+    /* Connect to WebSocket server MUST run in runtime/event-loop thread (mongoose is not thread-safe). */
+    event_bus_t *bus = event_bus_get_global();
+    if (!bus) {
         mimi_ws_destroy(priv->ws);
         priv->ws = NULL;
-        return err;
+        return MIMI_ERR_INVALID_STATE;
     }
-    
+
+    mimi_ws_client_t *ws = priv->ws;
+    (void)event_bus_post_call(bus, ws_connect_on_loop, ws);
     MIMI_LOGI(TAG, "Connecting to WebSocket server: %s", priv->url);
     return MIMI_OK;
 }
