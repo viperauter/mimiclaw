@@ -28,6 +28,14 @@ static int ensure_parent_dir_posix(const char *file_path)
     if (mimi_path_dirname(file_path, dir, sizeof(dir)) != 0) {
         return 0;  /* No directory component */
     }
+    if (dir[0] == '~' && dir[1] == '/') {
+        const char *home = getenv("HOME");
+        if (home && home[0] != '\0') {
+            char expanded[512];
+            snprintf(expanded, sizeof(expanded), "%s%s", home, dir + 1);
+            return mimi_fs_mkdir_p_direct(expanded);
+        }
+    }
     return mimi_fs_mkdir_p_direct(dir);
 }
 
@@ -203,10 +211,18 @@ mimi_err_t mimi_workspace_bootstrap(const char *config_path,
     const char *base = NULL;
 
     if (workspace && workspace[0]) {
-        /* Use configured workspace directly as the VFS base directory */
         base = workspace;
     } else {
         base = "./";
+    }
+
+    char expanded_base[512];
+    if (base[0] == '~' && base[1] == '/') {
+        const char *home = getenv("HOME");
+        if (home && home[0] != '\0') {
+            snprintf(expanded_base, sizeof(expanded_base), "%s%s", home, base + 1);
+            base = expanded_base;
+        }
     }
 
     /* Create and activate default workspace */
