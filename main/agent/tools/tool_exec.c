@@ -1,6 +1,8 @@
 #include "tools/tool_exec.h"
 
 #include "exec.h"
+#include "fs/fs.h"
+#include "log.h"
 #include "cJSON.h"
 
 #include <stdio.h>
@@ -53,6 +55,8 @@
 #endif
 
 #endif
+
+static const char *TAG = "tool_exec";
 
 static const char *TOOL_DESCRIPTION =
     "Execute a command in the workspace. Supports optional PTY + background sessions via process.";
@@ -665,23 +669,47 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
         return MIMI_ERR_INVALID_ARG;
     }
 
-    const char *workspace = (session_ctx && session_ctx->workspace_root[0]) ? session_ctx->workspace_root : "/tmp";
+    const char *workspace =
+        (session_ctx && session_ctx->workspace_root[0]) ? session_ctx->workspace_root : ".";
     const char *wd = cJSON_GetStringValue(cJSON_GetObjectItem(root, "working_directory"));
     const char *env = cJSON_GetStringValue(cJSON_GetObjectItem(root, "env"));
     const char *mode = cJSON_GetStringValue(cJSON_GetObjectItem(root, "mode"));
     const char *io = cJSON_GetStringValue(cJSON_GetObjectItem(root, "io"));
     int start_wait_ms = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(root, "start_wait_ms"));
 
-    char cwd_buf[512];
-    const char *cwd = workspace;
-    if (wd && wd[0]) {
-        if (wd[0] == '/') {
-            cwd = wd;
-        } else {
-            int n = snprintf(cwd_buf, sizeof(cwd_buf), "%s/%s", workspace, wd);
-            if (n > 0 && (size_t)n < sizeof(cwd_buf)) cwd = cwd_buf;
+    /* Normalize paths through shared resolver so exec cwd matches
+     * where file tools (mimi_fs_*) actually read/write. */
+    char real_workspace_buf[512];
+    char real_cwd_buf[512];
+    const char *workspace_real = workspace;
+    const char *cwd_real = workspace;
+    const char *wd_input = (wd && wd[0]) ? wd : ".";
+
+    if (session_ctx && session_resolve_path(session_ctx, ".", real_workspace_buf, sizeof(real_workspace_buf)) == MIMI_OK) {
+        workspace_real = real_workspace_buf;
+    } else if (mimi_fs_resolve_path(workspace, real_workspace_buf, sizeof(real_workspace_buf)) == MIMI_OK) {
+        workspace_real = real_workspace_buf;
+    }
+
+    if (session_ctx && session_resolve_path(session_ctx, wd_input, real_cwd_buf, sizeof(real_cwd_buf)) == MIMI_OK) {
+        cwd_real = real_cwd_buf;
+    } else {
+        char wd_virtual_buf[512];
+        const char *wd_virtual = wd_input;
+        if (wd_input[0] != '/') {
+            int n = snprintf(wd_virtual_buf, sizeof(wd_virtual_buf), "%s/%s", workspace, wd_input);
+            if (n > 0 && (size_t)n < sizeof(wd_virtual_buf)) {
+                wd_virtual = wd_virtual_buf;
+            }
+        }
+        if (mimi_fs_resolve_path(wd_virtual, real_cwd_buf, sizeof(real_cwd_buf)) == MIMI_OK) {
+            cwd_real = real_cwd_buf;
         }
     }
+
+    MIMI_LOGD(TAG,
+              "exec path resolve: workspace_virtual='%s', wd_input='%s', workspace_real='%s', cwd_real='%s'",
+              workspace, wd_input, workspace_real, cwd_real);
 
     int timeout_sec = 60;
     cJSON *to = cJSON_GetObjectItem(root, "timeout_sec");
@@ -732,7 +760,7 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
 
     if (session_mode) {
         mimi_exec_env_t exec_env = (env && strcmp(env, "sandbox") == 0) ? MIMI_EXEC_ENV_SANDBOX : MIMI_EXEC_ENV_HOST;
-        const char *session_cwd = cwd;
+        const char *session_cwd = cwd_real;
         if (exec_env == MIMI_EXEC_ENV_SANDBOX) {
             session_cwd = "/workspace";
         }
@@ -741,7 +769,7 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
                                                    session_cwd,
                                                    (int)use_pty,
                                                    exec_env,
-                                                   workspace,
+                                                   workspace_real,
                                                    timeout_sec,
                                                    max_out,
                                                    &sess);
@@ -810,7 +838,7 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
     }
     /* Unified backend for sync path: run through session spawn + poll loop. */
     mimi_exec_env_t exec_env = (env && strcmp(env, "sandbox") == 0) ? MIMI_EXEC_ENV_SANDBOX : MIMI_EXEC_ENV_HOST;
-    const char *session_cwd = cwd;
+    const char *session_cwd = cwd_real;
     if (exec_env == MIMI_EXEC_ENV_SANDBOX) {
         session_cwd = "/workspace";
     }
@@ -819,7 +847,7 @@ mimi_err_t tool_exec_execute(const char *input_json, char *output, size_t output
                                                session_cwd,
                                                (int)use_pty,
                                                exec_env,
-                                               workspace,
+                                               workspace_real,
                                                timeout_sec,
                                                max_out,
                                                &sess);

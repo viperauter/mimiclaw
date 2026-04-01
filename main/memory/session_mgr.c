@@ -29,9 +29,6 @@ void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out)
     strncpy(out->channel, msg->channel, sizeof(out->channel) - 1);
     strncpy(out->chat_id, msg->chat_id, sizeof(out->chat_id) - 1);
     if (msg->channel[0] && msg->chat_id[0]) {
-        snprintf(out->workspace_root, sizeof(out->workspace_root),
-                 "workspaces/%s_%s", msg->channel, msg->chat_id);
-
         /* Default session keys for non-subagent calls. */
         snprintf(out->requester_session_key, sizeof(out->requester_session_key),
                  "%s:%s", msg->channel, msg->chat_id);
@@ -40,6 +37,37 @@ void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out)
     }
     out->caller_is_subagent = false;
     out->subagent_id[0] = '\0';
+}
+
+mimi_err_t session_resolve_path(const mimi_session_ctx_t *session_ctx,
+                                const char *path,
+                                char *out_real_path,
+                                size_t out_size)
+{
+    if (!path || !out_real_path || out_size == 0) {
+        return MIMI_ERR_INVALID_ARG;
+    }
+
+    char virt_path[512];
+    if (path[0] == '/' || !session_ctx || !session_ctx->workspace_root[0]) {
+        strncpy(virt_path, path, sizeof(virt_path) - 1);
+        virt_path[sizeof(virt_path) - 1] = '\0';
+    } else {
+        snprintf(virt_path, sizeof(virt_path), "%s/%s", session_ctx->workspace_root, path);
+    }
+    MIMI_LOGD(TAG,
+              "session_resolve_path: input='%s', workspace_root='%s', virtual='%s'",
+              path,
+              (session_ctx && session_ctx->workspace_root[0]) ? session_ctx->workspace_root : "(none)",
+              virt_path);
+
+    mimi_err_t err = mimi_fs_resolve_path(virt_path, out_real_path, out_size);
+    if (err == MIMI_OK) {
+        MIMI_LOGD(TAG, "session_resolve_path: resolved real='%s'", out_real_path);
+    } else {
+        MIMI_LOGD(TAG, "session_resolve_path: resolve failed err=%s", mimi_err_to_name(err));
+    }
+    return err;
 }
 
 mimi_err_t session_mgr_init(void)

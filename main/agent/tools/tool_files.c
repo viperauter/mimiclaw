@@ -98,26 +98,6 @@ static bool validate_path(const char *path)
 }
 
 /**
- * Resolve path to per-session workspace when session_ctx has workspace_root.
- * Relative paths -> {workspace_root}/{path}
- * Paths starting with '/' -> unchanged (global/mount)
- */
-static void resolve_session_path(const char *path, const mimi_session_ctx_t *session_ctx,
-                                 char *out, size_t out_size)
-{
-    if (!path || !out || out_size == 0) {
-        if (out && out_size > 0) out[0] = '\0';
-        return;
-    }
-    if (!session_ctx || !session_ctx->workspace_root[0] || path[0] == '/') {
-        strncpy(out, path, out_size - 1);
-        out[out_size - 1] = '\0';
-        return;
-    }
-    snprintf(out, out_size, "%s/%s", session_ctx->workspace_root, path);
-}
-
-/**
  * Create parent directory for a file path if it doesn't exist.
  */
 static mimi_err_t ensure_parent_dir(const char *path)
@@ -164,7 +144,12 @@ mimi_err_t tool_read_file_execute(const char *input_json, char *output, size_t o
     }
 
     char resolved[MAX_RESOLVED_PATH];
-    resolve_session_path(path, session_ctx, resolved, sizeof(resolved));
+    mimi_err_t rerr = session_resolve_path(session_ctx, path, resolved, sizeof(resolved));
+    if (rerr != MIMI_OK) {
+        snprintf(output, output_size, "Error: cannot resolve path: %s", path);
+        cJSON_Delete(root);
+        return rerr;
+    }
 
     mimi_file_t *f = NULL;
     mimi_err_t err = mimi_fs_open(resolved, "r", &f);
@@ -213,7 +198,12 @@ mimi_err_t tool_write_file_execute(const char *input_json, char *output, size_t 
     }
 
     char resolved[MAX_RESOLVED_PATH];
-    resolve_session_path(path, session_ctx, resolved, sizeof(resolved));
+    mimi_err_t rerr = session_resolve_path(session_ctx, path, resolved, sizeof(resolved));
+    if (rerr != MIMI_OK) {
+        snprintf(output, output_size, "Error: cannot resolve path: %s", path);
+        cJSON_Delete(root);
+        return rerr;
+    }
 
     MIMI_LOGI(TAG, "write_file: resolved path='%s', session_ctx=%p, workspace_root='%s'",
               resolved, (void*)session_ctx, session_ctx ? session_ctx->workspace_root : "(null)");
@@ -280,7 +270,12 @@ mimi_err_t tool_edit_file_execute(const char *input_json, char *output, size_t o
     }
 
     char resolved[MAX_RESOLVED_PATH];
-    resolve_session_path(path, session_ctx, resolved, sizeof(resolved));
+    mimi_err_t rerr = session_resolve_path(session_ctx, path, resolved, sizeof(resolved));
+    if (rerr != MIMI_OK) {
+        snprintf(output, output_size, "Error: cannot resolve path: %s", path);
+        cJSON_Delete(root);
+        return rerr;
+    }
 
     /* Read existing file */
     mimi_file_t *f = NULL;

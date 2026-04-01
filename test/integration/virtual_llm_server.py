@@ -140,7 +140,7 @@ def set_tool_call_response():
             "type": "function",
             "function": {
                 "name": tool_name,
-                "arguments": arguments
+                "arguments": json.dumps(arguments)
             }
         }]
     }

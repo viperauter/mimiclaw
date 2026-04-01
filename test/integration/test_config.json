@@ -1,0 +1,97 @@
+{
+	"schemaVersion":	5,
+	"providers":	{
+		"openrouter":	{
+			"apiKey":	"",
+			"apiBase":	"https://openrouter.ai/api/v1/chat/completions"
+		},
+		"test_provider":	{
+			"apiKey":	"test_key_12345",
+			"apiBase":	"http://localhost:9999/v1",
+			"model":	"virtual-llm"
+		}
+	},
+	"agents":	{
+		"defaults":	{
+			"workspace":	"/tmp/mimiclaw_test_n6v7ltn0",
+			"timezone":	"UTC",
+			"model":	"virtual-llm",
+			"provider":	"test_provider",
+			"apiProtocol":	"openai",
+			"maxTokens":	1000,
+			"temperature":	0.7,
+			"maxToolIterations":	5,
+			"defaultMaxIters":	40,
+			"memoryWindow":	100,
+			"contextTokens":	100000,
+			"compaction":	{
+				"model":	"",
+				"memoryFlush":	{
+					"thresholdRatio":	0.75
+				}
+			},
+			"apiUrl":	"",
+			"sendWorkingStatus":	true,
+			"tools":	["*"]
+		}
+	},
+	"channels":	{
+		"telegram":	{
+			"enabled":	false,
+			"token":	"",
+			"allowFrom":	[]
+		},
+		"feishu":	{
+			"enabled":	false,
+			"appId":	"",
+			"appSecret":	""
+		},
+		"qq":	{
+			"enabled":	false,
+			"appId":	"",
+			"secret":	""
+		},
+		"wechat":	{
+			"enabled":	false,
+			"bot_token":	"",
+			"bot_id":	"",
+			"user_id":	""
+		}
+	},
+	"proxy":	{
+		"host":	"",
+		"port":	"",
+		"type":	"http"
+	},
+	"tools":	{
+		"search":	{
+			"enabled":	false,
+			"apiKey":	""
+		},
+		"mcpServers":	[]
+	},
+	"logging":	{
+		"level":	"debug",
+		"toFile":	false,
+		"toStderr":	true,
+		"dir":	"logs",
+		"file":	"mimiclaw.log",
+		"maxFileBytes":	5242880,
+		"maxFiles":	3
+	},
+	"tracing":	{
+		"enabled":	false,
+		"dir":	"logs/traces",
+		"maxFileBytes":	10485760,
+		"maxFieldBytes":	16384
+	},
+	"network":	{
+		"dnsServer":	""
+	},
+	"internal":	{
+		"busQueueLen":	16,
+		"wsPort":	18789,
+		"heartbeatIntervalMs":	1800000,
+		"cronCheckIntervalMs":	60000
+	}
+}

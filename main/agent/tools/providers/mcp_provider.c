@@ -95,13 +95,6 @@ static void mcp_refresh_job_task(void *arg)
 
     if (tools_non_empty_after) {
         atomic_store_explicit(&s_refresh_any_ok, true, memory_order_release);
-        /* Best-effort: refresh tool registry once as soon as any server has tools. */
-        bool expected = false;
-        if (atomic_compare_exchange_strong_explicit(&s_refresh_registry_done, &expected, true,
-                                                    memory_order_acq_rel, memory_order_acquire)) {
-            MIMI_LOGI(TAG, "MCP discovery: at least one server has tools; refreshing tool registry JSON");
-            (void)tool_registry_refresh_tools_json();
-        }
     }
 
     atomic_fetch_sub_explicit(&s_refresh_pending, 1, memory_order_acq_rel);
@@ -509,13 +502,19 @@ static void mcp_discovery_task(void *arg)
         /* Wait until either some server has tools, or all refresh jobs complete, or we should exit. */
         const long long wait_deadline = now_ms() + 20000;
         while (!mimi_runtime_should_exit()) {
-            if (atomic_load_explicit(&s_refresh_any_ok, memory_order_acquire)) {
-                s_discovery_running = false;
-                return;
-            }
             if (atomic_load_explicit(&s_refresh_pending, memory_order_acquire) <= 0) break;
             if (now_ms() >= wait_deadline) break;
             mimi_sleep_ms(50);
+        }
+
+        /* Only refresh registry after this attempt's jobs have finished (or timed out),
+         * so slower servers in the same attempt can contribute tools before the
+         * combined tool list is rebuilt. */
+        if (atomic_load_explicit(&s_refresh_any_ok, memory_order_acquire)) {
+            MIMI_LOGI(TAG, "MCP discovery attempt finished; refreshing tool registry JSON");
+            (void)tool_registry_refresh_tools_json();
+            s_discovery_running = false;
+            return;
         }
 
         mimi_sleep_ms((uint32_t)delay_ms);

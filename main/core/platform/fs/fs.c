@@ -159,6 +159,11 @@ static mimi_err_t resolve_path(const char *virt_path, char *out_real_path, size_
     return MIMI_OK;
 }
 
+mimi_err_t mimi_fs_resolve_path(const char *virt_path, char *out_real_path, size_t size)
+{
+    return resolve_path(virt_path, out_real_path, size);
+}
+
 /* ==========================================================================
  * Permission checking
  * ========================================================================== */

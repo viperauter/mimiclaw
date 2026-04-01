@@ -40,6 +40,17 @@ typedef struct mimi_session_ctx {
 void session_ctx_from_msg(const mimi_msg_t *msg, mimi_session_ctx_t *out);
 
 /**
+ * Resolve a tool path to a real filesystem path in current session context.
+ * - Relative path => session workspace root + path
+ * - Absolute path => kept absolute
+ * The result is converted via VFS path resolution.
+ */
+mimi_err_t session_resolve_path(const mimi_session_ctx_t *session_ctx,
+                                const char *path,
+                                char *out_real_path,
+                                size_t out_size);
+
+/**
  * Initialize session manager.
  */
 mimi_err_t session_mgr_init(void);

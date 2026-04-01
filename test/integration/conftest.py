@@ -10,6 +10,7 @@ import tempfile
 import subprocess
 import time
 import requests
+import re
 
 # Add the integration directory to the path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -225,6 +226,20 @@ class MimiclawProcess:
         self.config_path = config_path
         self._process = None
         
+    @staticmethod
+    def _decode_bytes(data):
+        """Best-effort decode for mixed terminal encodings."""
+        if not data:
+            return ""
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                # Some terminals/locales may emit non-UTF-8 bytes.
+                return data.decode("gb18030")
+            except UnicodeDecodeError:
+                return data.decode("utf-8", errors="replace")
+
     def run_with_input(self, user_input, timeout=30):
         """Run mimiclaw with user input and capture output"""
         mimiclaw_bin = self._find_mimiclaw_binary()
@@ -239,26 +254,203 @@ class MimiclawProcess:
         if not user_input.endswith('\n'):
             user_input = user_input + '\n'
         
+        stdout_chunks = []
+        stderr_chunks = []
+
         try:
-            result = subprocess.run(
+            # Use Popen with binary pipes so we can read byte-by-byte and surface output
+            # even when child process does not flush full lines.
+            process = subprocess.Popen(
                 cmd,
-                input=user_input,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                bufsize=0
             )
-            return {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode
-            }
+
+            print(f"[run_with_input] Starting: {' '.join(cmd)}")
+            print(f"[run_with_input] Timeout: {timeout}s")
+            print(f"[run_with_input] Input payload ({len(user_input)} bytes): {repr(user_input)}")
+
+            # IMPORTANT:
+            # We must NOT dump all input at once. mimiclaw's CLI consumes stdin as commands,
+            # while tool confirmation is a separate interactive prompt. If we send "1\n"
+            # before the confirmation menu appears, it will be interpreted as a normal CLI
+            # command and will NOT confirm the tool.
+            #
+            # Strategy:
+            # - Send the first line (the user task) immediately.
+            # - Then watch stdout for confirmation menus and send "1\n" only when prompted.
+            # - After confirmations are handled, send "/exit\n" when we see a fresh CLI prompt.
+            lines = user_input.splitlines(True)  # keep newlines
+            first_line = lines[0] if lines else ""
+            remaining_lines = lines[1:] if len(lines) > 1 else []
+            pending_confirms = []
+            pending_exit = False
+            for ln in remaining_lines:
+                if ln.strip() == "1":
+                    pending_confirms.append("1\n")
+                elif ln.strip() == "/exit":
+                    pending_exit = True
+                else:
+                    # Any other extra lines are treated as plain commands to send at next prompt.
+                    # Keep them as-is.
+                    pending_confirms.append(ln if ln.endswith("\n") else ln + "\n")
+
+            if process.stdin and first_line:
+                process.stdin.write(first_line.encode("utf-8", errors="replace"))
+                process.stdin.flush()
+                print("[run_with_input] Sent first command line")
+
+            import threading
+            import queue
+
+            event_q = queue.Queue()
+
+            def _pump_stream(stream, sink, label):
+                if stream is None:
+                    return
+                try:
+                    while True:
+                        chunk = stream.read(256)
+                        if not chunk:
+                            break
+                        text = self._decode_bytes(chunk)
+                        sink.append(text)
+                        # Mirror child output to test stdout for live observation
+                        print(f"[mimiclaw:{label}] {text}", end="", flush=True)
+
+                        # Emit events for interactive driving.
+                        if label == "stdout":
+                            if "Please choose an option:" in text:
+                                # too granular (byte-by-byte), actual detection below uses buffer
+                                pass
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+            def _driver_loop():
+                nonlocal pending_exit
+                buf = ""
+                confirm_re = re.compile(r"=== CONTROL REQUEST ====\s*Type:\s*CONFIRM", re.MULTILINE)
+                menu_prompt_re = re.compile(r"Please choose an option:", re.MULTILINE)
+                # Match prompt line for confirmation menu. Keep it permissive for ANSI/noise.
+                choice_prompt_re = re.compile(r"\n>\s*", re.MULTILINE)
+                # Match CLI prompt with optional timestamp prefix.
+                cli_prompt_re = re.compile(r"mimiclaw\(cli:default\)>\s*", re.MULTILINE)
+
+                last_sent_confirm_at = 0.0
+                last_sent_exit_at = 0.0
+                last_out_len = 0
+                sent_confirm_count = 0
+
+                # Drive stdin based on stdout content.
+                while process.poll() is None:
+                    time.sleep(0.02)
+                    # accumulate incremental stdout (avoid repeatedly re-adding same tail)
+                    out_len = len(stdout_chunks)
+                    if out_len > last_out_len:
+                        buf = (buf + "".join(stdout_chunks[last_out_len:out_len]))[-8000:]
+                        last_out_len = out_len
+
+                    now = time.time()
+
+                    # If we see a confirm request and we still have confirms to send,
+                    # wait until we see a '>' prompt for the menu, then send "1\n".
+                    if pending_confirms and confirm_re.search(buf) and menu_prompt_re.search(buf) and choice_prompt_re.search(buf):
+                        # simple de-bounce to avoid double-send when prompt stays on screen
+                        if now - last_sent_confirm_at > 0.2:
+                            to_send = pending_confirms.pop(0)
+                            if process.stdin:
+                                process.stdin.write(to_send.encode("utf-8", errors="replace"))
+                                process.stdin.flush()
+                                last_sent_confirm_at = now
+                                sent_confirm_count += 1
+                                print(f"\n[run_with_input] Sent confirmation input #{sent_confirm_count}: {repr(to_send)}")
+                                # After sending, clear buf a bit so regex doesn't re-trigger instantly
+                                buf = buf[-1000:]
+
+                    # After confirmations are done, exit when we see a fresh CLI prompt.
+                    if pending_exit and not pending_confirms and cli_prompt_re.search(buf):
+                        if now - last_sent_exit_at > 0.2:
+                            if process.stdin:
+                                process.stdin.write(b"/exit\n")
+                                process.stdin.flush()
+                                last_sent_exit_at = now
+                                pending_exit = False
+                                print("\n[run_with_input] Sent /exit")
+                                try:
+                                    process.stdin.close()
+                                except Exception:
+                                    pass
+
+                # process ended; close stdin if still open
+                try:
+                    if process.stdin:
+                        process.stdin.close()
+                except Exception:
+                    pass
+
+            t_out = threading.Thread(target=_pump_stream, args=(process.stdout, stdout_chunks, "stdout"), daemon=True)
+            t_err = threading.Thread(target=_pump_stream, args=(process.stderr, stderr_chunks, "stderr"), daemon=True)
+            t_drv = threading.Thread(target=_driver_loop, daemon=True)
+            t_out.start()
+            t_err.start()
+            t_drv.start()
+
+            try:
+                returncode = process.wait(timeout=timeout)
+                t_out.join(timeout=1)
+                t_err.join(timeout=1)
+                print(f"\n[run_with_input] Process exited with code: {returncode}")
+                return {
+                    "stdout": ''.join(stdout_chunks),
+                    "stderr": ''.join(stderr_chunks),
+                    "returncode": returncode
+                }
+            except subprocess.TimeoutExpired:
+                print(f"\n[run_with_input] Timeout reached ({timeout}s), terminating process")
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+
+                t_out.join(timeout=1)
+                t_err.join(timeout=1)
+
+                out = ''.join(stdout_chunks)
+                err = ''.join(stderr_chunks)
+                print(f"[run_with_input] Captured stdout bytes: {len(out)}")
+                print(f"[run_with_input] Captured stderr bytes: {len(err)}")
+                if out:
+                    print(f"[run_with_input] stdout tail: {repr(out[-300:])}")
+                if err:
+                    print(f"[run_with_input] stderr tail: {repr(err[-300:])}")
+
+                return {
+                    "stdout": out,
+                    "stderr": err,
+                    "returncode": -1,
+                    "timeout": True
+                }
         except subprocess.TimeoutExpired as e:
             return {
                 "stdout": e.stdout.decode() if e.stdout else "",
                 "stderr": e.stderr.decode() if e.stderr else "",
                 "returncode": -1,
                 "timeout": True
+            }
+        except Exception as e:
+            return {
+                "stdout": ''.join(stdout),
+                "stderr": ''.join(stderr) + f"Error: {str(e)}",
+                "returncode": -1,
+                "error": str(e)
             }
             
     def _find_mimiclaw_binary(self):

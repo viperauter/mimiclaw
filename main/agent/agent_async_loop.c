@@ -295,10 +295,14 @@ typedef struct {
 typedef struct {
     tool_async_ctx_t *parent;
     char *tool_call_id;
+    int tool_index;
+    const llm_response_t *resp;
+    mimi_session_ctx_t *session_ctx;
 } tool_call_ud_t;
 
-/* Forward declaration for tool confirmation callback */
+/* Forward declarations */
 static void tool_confirm_execution_callback(mimi_err_t result, const char *tool_name, const char *output, void *user_data);
+static void start_next_tool(tool_async_ctx_t *async_ctx, int next_index, const llm_response_t *resp, mimi_session_ctx_t *session_ctx);
 
 static void agent_request_finish(agent_request_ctx_t *ctx)
 {
@@ -408,47 +412,18 @@ static void tool_async_callback(mimi_err_t result, const char *tool_name, const 
         mimi_mutex_unlock(async_ctx->mutex);
     }
 
+    /* Start next tool if available */
+    if (ud && !done) {
+        start_next_tool(async_ctx, ud->tool_index + 1, ud->resp, ud->session_ctx);
+    }
+
     if (ud) {
         free(ud->tool_call_id);
         free(ud);
     }
 
     if (should_start_next) {
-        /* Reuse the per-request llm_response_t embedded in the agent context
-         * instead of allocating a new one on the heap. */
-        llm_response_t *next_resp = &async_ctx->ctx->llm_resp;
-        memset(next_resp, 0, sizeof(*next_resp));
-
-        {
-            char itbuf[32];
-            snprintf(itbuf, sizeof(itbuf), "%d", async_ctx->ctx->iteration + 1);
-            llm_trace_event_kv(async_ctx->ctx->trace_id, "llm_call_start",
-                               "iteration", itbuf,
-                               NULL, NULL, NULL, NULL, NULL, NULL);
-        }
-
-        llm_chat_req_t req = {
-            .system_prompt = async_ctx->ctx->system_prompt,
-            .messages = async_ctx->ctx->messages,
-            .tools_json = async_ctx->ctx->tools_json,
-            .trace_id = async_ctx->ctx->trace_id,
-        };
-        mimi_err_t err = llm_chat_tools_async_req(&req,
-                                                 next_resp,
-                                                 agent_llm_callback,
-                                                 async_ctx->ctx);
-        if (err != MIMI_OK) {
-            MIMI_LOGE(TAG, "Failed to start async LLM: %s", mimi_err_to_name(err));
-            async_ctx->ctx->in_progress = false;
-            if (s_ctx_mutex) {
-                mimi_mutex_lock(s_ctx_mutex);
-            }
-            s_active_count--;
-            if (s_ctx_mutex) {
-                mimi_mutex_unlock(s_ctx_mutex);
-            }
-        }
-
+        agent_start_main_llm_async(async_ctx->ctx);
         if (async_ctx->mutex) {
             mimi_mutex_destroy(async_ctx->mutex);
         }
@@ -472,14 +447,6 @@ static void tool_confirm_execution_callback(mimi_err_t result, const char *tool_
               tool_name ? tool_name : "unknown", mimi_err_to_name(result));
 
     agent_request_ctx_t *agent_ctx = (agent_request_ctx_t *)tool_ctx->agent_ctx;
-    if (agent_ctx) {
-        llm_trace_event_kv(agent_ctx->trace_id, "tool_result",
-                           "tool_name", tool_name ? tool_name : "",
-                           "result", mimi_err_to_name(result),
-                           "output", output ? output : "",
-                           "confirmed", "true");
-    }
-    
     /* Store execution results */
     tool_ctx->succeeded = (result == MIMI_OK);
     tool_ctx->error_code = result;
@@ -487,56 +454,169 @@ static void tool_confirm_execution_callback(mimi_err_t result, const char *tool_
         strncpy(tool_ctx->output, output, sizeof(tool_ctx->output) - 1);
         tool_ctx->output[sizeof(tool_ctx->output) - 1] = '\0';
     }
-    
-    /* Update stream status first（不再重复输出完整结果，只给出状态）. */
-    if (tool_ctx->session_ctx.channel[0] && tool_ctx->session_ctx.chat_id[0]) {
-        char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "%s **工具执行完成**\n\n- 工具：`%.64s`\n- 结果：`%s`",
-                 (result == MIMI_OK) ? "✅" : "❌",
-                 tool_name ? tool_name : "tool",
-                 mimi_err_to_name(result));
-        agent_send_status(tool_ctx->session_ctx.channel, tool_ctx->session_ctx.chat_id,
-                          MIMI_STATUS_PHASE_PROGRESS, "agent_turn", buf);
+
+    const char *content = output ? output : "Tool execution failed";
+    if (result != MIMI_OK && tool_name) {
+        MIMI_LOGW(TAG, "Tool %s failed: %s", tool_name, mimi_err_to_name(result));
     }
 
-    /* Send result to user */
-    if (tool_ctx->session_ctx.channel[0] && tool_ctx->session_ctx.chat_id[0]) {
-        mimi_msg_t result_msg = {0};
-        strncpy(result_msg.channel, tool_ctx->session_ctx.channel, sizeof(result_msg.channel) - 1);
-        strncpy(result_msg.chat_id, tool_ctx->session_ctx.chat_id, sizeof(result_msg.chat_id) - 1);
-        
-        if (result == MIMI_OK) {
-            result_msg.content = strdup(output ? output : "Tool executed successfully");
-        } else {
-            char err_buf[512];
-            snprintf(err_buf, sizeof(err_buf), "Tool execution failed: %s", mimi_err_to_name(result));
-            result_msg.content = strdup(err_buf);
+    if (agent_ctx) {
+        llm_trace_event_kv(agent_ctx->trace_id, "tool_result",
+                           "tool_name", tool_name ? tool_name : "",
+                           "result", mimi_err_to_name(result),
+                           "output", content ? content : "",
+                           "confirmed", "true");
+
+        {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "%s **工具执行完成**\n\n- 工具：`%.64s`\n- 结果：`%s`",
+                     (result == MIMI_OK) ? "✅" : "❌",
+                     tool_name ? tool_name : "tool",
+                     mimi_err_to_name(result));
+            agent_send_status(agent_ctx->channel, agent_ctx->chat_id,
+                              MIMI_STATUS_PHASE_PROGRESS, "agent_turn", buf);
         }
-        
-        if (result_msg.content) {
-            /* Persist tool result as assistant message to the session. */
-            mimi_err_t se = session_append(result_msg.channel, result_msg.chat_id, "assistant", result_msg.content);
-            if (se != MIMI_OK) {
-                MIMI_LOGW(TAG, "Session append(assistant tool result) failed for %s:%s: %s",
-                          result_msg.channel, result_msg.chat_id, mimi_err_to_name(se));
-            }
-            message_bus_push_outbound(&result_msg);
+
+        cJSON *result_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(result_msg, "role", "tool");
+        cJSON_AddStringToObject(result_msg, "tool_call_id", tool_ctx->tool_call_id[0] ? tool_ctx->tool_call_id : "");
+        cJSON_AddStringToObject(result_msg, "content", content);
+        cJSON_AddItemToArray(agent_ctx->messages, result_msg);
+
+        char *result_json = cJSON_PrintUnformatted(result_msg);
+        if (result_json) {
+            MIMI_LOGI(TAG, "Tool result: %s", result_json);
+            free(result_json);
         }
+
     }
 
-    /* Mark confirmation lifecycle completed only after execution completes. This prevents
-     * agent slots from being reused while tool callbacks still reference agent_ctx. */
+    tool_call_ud_t *ud = (tool_call_ud_t *)tool_ctx->user_data;
+    tool_async_ctx_t *async_ctx = ud ? ud->parent : NULL;
+    bool done = true;
+    bool should_start_next = false;
+    if (async_ctx && async_ctx->mutex) {
+        mimi_mutex_lock(async_ctx->mutex);
+    }
+    if (async_ctx && async_ctx->ctx && async_ctx->ctx->in_progress) {
+        async_ctx->completed_calls++;
+        done = async_ctx->completed_calls >= async_ctx->total_calls;
+        should_start_next = done && !async_ctx->next_llm_started;
+        if (should_start_next) {
+            async_ctx->next_llm_started = true;
+            async_ctx->ctx->iteration++;
+        }
+    }
+    if (async_ctx && async_ctx->mutex) {
+        mimi_mutex_unlock(async_ctx->mutex);
+    }
+
+    if (ud && !done) {
+        start_next_tool(async_ctx, ud->tool_index + 1, ud->resp, ud->session_ctx);
+    }
+
+    if (ud) {
+        free(ud->tool_call_id);
+        free(ud);
+        tool_ctx->user_data = NULL;
+    }
+
+    if (should_start_next && async_ctx) {
+        agent_start_main_llm_async(async_ctx->ctx);
+        if (async_ctx->mutex) {
+            mimi_mutex_destroy(async_ctx->mutex);
+        }
+        free(async_ctx);
+    }
+
     tool_ctx->waiting_for_confirmation = false;
-
-    /* Release the agent request slot now that the confirmed tool finished. */
-    agent_request_finish((agent_request_ctx_t *)tool_ctx->agent_ctx);
-    
-    /* Destroy tool context */
     tool_call_context_destroy(tool_ctx);
 }
 
 static mimi_err_t send_tool_confirmation_request(tool_call_context_t *tool_ctx);
+
+static void start_next_tool(tool_async_ctx_t *async_ctx, int next_index, const llm_response_t *resp, mimi_session_ctx_t *session_ctx);
+
+static void start_next_tool(tool_async_ctx_t *async_ctx, int next_index, const llm_response_t *resp, mimi_session_ctx_t *session_ctx)
+{
+    if (!async_ctx || !resp || next_index >= resp->call_count) {
+        return;
+    }
+
+    for (int i = next_index; i < resp->call_count; i++) {
+        const llm_tool_call_t *call = &resp->calls[i];
+        bool requires_confirmation = tool_registry_requires_confirmation(call->name);
+        bool always_allowed = tool_call_context_is_always_allowed(call->name);
+        const char *tool_input = (call->input && call->input[0]) ? call->input : "{}";
+        char *patched_input = patch_tool_input_with_context(call, async_ctx->ctx->channel, async_ctx->ctx->chat_id);
+
+        MIMI_LOGI(TAG, "Async tool execution: %s, input='%s'", call->name, tool_input);
+
+        {
+            char itbuf[32];
+            snprintf(itbuf, sizeof(itbuf), "%d", async_ctx->ctx->iteration + 1);
+            llm_trace_event_kv(async_ctx->ctx->trace_id, "tool_start",
+                               "tool_name", call->name[0] ? call->name : "",
+                               "tool_call_id", call->id[0] ? call->id : "",
+                               "input", patched_input ? patched_input : tool_input,
+                               "iteration", itbuf);
+        }
+
+        tool_call_ud_t *ud = (tool_call_ud_t *)calloc(1, sizeof(*ud));
+        if (!ud) {
+            MIMI_LOGE(TAG, "Failed to allocate tool call user data");
+            free(patched_input);
+            continue;
+        }
+        ud->parent = async_ctx;
+        ud->tool_call_id = strdup(call->id[0] ? call->id : "");
+        ud->tool_index = i;
+        ud->resp = resp;
+        ud->session_ctx = session_ctx;
+        if (!ud->tool_call_id) {
+            free(ud);
+            free(patched_input);
+            continue;
+        }
+
+        if (requires_confirmation && !always_allowed) {
+            tool_call_context_t *tool_ctx = tool_call_context_create(
+                async_ctx->ctx,
+                call->name,
+                call->id[0] ? call->id : "",
+                patched_input ? patched_input : tool_input,
+                true
+            );
+            if (!tool_ctx) {
+                MIMI_LOGE(TAG, "Failed to create confirmation context for tool: %s", call->name);
+                free(ud->tool_call_id);
+                free(ud);
+                free(patched_input);
+                continue;
+            }
+
+            tool_ctx->async_ctx = async_ctx;
+            tool_ctx->user_data = ud;
+
+            mimi_err_t err = send_tool_confirmation_request(tool_ctx);
+            if (err != MIMI_OK) {
+                MIMI_LOGE(TAG, "Failed to send confirmation request: %s", mimi_err_to_name(err));
+                free(ud->tool_call_id);
+                free(ud);
+                tool_ctx->user_data = NULL;
+                tool_call_context_destroy(tool_ctx);
+                free(patched_input);
+                continue;
+            }
+        } else {
+            tool_registry_execute_async(call->name, patched_input ? patched_input : tool_input,
+                                       session_ctx, tool_async_callback, ud);
+        }
+        free(patched_input);
+        return;
+    }
+}
 
 static void start_async_tools(agent_request_ctx_t *ctx, const llm_response_t *resp)
 {
@@ -545,40 +625,27 @@ static void start_async_tools(agent_request_ctx_t *ctx, const llm_response_t *re
         return;
     }
 
-    /* First pass: determine how many tools will execute immediately without
-     * confirmation. We only need an async_ctx when at least one tool is
-     * executed directly, since confirmed tools currently do not feed back
-     * into the tool-iteration loop. */
-    int immediate_calls = 0;
-    for (int i = 0; i < resp->call_count; i++) {
-        const llm_tool_call_t *call = &resp->calls[i];
-        bool requires_confirmation = tool_registry_requires_confirmation(call->name);
-        bool always_allowed = tool_call_context_is_always_allowed(call->name);
-        if (!requires_confirmation || always_allowed) {
-            immediate_calls++;
-        }
+    if (resp->call_count <= 0) {
+        MIMI_LOGW(TAG, "No tool calls in start_async_tools");
+        return;
     }
 
-    tool_async_ctx_t *async_ctx = NULL;
-    if (immediate_calls > 0) {
-        async_ctx = (tool_async_ctx_t *)malloc(sizeof(tool_async_ctx_t));
-        if (!async_ctx) {
-            MIMI_LOGE(TAG, "Failed to allocate async tool context");
-            return;
-        }
+    tool_async_ctx_t *async_ctx = (tool_async_ctx_t *)malloc(sizeof(tool_async_ctx_t));
+    if (!async_ctx) {
+        MIMI_LOGE(TAG, "Failed to allocate async tool context");
+        return;
+    }
+    async_ctx->ctx = ctx;
+    async_ctx->total_calls = resp->call_count;
+    async_ctx->completed_calls = 0;
+    async_ctx->mutex = NULL;
+    async_ctx->next_llm_started = false;
 
-        async_ctx->ctx = ctx;
-        async_ctx->total_calls = immediate_calls;
-        async_ctx->completed_calls = 0;
-        async_ctx->mutex = NULL;
-        async_ctx->next_llm_started = false;
-
-        mimi_err_t err = mimi_mutex_create(&async_ctx->mutex);
-        if (err != MIMI_OK) {
-            MIMI_LOGE(TAG, "Failed to create mutex: %s", mimi_err_to_name(err));
-            free(async_ctx);
-            return;
-        }
+    mimi_err_t err = mimi_mutex_create(&async_ctx->mutex);
+    if (err != MIMI_OK) {
+        MIMI_LOGE(TAG, "Failed to create mutex: %s", mimi_err_to_name(err));
+        free(async_ctx);
+        return;
     }
 
     mimi_session_ctx_t session_ctx = {0};
@@ -588,142 +655,7 @@ static void start_async_tools(agent_request_ctx_t *ctx, const llm_response_t *re
     strncpy(temp_msg.chat_id, ctx->chat_id, sizeof(temp_msg.chat_id) - 1);
     session_ctx_from_msg(&temp_msg, &session_ctx);
     
-    for (int i = 0; i < resp->call_count; i++) {
-        const llm_tool_call_t *call = &resp->calls[i];
-        const char *tool_input = (call->input && call->input[0]) ? call->input : "{}";
-        char *patched_input = patch_tool_input_with_context(call, ctx->channel, ctx->chat_id);
-
-        MIMI_LOGI(TAG, "Async tool execution: %s, input='%s'", call->name, tool_input);
-
-        {
-            char itbuf[32];
-            snprintf(itbuf, sizeof(itbuf), "%d", ctx->iteration + 1);
-            llm_trace_event_kv(ctx->trace_id, "tool_start",
-                               "tool_name", call->name[0] ? call->name : "",
-                               "tool_call_id", call->id[0] ? call->id : "",
-                               "input", patched_input ? patched_input : tool_input,
-                               "iteration", itbuf);
-        }
-
-        /* Check if tool requires confirmation */
-        bool requires_confirmation = tool_registry_requires_confirmation(call->name);
-        
-        /* Check if tool is already marked as always allowed */
-        bool always_allowed = tool_call_context_is_always_allowed(call->name);
-
-        if (requires_confirmation && !always_allowed) {
-            /* Create tool call context for confirmation */
-            tool_call_context_t *tool_ctx = tool_call_context_create(
-                ctx,
-                call->name,
-                call->id[0] ? call->id : "",
-                patched_input ? patched_input : tool_input,
-                true
-            );
-            if (tool_ctx) {
-                /* Send confirmation request */
-                mimi_err_t err = send_tool_confirmation_request(tool_ctx);
-                if (err != MIMI_OK) {
-                    MIMI_LOGE(TAG, "Failed to send confirmation request: %s", mimi_err_to_name(err));
-                    tool_call_context_destroy(tool_ctx);
-                }
-            } else {
-                /* IMPORTANT: do not silently drop tools.
-                 * If we can't allocate a confirmation context, provide a clear signal
-                 * in logs and in the conversation history so the LLM can adapt next turn
-                 * (e.g., retry tools sequentially).
-                 */
-                int active = tool_call_context_get_active_count();
-                int pending = tool_call_context_get_pending_count();
-                const char *tool_name = call->name[0] ? call->name : "tool";
-                const char *tool_call_id = call->id[0] ? call->id : "";
-
-                MIMI_LOGE(TAG,
-                          "Tool scheduling failed (no confirmation context slots): tool=%s tool_call_id=%s active=%d pending=%d max=%d",
-                          tool_name, tool_call_id, active, pending, TOOL_CALL_MAX_CONTEXTS);
-
-                char active_buf[16];
-                snprintf(active_buf, sizeof(active_buf), "%d", active);
-                llm_trace_event_kv(ctx->trace_id, "tool_schedule_failed",
-                                   "tool_name", tool_name,
-                                   "tool_call_id", tool_call_id,
-                                   "reason", "no_confirmation_context_slots",
-                                   "active", active_buf);
-
-                char msgbuf[512];
-                snprintf(msgbuf, sizeof(msgbuf),
-                         "Tool scheduling failed: `%s` (tool_call_id=%s). "
-                         "Reason: no available confirmation-context slots (active=%d, pending=%d, max=%d). "
-                         "Please retry; the assistant should call tools sequentially.",
-                         tool_name, tool_call_id[0] ? tool_call_id : "(empty)",
-                         active, pending, TOOL_CALL_MAX_CONTEXTS);
-
-                /* Persist for LLM visibility on subsequent turns */
-                mimi_err_t se = session_append(ctx->channel, ctx->chat_id, "assistant", msgbuf);
-                if (se != MIMI_OK) {
-                    MIMI_LOGW(TAG, "Session append(schedule failure) failed for %s:%s: %s",
-                              ctx->channel, ctx->chat_id, mimi_err_to_name(se));
-                }
-
-                /* Also notify user immediately */
-                mimi_msg_t out = {0};
-                strncpy(out.channel, ctx->channel, sizeof(out.channel) - 1);
-                strncpy(out.chat_id, ctx->chat_id, sizeof(out.chat_id) - 1);
-                out.type = MIMI_MSG_TYPE_TEXT;
-                out.content = strdup(msgbuf);
-                if (out.content) {
-                    if (message_bus_push_outbound(&out) != MIMI_OK) {
-                        free(out.content);
-                    }
-                }
-            }
-            /* For tools requiring confirmation, we don't increment completed_calls here
-             * because the confirmation process will handle it asynchronously */
-        } else {
-            /* Execute tool directly without confirmation */
-            if (!async_ctx) {
-                /* Should not happen because immediate_calls would be zero. */
-                MIMI_LOGE(TAG, "Async context is NULL for direct tool execution");
-                free(patched_input);
-                continue;
-            }
-
-            tool_call_ud_t *ud = (tool_call_ud_t *)calloc(1, sizeof(*ud));
-            if (!ud) {
-                MIMI_LOGE(TAG, "Failed to allocate tool call user data");
-                free(patched_input);
-                continue;
-            }
-            ud->parent = async_ctx;
-            ud->tool_call_id = strdup(call->id[0] ? call->id : "");
-            if (!ud->tool_call_id) {
-                free(ud);
-                free(patched_input);
-                continue;
-            }
-
-            tool_registry_execute_async(call->name, patched_input ? patched_input : tool_input,
-                                       &session_ctx, tool_async_callback, ud);
-        }
-        free(patched_input);
-    }
-    
-    /* If all tools require confirmation, we need to handle the async_ctx cleanup differently */
-    bool all_requires_confirmation = true;
-    for (int i = 0; i < resp->call_count; i++) {
-        const llm_tool_call_t *call = &resp->calls[i];
-        if (!tool_registry_requires_confirmation(call->name)) {
-            all_requires_confirmation = false;
-            break;
-        }
-    }
-    
-    if (all_requires_confirmation) {
-        /* All tools require confirmation, but we should NOT free async_ctx now
-         * because the agent context is still in use by tool confirmation requests
-         * The async_ctx will be freed when the last tool confirmation completes */
-        MIMI_LOGD(TAG, "All tools require confirmation, keeping async_ctx alive");
-    }
+    start_next_tool(async_ctx, 0, resp, &session_ctx);
 }
 
 static void agent_llm_callback(mimi_err_t result, llm_response_t *resp, void *user_data);

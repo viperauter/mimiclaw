@@ -131,6 +131,16 @@ mimi_err_t mimi_fs_workspace_get_current(char *name_out, size_t name_out_len);
  */
 mimi_err_t mimi_fs_set_base(const char *base_dir);
 
+/**
+ * Resolve a virtual VFS path into a real filesystem path using current workspace.
+ *
+ * @param virt_path Virtual path (relative or absolute)
+ * @param out_real_path Output buffer for resolved real path
+ * @param size Output buffer size
+ * @return MIMI_OK on success, error code otherwise
+ */
+mimi_err_t mimi_fs_resolve_path(const char *virt_path, char *out_real_path, size_t size);
+
 /* ==========================================================================
  * Path Mapping (Mount Points)
  *

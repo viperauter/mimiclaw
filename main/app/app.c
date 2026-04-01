@@ -180,6 +180,13 @@ mimi_err_t app_init(const char *config_path,
         mimi_log_setup(log_level ? log_level : (log_level_cfg && log_level_cfg[0] ? log_level_cfg : "info"));
     }
 
+    /* Switch VFS base to configured workspace (POSIX host). */
+    if (workspace && workspace[0]) {
+        (void)mimi_fs_mkdir_p_direct(workspace);
+        (void)mimi_fs_set_base(workspace);
+        MIMI_LOGI("app", "Workspace base set to: %s", workspace);
+    }
+
     /* File logging before bootstrap and routine MIMI_LOG lines so toStderr is honored. */
     if (want_log_output && (log_to_file_cfg || (log_file_path && log_file_path[0]))) {
         char resolved_log_path[1024];

@@ -419,7 +419,65 @@ static void cli_do_completion(cli_terminal_t *term)
         /* Redraw once */
         cli_redraw_current_line(term);
     } else {
-        /* Multiple matches: display them */
+        /* Multiple matches: first try to extend by longest common prefix */
+        size_t common_len = strlen(completions[0]);
+        for (int i = 1; i < count; i++) {
+            size_t j = 0;
+            size_t cur_len = strlen(completions[i]);
+            size_t max_cmp = (common_len < cur_len) ? common_len : cur_len;
+            while (j < max_cmp && completions[0][j] == completions[i][j]) {
+                j++;
+            }
+            common_len = j;
+            if (common_len == 0) {
+                break;
+            }
+        }
+
+        size_t prefix_len = strlen(prefix);
+        if (common_len > prefix_len) {
+            const char *match = completions[0];
+            char new_line[CLI_MAX_LINE_LEN];
+            int new_len = 0;
+
+            /* Keep everything before word_start */
+            if (word_start > 0) {
+                memcpy(new_line, term->line, word_start);
+                new_len = word_start;
+            }
+
+            /* Add '/' prefix if it's a command */
+            if (is_command) {
+                new_line[new_len++] = '/';
+            }
+
+            /* Add only the common prefix (no trailing space for multi-match) */
+            if ((size_t)new_len + common_len < CLI_MAX_LINE_LEN - 1) {
+                memcpy(&new_line[new_len], match, common_len);
+                new_len += (int)common_len;
+            } else {
+                /* Not enough room, keep current line */
+                goto completion_cleanup;
+            }
+
+            /* Keep everything after cursor (rest of line) */
+            int tail_len = term->len - term->cursor;
+            if (tail_len > 0 && new_len + tail_len < CLI_MAX_LINE_LEN - 1) {
+                memcpy(&new_line[new_len], &term->line[term->cursor], tail_len);
+                new_len += tail_len;
+            }
+
+            new_line[new_len] = '\0';
+
+            /* Update line and cursor (cursor after completed common prefix) */
+            strcpy(term->line, new_line);
+            term->len = new_len;
+            term->cursor = new_len - tail_len;
+            cli_redraw_current_line(term);
+            goto completion_cleanup;
+        }
+
+        /* Multiple matches without further common prefix: display them */
         cli_term_output(term, "\n");
         for (int i = 0; i < count; i++) {
             if (is_command) {
@@ -433,7 +491,8 @@ static void cli_do_completion(cli_terminal_t *term)
         /* Redraw prompt and current line */
         cli_redraw_current_line(term);
     }
-    
+
+completion_cleanup:
     /* Free completions */
     for (int i = 0; i < count; i++) {
         free(completions[i]);
